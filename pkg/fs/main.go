@@ -1,4 +1,4 @@
-package main
+package fs
 
 import (
 	"context"
@@ -81,21 +81,4 @@ func (f *File) Write(ctx context.Context, req *fuse.WriteRequest, res *fuse.Writ
 	f.data = append(f.data[0:req.Offset], req.Data...)
 	res.Size = len(req.Data)
 	return nil
-}
-
-func main() {
-	c, err := fuse.Mount(
-		"/tmp/test",
-		fuse.FSName("helloworld"),
-		fuse.Subtype("hellofs"),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer c.Close()
-
-	err = fs.Serve(c, NewFS())
-	if err != nil {
-		log.Fatal(err)
-	}
 }

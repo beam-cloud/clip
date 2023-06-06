@@ -2,7 +2,7 @@
 FROM golang:latest
 
 # Set the Current Working Directory inside the container
-WORKDIR /app
+WORKDIR /workspace
 
 # Install necessary packages for FUSE
 RUN apt-get update && \
@@ -16,13 +16,10 @@ COPY go.mod go.sum ./
 # Download all dependencies
 RUN go mod download
 
-# Copy the source from the current directory to the Working Directory inside the container
 COPY . .
 
-# Build the application
-RUN go build -o main .
+RUN go build -o /workspace/bin/cfs /workspace/cmd/fs/main.go
 
 RUN mkdir -p /tmp/test
 
-# Command to run the application
-CMD ["./main"]
+CMD ["tail", "-f", "/dev/null"]

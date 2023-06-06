@@ -1,0 +1,19 @@
+dev:
+  clip:
+    autocreate: true
+    image: okteto.dev/beam-clip:latest
+    command: ["/workspace/bin/hotreload.sh"]
+    sync:
+      - ./:/workspace
+    environment:
+      DEFAULT_NAMESPACE: ${OKTETO_NAMESPACE}
+      BUILD_COMMAND: "go build -o /workspace/bin/cfs /workspace/cmd/fs/main.go"
+      BUILD_BINARY_PATH: "/workspace/bin/cfs"
+    securityContext:
+      privileged: true
+      runAsUser: 0
+      runAsGroup: 0
+      fsGroup: 0
+      capabilities:
+        add:
+          - SYS_CAP_ALL

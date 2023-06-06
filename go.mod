@@ -1,4 +1,4 @@
-module github.com/beam-cloud/redcron
+module github.com/beam-cloud/clip
 
 go 1.20
 
