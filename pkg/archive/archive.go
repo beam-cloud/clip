@@ -35,23 +35,6 @@ func (cfs *ClipArchive) Get(path string) *ClipNode {
 	return item.(*ClipNode)
 }
 
-func (cfs *ClipArchive) Dump(filename string) error {
-	file, err := os.Create(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	var nodes []*ClipNode
-	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
-		nodes = append(nodes, a.(*ClipNode))
-		return true
-	})
-
-	enc := gob.NewEncoder(file)
-	return enc.Encode(nodes)
-}
-
 func (cfs *ClipArchive) Load(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -70,6 +53,23 @@ func (cfs *ClipArchive) Load(filename string) error {
 	}
 
 	return nil
+}
+
+func (cfs *ClipArchive) Dump(filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var nodes []*ClipNode
+	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
+		nodes = append(nodes, a.(*ClipNode))
+		return true
+	})
+
+	enc := gob.NewEncoder(file)
+	return enc.Encode(nodes)
 }
 
 func (cfs *ClipArchive) PrintNodes() {

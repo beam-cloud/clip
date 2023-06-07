@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -15,11 +16,13 @@ func main() {
 		return
 	}
 
-	cf, err := archiver.Create("/images/748973e7feb2c29f")
+	start := time.Now()
+	cf, err := archiver.Create("/images/748973e7feb2c29f", "test.clip")
 	if err != nil {
 		log.Fatalf("unable to create archive: %v", err)
 	}
 
+	log.Println("Archived image, took:", time.Since(start))
 	log.Printf("created new clip: <%+v>", cf)
 
 	val := cf.Get("/rootfs/var/mail")

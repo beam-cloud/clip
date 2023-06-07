@@ -20,11 +20,11 @@ func NewClipArchiver() (*ClipArchiver, error) {
 	}, nil
 }
 
-func (ca *ClipArchiver) Create(targetPath string) (*ClipArchive, error) {
+func (ca *ClipArchiver) Create(sourcePath string, outputPath string) (*ClipArchive, error) {
 	cf := NewClipArchive()
 	ca.cf = cf
 
-	err := ca.populateIndex(targetPath)
+	err := ca.populateIndex(sourcePath)
 	if err != nil {
 		return nil, err
 	}
@@ -32,8 +32,8 @@ func (ca *ClipArchiver) Create(targetPath string) (*ClipArchive, error) {
 	return cf, nil
 }
 
-func (ca *ClipArchiver) populateIndex(targetPath string) error {
-	err := godirwalk.Walk(targetPath, &godirwalk.Options{
+func (ca *ClipArchiver) populateIndex(sourcePath string) error {
+	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
 			var target string = ""
 			var nodeType ClipNodeType
@@ -75,7 +75,7 @@ func (ca *ClipArchiver) populateIndex(targetPath string) error {
 				// Flags:     fuse.AttrFlags{}, // Assuming no specific flags at this point
 			}
 
-			ca.cf.Index.Set(&ClipNode{Path: strings.TrimPrefix(path, targetPath), NodeType: nodeType, Attr: attr, Target: target})
+			ca.cf.Index.Set(&ClipNode{Path: strings.TrimPrefix(path, sourcePath), NodeType: nodeType, Attr: attr, Target: target})
 
 			return nil
 		},
@@ -83,4 +83,9 @@ func (ca *ClipArchiver) populateIndex(targetPath string) error {
 	})
 
 	return err
+}
+
+func (ca *ClipArchiver) writeHeader() error {
+
+	return nil
 }
