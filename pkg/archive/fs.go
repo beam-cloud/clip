@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	gob.Register(&FsNode{})
+	gob.Register(&ClipFSNode{})
 }
 
 type NodeType string
@@ -20,39 +20,39 @@ const (
 	SymLinkNode NodeType = "symlink"
 )
 
-type FsNode struct {
+type ClipFSNode struct {
 	NodeType NodeType
 	Path     string
 	Size     int64  // For FileNode, could be 0 for DirNode and SymLinkNode
 	Target   string // For SymLinkNode, empty for DirNode and FileNode
 }
 
-type FileSystem struct {
-	tree *btree.BTree
+type ClipFS struct {
+	Index *btree.BTree
 }
 
-func NewFileSystem() *FileSystem {
+func NewClipFS() *ClipFS {
 	compare := func(a, b interface{}) bool {
-		return a.(*FsNode).Path < b.(*FsNode).Path
+		return a.(*ClipFSNode).Path < b.(*ClipFSNode).Path
 	}
 
-	return &FileSystem{tree: btree.New(compare)}
+	return &ClipFS{Index: btree.New(compare)}
 }
 
-func (fs *FileSystem) Insert(node *FsNode) {
-	fs.tree.Set(node)
+func (cfs *ClipFS) Insert(node *ClipFSNode) {
+	cfs.Index.Set(node)
 }
 
-func (fs *FileSystem) DumpToFile(filename string) error {
+func (cfs *ClipFS) DumpToFile(filename string) error {
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	var nodes []*FsNode
-	fs.tree.Ascend(fs.tree.Min(), func(a interface{}) bool {
-		nodes = append(nodes, a.(*FsNode))
+	var nodes []*ClipFSNode
+	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
+		nodes = append(nodes, a.(*ClipFSNode))
 		return true
 	})
 
@@ -60,7 +60,7 @@ func (fs *FileSystem) DumpToFile(filename string) error {
 	return enc.Encode(nodes)
 }
 
-func (fs *FileSystem) LoadFromFile(filename string) error {
+func (cfs *ClipFS) LoadFromFile(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -68,13 +68,13 @@ func (fs *FileSystem) LoadFromFile(filename string) error {
 	defer file.Close()
 
 	dec := gob.NewDecoder(file)
-	var nodes []*FsNode
+	var nodes []*ClipFSNode
 	if err := dec.Decode(&nodes); err != nil {
 		return err
 	}
 
 	for _, node := range nodes {
-		fs.tree.Set(node)
+		cfs.Index.Set(node)
 	}
 
 	return nil
@@ -82,9 +82,9 @@ func (fs *FileSystem) LoadFromFile(filename string) error {
 
 var count int = 0
 
-func (fs *FileSystem) PrintNodes() {
-	fs.tree.Ascend(fs.tree.Min(), func(a interface{}) bool {
-		node := a.(*FsNode)
+func (cfs *ClipFS) PrintNodes() {
+	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
+		node := a.(*ClipFSNode)
 		count += 1
 		fmt.Printf("Path: %s, NodeType: %s, count: %d\n", node.Path, node.NodeType, count)
 		return true

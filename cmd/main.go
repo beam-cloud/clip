@@ -2,34 +2,22 @@ package main
 
 import (
 	"log"
-	"time"
 
 	archive "github.com/beam-cloud/clip/pkg/archive"
 )
 
 func main() {
-	fs := archive.NewFileSystem()
-	log.Println("archiving")
-	start := time.Now()
-	archive.PopulateFromDirectory(fs, "/images/748973e7feb2c29f")
-
-	duration := time.Since(start)
-	log.Printf("done, took: %v", duration)
-
-	if err := fs.DumpToFile("filesystem.gob"); err != nil {
-		log.Fatal(err)
+	archiver, err := archive.NewClipArchiver()
+	if err != nil {
+		return
 	}
 
-	log.Println("loading fs from disk")
-	start = time.Now()
-	fs2 := archive.NewFileSystem()
-	if err := fs2.LoadFromFile("filesystem.gob"); err != nil {
-		log.Fatal(err)
+	cfs, err := archiver.CreateFromDirectory("/images/748973e7feb2c29f")
+	if err != nil {
+		log.Fatalf("unable to create archive: %v", err)
 	}
-	duration = time.Since(start)
-	log.Printf("done, took: %v", duration)
 
-	// fs2.PrintNodes()
+	cfs.PrintNodes()
 
 	// c, err := fuse.Mount(
 	// 	"/tmp/test",
