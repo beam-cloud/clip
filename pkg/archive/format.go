@@ -15,7 +15,6 @@ type ClipArchiveFile struct {
 }
 
 type Block struct {
-	filePath  string
 	size      uint16
 	buffer    []byte
 	blockType BlockType

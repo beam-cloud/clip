@@ -11,28 +11,43 @@ import (
 )
 
 type ClipArchiver struct {
-	cf *ClipArchive
+	archive *ClipArchive
 }
 
 func NewClipArchiver() (*ClipArchiver, error) {
 	return &ClipArchiver{
-		cf: nil,
+		archive: nil,
 	}, nil
 }
 
-func (ca *ClipArchiver) Create(sourcePath string, outputPath string) (*ClipArchive, error) {
-	cf := NewClipArchive()
-	ca.cf = cf
+func (a *ClipArchiver) Create(sourcePath string, outputPath string) (*ClipArchive, error) {
+	a.archive = NewClipArchive()
 
-	err := ca.populateIndex(sourcePath)
+	err := a.populateIndex(sourcePath)
 	if err != nil {
 		return nil, err
 	}
 
-	return cf, nil
+	err = a.writeHeader()
+	if err != nil {
+		return nil, err
+	}
+
+	err = a.writeIndex()
+	if err != nil {
+		return nil, err
+	}
+
+	err = a.writeFileBlocks()
+	if err != nil {
+		return nil, err
+	}
+
+	return a.archive, nil
 }
 
-func (ca *ClipArchiver) populateIndex(sourcePath string) error {
+// populateIndex creates an index representing the filesystem/folder structure being archived.
+func (a *ClipArchiver) populateIndex(sourcePath string) error {
 	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
 			var target string = ""
@@ -75,7 +90,7 @@ func (ca *ClipArchiver) populateIndex(sourcePath string) error {
 				// Flags:     fuse.AttrFlags{}, // Assuming no specific flags at this point
 			}
 
-			ca.cf.Index.Set(&ClipNode{Path: strings.TrimPrefix(path, sourcePath), NodeType: nodeType, Attr: attr, Target: target})
+			a.archive.Index.Set(&ClipNode{Path: strings.TrimPrefix(path, sourcePath), NodeType: nodeType, Attr: attr, Target: target})
 
 			return nil
 		},
@@ -85,7 +100,14 @@ func (ca *ClipArchiver) populateIndex(sourcePath string) error {
 	return err
 }
 
-func (ca *ClipArchiver) writeHeader() error {
+func (a *ClipArchiver) writeHeader() error {
+	return nil
+}
 
+func (a *ClipArchiver) writeIndex() error {
+	return nil
+}
+
+func (a *ClipArchiver) writeFileBlocks() error {
 	return nil
 }

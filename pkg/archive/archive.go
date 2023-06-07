@@ -13,7 +13,9 @@ func init() {
 }
 
 type ClipArchive struct {
-	Index *btree.BTree
+	Header ClipArchiveHeader
+	Index  *btree.BTree
+	Blocks []Block
 }
 
 func NewClipArchive() *ClipArchive {
