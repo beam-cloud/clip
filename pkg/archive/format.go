@@ -6,14 +6,11 @@ var ClipFileFormatVersion uint8 = 0x01
 type ClipArchiveHeader struct {
 	StartBytes            []byte
 	ClipFileFormatVersion uint8
-	IndexSize             uint32
-	Valid                 bool
+	IndexSize             int
 }
 
 type ClipArchiveBlock struct {
-	size      uint64
-	buffer    []byte
-	blockType BlockType
+	buffer []byte
 }
 
 type BlockType byte

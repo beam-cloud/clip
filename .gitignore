@@ -2,3 +2,4 @@ bin/clip
 tmp/*
 testfs/*
 *.gob
+*.clip
