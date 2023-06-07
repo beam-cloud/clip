@@ -11,7 +11,7 @@ import (
 )
 
 type ClipArchiver struct {
-	cf *ClipFile
+	cf *ClipArchive
 }
 
 func NewClipArchiver() (*ClipArchiver, error) {
@@ -20,8 +20,8 @@ func NewClipArchiver() (*ClipArchiver, error) {
 	}, nil
 }
 
-func (ca *ClipArchiver) CreateFromDirectory(targetPath string) (*ClipFile, error) {
-	cf := NewClipFile()
+func (ca *ClipArchiver) Create(targetPath string) (*ClipArchive, error) {
+	cf := NewClipArchive()
 	ca.cf = cf
 
 	err := ca.populateIndex(targetPath)
@@ -36,7 +36,7 @@ func (ca *ClipArchiver) populateIndex(targetPath string) error {
 	err := godirwalk.Walk(targetPath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
 			var target string = ""
-			var nodeType NodeType
+			var nodeType ClipNodeType
 
 			if de.IsDir() {
 				nodeType = DirNode
@@ -75,7 +75,7 @@ func (ca *ClipArchiver) populateIndex(targetPath string) error {
 				// Flags:     fuse.AttrFlags{}, // Assuming no specific flags at this point
 			}
 
-			ca.cf.Index.Set(&ClipFSNode{Path: strings.TrimPrefix(path, targetPath), NodeType: nodeType, Attr: attr, Target: target})
+			ca.cf.Index.Set(&ClipNode{Path: strings.TrimPrefix(path, targetPath), NodeType: nodeType, Attr: attr, Target: target})
 
 			return nil
 		},

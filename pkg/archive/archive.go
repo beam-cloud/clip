@@ -10,58 +10,58 @@ import (
 )
 
 func init() {
-	gob.Register(&ClipFSNode{})
+	gob.Register(&ClipNode{})
 }
 
-type NodeType string
+type ClipNodeType string
 
 const (
-	DirNode     NodeType = "dir"
-	FileNode    NodeType = "file"
-	SymLinkNode NodeType = "symlink"
+	DirNode     ClipNodeType = "dir"
+	FileNode    ClipNodeType = "file"
+	SymLinkNode ClipNodeType = "symlink"
 )
 
-type ClipFSNode struct {
-	NodeType NodeType
+type ClipNode struct {
+	NodeType ClipNodeType
 	Path     string
 	Attr     fuse.Attr
 	Target   string
 }
 
-type ClipFile struct {
+type ClipArchive struct {
 	Index *btree.BTree
 }
 
-func NewClipFile() *ClipFile {
+func NewClipArchive() *ClipArchive {
 	compare := func(a, b interface{}) bool {
-		return a.(*ClipFSNode).Path < b.(*ClipFSNode).Path
+		return a.(*ClipNode).Path < b.(*ClipNode).Path
 	}
 
-	return &ClipFile{Index: btree.New(compare)}
+	return &ClipArchive{Index: btree.New(compare)}
 }
 
-func (cfs *ClipFile) Insert(node *ClipFSNode) {
+func (cfs *ClipArchive) Insert(node *ClipNode) {
 	cfs.Index.Set(node)
 }
 
-func (cfs *ClipFile) Get(path string) *ClipFSNode {
-	item := cfs.Index.Get(&ClipFSNode{Path: path})
+func (cfs *ClipArchive) Get(path string) *ClipNode {
+	item := cfs.Index.Get(&ClipNode{Path: path})
 	if item == nil {
 		return nil
 	}
-	return item.(*ClipFSNode)
+	return item.(*ClipNode)
 }
 
-func (cfs *ClipFile) Dump(filename string) error {
+func (cfs *ClipArchive) Dump(filename string) error {
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	var nodes []*ClipFSNode
+	var nodes []*ClipNode
 	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
-		nodes = append(nodes, a.(*ClipFSNode))
+		nodes = append(nodes, a.(*ClipNode))
 		return true
 	})
 
@@ -69,7 +69,7 @@ func (cfs *ClipFile) Dump(filename string) error {
 	return enc.Encode(nodes)
 }
 
-func (cfs *ClipFile) Load(filename string) error {
+func (cfs *ClipArchive) Load(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -77,7 +77,7 @@ func (cfs *ClipFile) Load(filename string) error {
 	defer file.Close()
 
 	dec := gob.NewDecoder(file)
-	var nodes []*ClipFSNode
+	var nodes []*ClipNode
 	if err := dec.Decode(&nodes); err != nil {
 		return err
 	}
@@ -91,9 +91,9 @@ func (cfs *ClipFile) Load(filename string) error {
 
 var count int = 0
 
-func (cfs *ClipFile) PrintNodes() {
+func (cfs *ClipArchive) PrintNodes() {
 	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
-		node := a.(*ClipFSNode)
+		node := a.(*ClipNode)
 		count += 1
 		fmt.Printf("Path: %s, NodeType: %s, count: %d\n", node.Path, node.NodeType, count)
 		return true

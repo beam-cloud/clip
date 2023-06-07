@@ -15,12 +15,12 @@ func main() {
 		return
 	}
 
-	cf, err := archiver.CreateFromDirectory("/images/748973e7feb2c29f")
+	cf, err := archiver.Create("/images/748973e7feb2c29f")
 	if err != nil {
 		log.Fatalf("unable to create archive: %v", err)
 	}
 
-	log.Printf("created new clip! <%+v>", cf)
+	log.Printf("created new clip: <%+v>", cf)
 
 	val := cf.Get("/rootfs/var/mail")
 	log.Printf("v: %+v", val)

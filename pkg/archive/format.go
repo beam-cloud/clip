@@ -4,7 +4,7 @@ import "os"
 
 var magic []byte = []byte{0x89, 0x43, 0x4C, 0x49, 0x50, 0x0D, 0x0A, 0x1A, 0x0A}
 
-type ClipFileHeader struct {
+type ClipArchiveHeader struct {
 	Magic []byte
 }
 
