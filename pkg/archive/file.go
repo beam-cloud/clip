@@ -27,23 +27,23 @@ type ClipFSNode struct {
 	Target   string // For SymLinkNode, empty for DirNode and FileNode
 }
 
-type ClipFS struct {
+type ClipFile struct {
 	Index *btree.BTree
 }
 
-func NewClipFS() *ClipFS {
+func NewClipFile() *ClipFile {
 	compare := func(a, b interface{}) bool {
 		return a.(*ClipFSNode).Path < b.(*ClipFSNode).Path
 	}
 
-	return &ClipFS{Index: btree.New(compare)}
+	return &ClipFile{Index: btree.New(compare)}
 }
 
-func (cfs *ClipFS) Insert(node *ClipFSNode) {
+func (cfs *ClipFile) Insert(node *ClipFSNode) {
 	cfs.Index.Set(node)
 }
 
-func (cfs *ClipFS) DumpToFile(filename string) error {
+func (cfs *ClipFile) Dump(filename string) error {
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
@@ -60,7 +60,7 @@ func (cfs *ClipFS) DumpToFile(filename string) error {
 	return enc.Encode(nodes)
 }
 
-func (cfs *ClipFS) LoadFromFile(filename string) error {
+func (cfs *ClipFile) Load(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -82,7 +82,7 @@ func (cfs *ClipFS) LoadFromFile(filename string) error {
 
 var count int = 0
 
-func (cfs *ClipFS) PrintNodes() {
+func (cfs *ClipFile) PrintNodes() {
 	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
 		node := a.(*ClipFSNode)
 		count += 1

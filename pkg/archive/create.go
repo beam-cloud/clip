@@ -13,8 +13,8 @@ func NewClipArchiver() (*ClipArchiver, error) {
 	return &ClipArchiver{}, nil
 }
 
-func (ca *ClipArchiver) CreateFromDirectory(targetPath string) (*ClipFS, error) {
-	cfs := NewClipFS()
+func (ca *ClipArchiver) CreateFromDirectory(targetPath string) (*ClipFile, error) {
+	cf := NewClipFile()
 
 	err := godirwalk.Walk(targetPath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
@@ -27,7 +27,7 @@ func (ca *ClipArchiver) CreateFromDirectory(targetPath string) (*ClipFS, error) 
 				nodeType = FileNode
 			}
 
-			cfs.Index.Set(&ClipFSNode{Path: strings.TrimPrefix(path, targetPath), NodeType: nodeType})
+			cf.Index.Set(&ClipFSNode{Path: strings.TrimPrefix(path, targetPath), NodeType: nodeType})
 
 			return nil
 		},
@@ -38,5 +38,5 @@ func (ca *ClipArchiver) CreateFromDirectory(targetPath string) (*ClipFS, error) 
 		return nil, err
 	}
 
-	return cfs, nil
+	return cf, nil
 }

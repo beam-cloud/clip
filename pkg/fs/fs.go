@@ -1,4 +1,4 @@
-package mount
+package fs
 
 import (
 	"context"
