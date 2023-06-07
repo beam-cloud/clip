@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"bazil.org/fuse"
 	"github.com/tidwall/btree"
 )
 
@@ -23,8 +24,8 @@ const (
 type ClipFSNode struct {
 	NodeType NodeType
 	Path     string
-	Size     int64  // For FileNode, could be 0 for DirNode and SymLinkNode
-	Target   string // For SymLinkNode, empty for DirNode and FileNode
+	Attr     fuse.Attr
+	Target   string
 }
 
 type ClipFile struct {
@@ -43,7 +44,7 @@ func (cfs *ClipFile) Insert(node *ClipFSNode) {
 	cfs.Index.Set(node)
 }
 
-func (cfs *ClipFile) GetNode(path string) *ClipFSNode {
+func (cfs *ClipFile) Get(path string) *ClipFSNode {
 	item := cfs.Index.Get(&ClipFSNode{Path: path})
 	if item == nil {
 		return nil

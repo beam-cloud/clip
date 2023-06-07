@@ -20,9 +20,10 @@ func main() {
 		log.Fatalf("unable to create archive: %v", err)
 	}
 
-	log.Printf("created new clip: <%+v>", cf)
+	log.Printf("created new clip! <%+v>", cf)
 
-	// cfs.PrintNodes()
+	val := cf.Get("/rootfs/var/mail")
+	log.Printf("v: %+v", val)
 
 	c, err := fuse.Mount(
 		"/tmp/test",
