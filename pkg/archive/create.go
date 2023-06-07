@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"log"
 	"strings"
 
 	"github.com/karrick/godirwalk"
@@ -37,6 +38,9 @@ func (ca *ClipArchiver) CreateFromDirectory(targetPath string) (*ClipFile, error
 	if err != nil {
 		return nil, err
 	}
+
+	val := cf.GetNode("/rootfs/var/mail")
+	log.Printf("v: %+v", val)
 
 	return cf, nil
 }

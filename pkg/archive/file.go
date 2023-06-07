@@ -43,6 +43,14 @@ func (cfs *ClipFile) Insert(node *ClipFSNode) {
 	cfs.Index.Set(node)
 }
 
+func (cfs *ClipFile) GetNode(path string) *ClipFSNode {
+	item := cfs.Index.Get(&ClipFSNode{Path: path})
+	if item == nil {
+		return nil
+	}
+	return item.(*ClipFSNode)
+}
+
 func (cfs *ClipFile) Dump(filename string) error {
 	file, err := os.Create(filename)
 	if err != nil {
