@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clip
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: beam-clip
+  template:
+    metadata:
+      labels:
+        app: beam-clip
+    spec:
+      containers:
+      - name: beam-clip-container
+        image: okteto.dev/beam-clip:latest
+        securityContext:
+          privileged: true

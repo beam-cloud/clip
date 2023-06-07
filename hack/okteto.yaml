@@ -1,0 +1,10 @@
+dev:
+  clip:
+    image: okteto.dev/beam-clip:latest
+    command: ["/workspace/bin/hotreload.sh"]
+    sync:
+      - ../:/workspace
+    environment:
+      DEFAULT_NAMESPACE: ${OKTETO_NAMESPACE}
+      BUILD_COMMAND: "umount -l /tmp/test; go build -o /workspace/bin/clip /workspace/cmd/main.go"
+      BUILD_BINARY_PATH: "/workspace/bin/clip"

@@ -23,6 +23,7 @@ func NewFS() *FS {
 
 type File struct {
 	data []byte
+	link string
 	lock sync.Mutex
 }
 
@@ -49,14 +50,28 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	return nil, fuse.ENOENT
 }
 
+func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
+	d.fs.lock.Lock()
+	defer d.fs.lock.Unlock()
+	f := &File{link: req.Target}
+	d.fs.files[req.NewName] = f
+	return f, nil
+}
+
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, res *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
-	log.Printf("creating a file: %s", req.Name)
+	log.Printf("creating a file. <%s> ", req.Name)
 
 	d.fs.lock.Lock()
 	defer d.fs.lock.Unlock()
 	f := &File{}
 	d.fs.files[req.Name] = f
 	return f, f, nil
+}
+
+func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	return f.link, nil
 }
 
 func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
