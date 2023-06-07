@@ -5,27 +5,11 @@ import (
 	"fmt"
 	"os"
 
-	"bazil.org/fuse"
 	"github.com/tidwall/btree"
 )
 
 func init() {
 	gob.Register(&ClipNode{})
-}
-
-type ClipNodeType string
-
-const (
-	DirNode     ClipNodeType = "dir"
-	FileNode    ClipNodeType = "file"
-	SymLinkNode ClipNodeType = "symlink"
-)
-
-type ClipNode struct {
-	NodeType ClipNodeType
-	Path     string
-	Attr     fuse.Attr
-	Target   string
 }
 
 type ClipArchive struct {
@@ -36,7 +20,6 @@ func NewClipArchive() *ClipArchive {
 	compare := func(a, b interface{}) bool {
 		return a.(*ClipNode).Path < b.(*ClipNode).Path
 	}
-
 	return &ClipArchive{Index: btree.New(compare)}
 }
 
@@ -89,13 +72,10 @@ func (cfs *ClipArchive) Load(filename string) error {
 	return nil
 }
 
-var count int = 0
-
 func (cfs *ClipArchive) PrintNodes() {
 	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
 		node := a.(*ClipNode)
-		count += 1
-		fmt.Printf("Path: %s, NodeType: %s, count: %d\n", node.Path, node.NodeType, count)
+		fmt.Printf("Path: %s, NodeType: %s, count: %d\n", node.Path, node.NodeType)
 		return true
 	})
 }
