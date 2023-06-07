@@ -232,6 +232,15 @@ func (ca *ClipArchive) writeBlocks(outFile *os.File) error {
 	return nil
 }
 
+func (ca *ClipArchive) encodeHeader(header *ClipArchiveHeader) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(header); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func (ca *ClipArchive) encodeIndex() ([]byte, error) {
 	var nodes []*ClipNode
 	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
@@ -245,14 +254,5 @@ func (ca *ClipArchive) encodeIndex() ([]byte, error) {
 		return nil, err
 	}
 
-	return buf.Bytes(), nil
-}
-
-func (ca *ClipArchive) encodeHeader(header *ClipArchiveHeader) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	if err := enc.Encode(header); err != nil {
-		return nil, err
-	}
 	return buf.Bytes(), nil
 }
