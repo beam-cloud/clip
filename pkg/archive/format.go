@@ -1,21 +1,17 @@
 package archive
 
-var magic []byte = []byte{0x89, 0x43, 0x4C, 0x49, 0x50, 0x0D, 0x0A, 0x1A, 0x0A}
+var ClipFileStartBytes []byte = []byte{0x89, 0x43, 0x4C, 0x49, 0x50, 0x0D, 0x0A, 0x1A, 0x0A}
+var ClipFileFormatVersion uint8 = 0x01
 
 type ClipArchiveHeader struct {
-	Magic             []byte
-	ClipFormatVersion uint8
-	IndexSize         uint16
+	StartBytes            []byte
+	ClipFileFormatVersion uint8
+	IndexSize             uint32
+	Valid                 bool
 }
 
-type ClipArchiveFile struct {
-	Header ClipArchiveHeader
-	Index  []byte
-	Blocks []Block
-}
-
-type Block struct {
-	size      uint16
+type ClipArchiveBlock struct {
+	size      uint64
 	buffer    []byte
 	blockType BlockType
 }

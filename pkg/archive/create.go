@@ -28,11 +28,6 @@ func (a *ClipArchiver) Create(sourcePath string, outputPath string) (*ClipArchiv
 		return nil, err
 	}
 
-	err = a.writeHeader()
-	if err != nil {
-		return nil, err
-	}
-
 	err = a.writeIndex()
 	if err != nil {
 		return nil, err

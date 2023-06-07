@@ -15,4 +15,6 @@ type ClipNode struct {
 	Path     string
 	Attr     fuse.Attr
 	Target   string
+	Offset   uint64
+	Size     uint64
 }

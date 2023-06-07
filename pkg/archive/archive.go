@@ -15,29 +15,37 @@ func init() {
 type ClipArchive struct {
 	Header ClipArchiveHeader
 	Index  *btree.BTree
-	Blocks []Block
+	Blocks []ClipArchiveBlock
 }
 
 func NewClipArchive() *ClipArchive {
 	compare := func(a, b interface{}) bool {
 		return a.(*ClipNode).Path < b.(*ClipNode).Path
 	}
-	return &ClipArchive{Index: btree.New(compare)}
+	return &ClipArchive{
+		Header: ClipArchiveHeader{
+			StartBytes:            ClipFileStartBytes,
+			ClipFileFormatVersion: ClipFileFormatVersion,
+			IndexSize:             0,
+			Valid:                 false},
+		Index:  btree.New(compare),
+		Blocks: []ClipArchiveBlock{},
+	}
 }
 
-func (cfs *ClipArchive) Insert(node *ClipNode) {
-	cfs.Index.Set(node)
+func (ca *ClipArchive) Insert(node *ClipNode) {
+	ca.Index.Set(node)
 }
 
-func (cfs *ClipArchive) Get(path string) *ClipNode {
-	item := cfs.Index.Get(&ClipNode{Path: path})
+func (ca *ClipArchive) Get(path string) *ClipNode {
+	item := ca.Index.Get(&ClipNode{Path: path})
 	if item == nil {
 		return nil
 	}
 	return item.(*ClipNode)
 }
 
-func (cfs *ClipArchive) Load(filename string) error {
+func (ca *ClipArchive) Load(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -51,13 +59,13 @@ func (cfs *ClipArchive) Load(filename string) error {
 	}
 
 	for _, node := range nodes {
-		cfs.Index.Set(node)
+		ca.Index.Set(node)
 	}
 
 	return nil
 }
 
-func (cfs *ClipArchive) Dump(filename string) error {
+func (ca *ClipArchive) dumpIndex(filename string) error {
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
@@ -65,7 +73,7 @@ func (cfs *ClipArchive) Dump(filename string) error {
 	defer file.Close()
 
 	var nodes []*ClipNode
-	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
+	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
 		nodes = append(nodes, a.(*ClipNode))
 		return true
 	})
@@ -74,8 +82,8 @@ func (cfs *ClipArchive) Dump(filename string) error {
 	return enc.Encode(nodes)
 }
 
-func (cfs *ClipArchive) PrintNodes() {
-	cfs.Index.Ascend(cfs.Index.Min(), func(a interface{}) bool {
+func (ca *ClipArchive) PrintNodes() {
+	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
 		node := a.(*ClipNode)
 		fmt.Printf("Path: %s, NodeType: %s, count: %d\n", node.Path, node.NodeType)
 		return true

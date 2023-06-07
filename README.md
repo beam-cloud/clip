@@ -1,23 +1,41 @@
-# CLIP Filesystem
+# CLIP
 
-CLIP (Compact and Lightweight Information Protocol) is a new file format and filesystem designed to store read-only data in remote storage more efficiently. Its compact design reduces space utilization and speeds up data access, thereby enhancing the overall efficiency of remote data storage and retrieval.
+CLIP (Compact and Lightweight Information Protocol) is a new transparent file format, similar to tar, but designed for efficient storage of read-only data. The primary feature of CLIP is its transparency, enabling direct access to its content without extraction, even over remote storage. CLIP can be mounted as a FUSE filesystem, or can be extracted like a tar file.
 
 ## Features
 
-- **Efficiency**: The CLIP filesystem reduces storage costs by utilizing space more effectively. It is designed to store large amounts of read-only data efficiently.
-- **Read-Only**: The CLIP filesystem is read-only, making it a great choice for archiving data or for situations where data should not be modified after initial storage.
-- **Compactness**: CLIP's unique storage protocol enables it to store data in a more compact form, saving valuable storage space.
+- **Efficiency**: The CLIP file format reduces storage costs by utilizing space more effectively. It is designed to store large amounts of read-only data efficiently.
+- **Transparency**: CLIP files are transparent, which means you do not need to extract them to access their content, even over remote storage.
+- **Mountable**: You can mount a CLIP file and access its content directly using a FUSE filesystem.
+- **Extractable**: CLIP files can be extracted just like tar files, offering you flexibility in data access.
 - **Remote-First**: CLIP is designed with remote storage in mind. It works seamlessly with various cloud storage services and can be easily integrated into existing remote storage workflows.
 
 ## Getting Started
 
 ### Installation
 
-Before you can use CLIP, you need to install it on your system. Use the following command to install:
+Before you can use CLIP, you need to install it on your system:
+
+\`\`\`bash
+go get github.com/beam-cloud/clip
+\`\`\`
 
 ### Usage
 
-Here's a quick example on how you can use CLIP to archive your data:
+Here's a quick example on how you can use CLIP to store your data:
+
+\`\`\`bash
+
+# Create a CLIP file
+
+clip create mydata.clip /path/to/data
+
+# Mount a CLIP file
+
+clip mount mydata.clip /mnt/mydata
+\`\`\`
+
+After running the above commands, the data stored in `mydata.clip` will be accessible under `/mnt/mydata`.
 
 ## Documentation
 
