@@ -3,7 +3,10 @@ package main
 import (
 	"log"
 
+	"bazil.org/fuse"
+	"bazil.org/fuse/fs"
 	archive "github.com/beam-cloud/clip/pkg/archive"
+	mount "github.com/beam-cloud/clip/pkg/mount"
 )
 
 func main() {
@@ -17,21 +20,23 @@ func main() {
 		log.Fatalf("unable to create archive: %v", err)
 	}
 
-	cfs.PrintNodes()
+	log.Printf("created new clipfs: <%+v>", cfs)
 
-	// c, err := fuse.Mount(
-	// 	"/tmp/test",
-	// 	fuse.FSName("helloworld"),
-	// 	fuse.Subtype("hellofs"),
-	// )
+	// cfs.PrintNodes()
 
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer c.Close()
+	c, err := fuse.Mount(
+		"/tmp/test",
+		fuse.FSName("helloworld"),
+		fuse.Subtype("hellofs"),
+	)
 
-	// err = fs.Serve(c, clipfs.NewFS())
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c.Close()
+
+	err = fs.Serve(c, mount.NewFS())
+	if err != nil {
+		log.Fatal(err)
+	}
 }
