@@ -12,7 +12,7 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o /workspace/bin/clip /workspace/cmd/fs/main.go
+RUN go build -o /workspace/bin/clip /workspace/cmd/main.go
 
 RUN mkdir -p /tmp/test
 

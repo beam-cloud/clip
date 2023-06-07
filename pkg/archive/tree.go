@@ -50,8 +50,14 @@ func (fs *FileSystem) DumpToFile(filename string) error {
 	}
 	defer file.Close()
 
+	var nodes []*FsNode
+	fs.tree.Ascend(fs.tree.Min(), func(a interface{}) bool {
+		nodes = append(nodes, a.(*FsNode))
+		return true
+	})
+
 	enc := gob.NewEncoder(file)
-	return enc.Encode(fs.tree)
+	return enc.Encode(nodes)
 }
 
 func (fs *FileSystem) LoadFromFile(filename string) error {
@@ -62,13 +68,25 @@ func (fs *FileSystem) LoadFromFile(filename string) error {
 	defer file.Close()
 
 	dec := gob.NewDecoder(file)
-	return dec.Decode(&fs.tree)
+	var nodes []*FsNode
+	if err := dec.Decode(&nodes); err != nil {
+		return err
+	}
+
+	for _, node := range nodes {
+		fs.tree.Set(node)
+	}
+
+	return nil
 }
+
+var count int = 0
 
 func (fs *FileSystem) PrintNodes() {
 	fs.tree.Ascend(fs.tree.Min(), func(a interface{}) bool {
 		node := a.(*FsNode)
-		fmt.Printf("Path: %s, NodeType: %s\n", node.Path, node.NodeType)
+		count += 1
+		fmt.Printf("Path: %s, NodeType: %s, count: %d\n", node.Path, node.NodeType, count)
 		return true
 	})
 }
