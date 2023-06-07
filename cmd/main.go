@@ -17,15 +17,17 @@ func main() {
 	}
 
 	start := time.Now()
-	cf, err := archiver.Create("/images/748973e7feb2c29f", "test.clip")
+	ca, err := archiver.Create("/images/748973e7feb2c29f", "test.clip")
 	if err != nil {
 		log.Fatalf("unable to create archive: %v", err)
 	}
 
-	log.Println("Archived image, took:", time.Since(start))
-	log.Printf("created new clip: <%+v>", cf)
+	// ca.PrintNodes()
 
-	val := cf.Get("/rootfs/var/mail")
+	log.Println("Archived image, took:", time.Since(start))
+	log.Printf("created new clip: <%+v>", ca)
+
+	val := ca.Get("/rootfs/var/log/dpkg.log")
 	log.Printf("v: %+v", val)
 
 	c, err := fuse.Mount(

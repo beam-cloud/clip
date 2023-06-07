@@ -198,7 +198,7 @@ func (ca *ClipArchive) Dump(targetFile string) error {
 }
 
 func (ca *ClipArchive) writeBlocks(outFile *os.File) error {
-	bufWriter := bufio.NewWriter(outFile)
+	bufWriter := bufio.NewWriterSize(outFile, 512*1024)
 	defer bufWriter.Flush() // Ensure all data gets written when we're done
 
 	var pos int64 = 0
