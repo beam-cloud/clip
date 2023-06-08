@@ -34,6 +34,6 @@ func (a *ClipArchiver) Create(opts ClipArchiverOptions) (*ClipArchive, error) {
 func (a *ClipArchiver) Extract(opts ClipArchiverOptions) (*ClipArchive, error) {
 	a.archive = NewClipArchive(opts.SourcePath)
 
-	// TODO: extract the archive ASAP
+	// TODO: extract the archive
 	return a.archive, nil
 }

@@ -21,4 +21,4 @@ vendor
 
 \_\_debug_bin
 testfs/\*
-\*.clip
+test.clip

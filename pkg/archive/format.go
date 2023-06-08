@@ -10,7 +10,9 @@ type ClipArchiveHeader struct {
 }
 
 type ClipArchiveBlock struct {
-	buffer []byte
+	BlockType BlockType
+	Data      []byte
+	Checksum  []byte
 }
 
 type BlockType byte

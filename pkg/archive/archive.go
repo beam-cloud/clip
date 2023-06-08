@@ -3,8 +3,10 @@ package archive
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
+	"hash/crc64"
 	"io"
 	"io/fs"
 	"log"
@@ -240,17 +242,48 @@ func (ca *ClipArchive) writeBlocks(outFile *os.File) error {
 			}
 			defer f.Close()
 
-			_, err = io.Copy(writer, f)
+			// Initialize CRC64 table and hash
+			table := crc64.MakeTable(crc64.ISO)
+			hash := crc64.New(table)
+
+			blockType := blockTypeData
+
+			// Write block type
+			if err := binary.Write(writer, binary.LittleEndian, blockType); err != nil {
+				log.Printf("error writing block type: %v", err)
+				return false
+			}
+
+			// Increment position to account for block type
+			pos += 1
+
+			// Create a multi-writer that writes to both the checksum and the writer
+			multi := io.MultiWriter(hash, writer)
+
+			// Use io.Copy to simultaneously write the file to the output and update the checksum
+			copied, err := io.Copy(multi, f)
 			if err != nil {
 				log.Printf("error copying file %s: %v", node.Path, err)
 				return false
 			}
 
+			// Compute final CRC64 checksum
+			checksum := hash.Sum(nil)
+
+			// Write checksum to output file
+			if _, err := writer.Write(checksum); err != nil {
+				log.Printf("error writing checksum: %v", err)
+				return false
+			}
+
+			// Increment position to account for checksum
+			pos += 8
+
 			// Update each node with starting position and data length
 			node.DataPos = pos
-			node.DataLen = int64(node.Attr.Size)
+			node.DataLen = copied
 
-			pos += int64(node.Attr.Size)
+			pos += copied
 		}
 
 		return true
