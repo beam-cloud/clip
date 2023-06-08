@@ -8,7 +8,7 @@ import (
 )
 
 type ClipStorageInterface interface {
-	ReadIndex(string) error
+	ReadIndex() error
 	ReadFile(int64, int64) (int, error)
 }
 

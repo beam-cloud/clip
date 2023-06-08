@@ -16,7 +16,8 @@ type S3ClipStorage struct {
 	key    string
 }
 
-func (s *S3ClipStorage) ReadIndex(key string) error {
+func (s *S3ClipStorage) ReadIndex() error {
+	key := "mock"
 	s.key = key
 
 	getObjectInput := &s3.GetObjectInput{

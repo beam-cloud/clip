@@ -57,7 +57,12 @@ func (ca *ClipArchive) createIndex(sourcePath string) error {
 			if de.IsDir() {
 				nodeType = DirNode
 			} else if de.IsSymlink() {
-				target = target
+				_target, err := os.Readlink(path)
+				if err != nil {
+					return fmt.Errorf("error reading symlink target %s: %v", path, err)
+				}
+
+				target = _target
 				nodeType = SymLinkNode
 			} else {
 				nodeType = FileNode
@@ -140,14 +145,6 @@ func (ca *ClipArchive) ListDirectory(path string) []*ClipNode {
 	return entries
 }
 
-func (ca *ClipArchive) PrintNodes() {
-	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
-		node := a.(*ClipNode)
-		fmt.Printf("Path: %s, NodeType: %s, count: %d\n", node.Path, node.NodeType)
-		return true
-	})
-}
-
 func (ca *ClipArchive) Create(opts ClipArchiveOptions) error {
 	outFile, err := os.Create(opts.OutputFile)
 	if err != nil {
@@ -208,8 +205,6 @@ func (ca *ClipArchive) Create(opts ClipArchiveOptions) error {
 		return err
 	}
 
-	log.Println("encode header size: ", len(headerBytes))
-
 	_, err = outFile.Seek(headerPos, os.SEEK_SET) // Go back to header position
 	if err != nil {
 		return err
@@ -228,6 +223,7 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 		return err
 	}
 	defer file.Close()
+	os.MkdirAll(opts.OutputPath, 0755)
 
 	// read and decode the header
 	headerBytes := make([]byte, ClipHeaderLength)
@@ -247,8 +243,6 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 	if !bytes.Equal(header.StartBytes, ClipFileStartBytes) || header.ClipFileFormatVersion != ClipFileFormatVersion {
 		return common.ErrFileHeaderMismatch
 	}
-
-	log.Println("read index of size: ", header.IndexSize)
 
 	// seek to the correct position for the index
 	_, err = file.Seek(header.IndexPos, 0)
@@ -270,9 +264,14 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 		return fmt.Errorf("error decoding index: %v", err)
 	}
 
+	for _, node := range nodes {
+		ca.Index.Set(node)
+	}
+
 	// iterate over the index and extract every node
 	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
 		node := a.(*ClipNode)
+
 		if node.NodeType == FileNode {
 
 			// seek to the position of the file in the archive
@@ -300,6 +299,7 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 		} else if node.NodeType == DirNode {
 			os.MkdirAll(path.Join(opts.OutputPath, node.Path), node.Attr.Mode)
 		} else if node.NodeType == SymLinkNode {
+			os.Symlink(node.Target, path.Join(opts.OutputPath, node.Path))
 		}
 
 		return true
@@ -319,7 +319,7 @@ func (ca *ClipArchive) writeBlocks(sourcePath string, outFile *os.File, offset i
 		if node.NodeType == FileNode {
 			f, err := os.Open(path.Join(sourcePath, node.Path))
 			if err != nil {
-				log.Printf("error opening file %s: %v", node.Path, err)
+				log.Printf("error opening source file %s: %v", node.Path, err)
 				return false
 			}
 			defer f.Close()
@@ -338,6 +338,9 @@ func (ca *ClipArchive) writeBlocks(sourcePath string, outFile *os.File, offset i
 
 			// Increment position to account for block type
 			pos += 1
+
+			// Update data position
+			node.DataPos = pos
 
 			// Create a multi-writer that writes to both the checksum and the writer
 			multi := io.MultiWriter(hash, writer)
@@ -361,8 +364,7 @@ func (ca *ClipArchive) writeBlocks(sourcePath string, outFile *os.File, offset i
 			// Increment position to account for checksum
 			pos += ChecksumLength
 
-			// Update each node with starting position and data length
-			node.DataPos = pos
+			// Update node with data length
 			node.DataLen = copied
 
 			pos += copied
