@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"bazil.org/fuse"
+	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/karrick/godirwalk"
 	"github.com/tidwall/btree"
 )
@@ -25,24 +26,30 @@ func init() {
 	gob.Register(&ClipArchiveHeader{})
 }
 
-type ClipArchive struct {
-	SourcePath string
-	Index      *btree.BTree
+type ClipArchiveOptions struct {
+	Compress    bool
+	ArchivePath string
+	SourcePath  string
+	OutputFile  string
+	OutputPath  string
 }
 
-func NewClipArchive(sourcePath string) *ClipArchive {
+type ClipArchive struct {
+	Index *btree.BTree
+}
+
+func NewClipArchive() *ClipArchive {
 	compare := func(a, b interface{}) bool {
 		return a.(*ClipNode).Path < b.(*ClipNode).Path
 	}
 	return &ClipArchive{
-		SourcePath: sourcePath,
-		Index:      btree.New(compare),
+		Index: btree.New(compare),
 	}
 }
 
-// CreateIndex creates an representation of the filesystem/folder structure being archived
-func (ca *ClipArchive) CreateIndex() error {
-	err := godirwalk.Walk(ca.SourcePath, &godirwalk.Options{
+// createIndex creates an representation of the filesystem/folder structure being archived
+func (ca *ClipArchive) createIndex(sourcePath string) error {
+	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
 			var target string = ""
 			var nodeType ClipNodeType
@@ -84,7 +91,7 @@ func (ca *ClipArchive) CreateIndex() error {
 				// Flags:     fuse.AttrFlags{}, // Assuming no specific flags at this point
 			}
 
-			ca.Index.Set(&ClipNode{Path: strings.TrimPrefix(path, ca.SourcePath), NodeType: nodeType, Attr: attr, Target: target})
+			ca.Index.Set(&ClipNode{Path: strings.TrimPrefix(path, sourcePath), NodeType: nodeType, Attr: attr, Target: target})
 
 			return nil
 		},
@@ -133,26 +140,6 @@ func (ca *ClipArchive) ListDirectory(path string) []*ClipNode {
 	return entries
 }
 
-func (ca *ClipArchive) Load(filename string) error {
-	file, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	dec := gob.NewDecoder(file)
-	var nodes []*ClipNode
-	if err := dec.Decode(&nodes); err != nil {
-		return err
-	}
-
-	for _, node := range nodes {
-		ca.Index.Set(node)
-	}
-
-	return nil
-}
-
 func (ca *ClipArchive) PrintNodes() {
 	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
 		node := a.(*ClipNode)
@@ -161,12 +148,17 @@ func (ca *ClipArchive) PrintNodes() {
 	})
 }
 
-func (ca *ClipArchive) Dump(targetFile string) error {
-	outFile, err := os.Create(targetFile)
+func (ca *ClipArchive) Dump(opts ClipArchiveOptions) error {
+	outFile, err := os.Create(opts.OutputFile)
 	if err != nil {
 		return err
 	}
 	defer outFile.Close()
+
+	err = ca.createIndex(opts.SourcePath)
+	if err != nil {
+		return err
+	}
 
 	// Prepare and write header
 	header := ClipArchiveHeader{
@@ -190,19 +182,25 @@ func (ca *ClipArchive) Dump(targetFile string) error {
 		return err
 	}
 
-	// Write a placeholder for the index
 	indexPos, err := outFile.Seek(0, os.SEEK_CUR) // Get current position
 	if err != nil {
 		return err
 	}
 
-	// Skip the index space
-	if _, err := outFile.Seek(int64(header.IndexSize), os.SEEK_CUR); err != nil {
+	// Write placeholder bytes for the index
+	placeholder := make([]byte, header.IndexSize)
+	if _, err := outFile.Write(placeholder); err != nil {
 		return err
 	}
 
+	var initialOffset int64 = int64(len(headerBytes) + len(indexBytes))
+
+	log.Println("initial offset:", initialOffset)
+	log.Println("wrote header of size:", len(headerBytes))
+	log.Println("wrote index of size:", header.IndexSize)
+
 	// Write data
-	err = ca.writeBlocks(outFile)
+	err = ca.writeBlocks(opts.SourcePath, outFile, initialOffset)
 	if err != nil {
 		return err
 	}
@@ -226,16 +224,96 @@ func (ca *ClipArchive) Dump(targetFile string) error {
 	return nil
 }
 
-func (ca *ClipArchive) writeBlocks(outFile *os.File) error {
+func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
+	file, err := os.Open(opts.ArchivePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// read and decode the header
+	headerBytes := make([]byte, ClipHeaderLength)
+	if _, err := io.ReadFull(file, headerBytes); err != nil {
+		return fmt.Errorf("error reading header: %v", err)
+	}
+
+	// decode the header
+	headerReader := bytes.NewReader(headerBytes)
+	headerDec := gob.NewDecoder(headerReader)
+	var header ClipArchiveHeader
+	if err := headerDec.Decode(&header); err != nil {
+		return fmt.Errorf("error decoding header: %v", err)
+	}
+
+	// verify the header
+	if !bytes.Equal(header.StartBytes, ClipFileStartBytes) || header.ClipFileFormatVersion != ClipFileFormatVersion {
+		return common.ErrFileHeaderMismatch
+	}
+
+	log.Println("read index of size: ", header.IndexSize)
+
+	// read and decode the index
+	indexBytes := make([]byte, header.IndexSize)
+	if _, err := io.ReadFull(file, indexBytes); err != nil {
+		return fmt.Errorf("error reading index: %v", err)
+	}
+
+	indexReader := bytes.NewReader(indexBytes)
+	indexDec := gob.NewDecoder(indexReader)
+
+	var nodes []*ClipNode
+	if err := indexDec.Decode(&nodes); err != nil {
+		return fmt.Errorf("error decoding index: %v", err)
+	}
+
+	// iterate over the index and extract every node
+	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
+		node := a.(*ClipNode)
+		if node.NodeType == FileNode {
+
+			// seek to the position of the file in the archive
+			_, err := file.Seek(node.DataPos, 0)
+			if err != nil {
+				log.Printf("error seeking to file %s: %v", node.Path, err)
+				return false
+			}
+
+			// open the output file
+			outFile, err := os.Create(path.Join(opts.OutputPath, node.Path))
+			if err != nil {
+				log.Printf("error creating file %s: %v", node.Path, err)
+				return false
+			}
+			defer outFile.Close()
+
+			// copy the data from the archive to the output file
+			_, err = io.CopyN(outFile, file, node.DataLen)
+			if err != nil {
+				log.Printf("error extracting file %s: %v", node.Path, err)
+				return false
+			}
+
+		} else if node.NodeType == DirNode {
+			os.MkdirAll(path.Join(opts.OutputPath, node.Path), node.Attr.Mode)
+		} else if node.NodeType == SymLinkNode {
+		}
+
+		return true
+	})
+
+	return nil
+}
+
+func (ca *ClipArchive) writeBlocks(sourcePath string, outFile *os.File, offset int64) error {
 	writer := bufio.NewWriterSize(outFile, 512*1024)
 	defer writer.Flush() // Ensure all data gets written when we're done
 
-	var pos int64 = 0
+	var pos int64 = offset
 	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
 		node := a.(*ClipNode)
 
 		if node.NodeType == FileNode {
-			f, err := os.Open(path.Join(ca.SourcePath, node.Path))
+			f, err := os.Open(path.Join(sourcePath, node.Path))
 			if err != nil {
 				log.Printf("error opening file %s: %v", node.Path, err)
 				return false

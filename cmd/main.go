@@ -11,13 +11,9 @@ import (
 )
 
 func main() {
-	archiver, err := archive.NewClipArchiver()
-	if err != nil {
-		return
-	}
-
+	a := archive.NewClipArchive()
 	start := time.Now()
-	ca, err := archiver.Create(archive.ClipArchiverOptions{
+	err := a.Dump(archive.ClipArchiveOptions{
 		SourcePath: "/images/748973e7feb2c29f",
 		OutputFile: "test.clip",
 	})
@@ -27,13 +23,21 @@ func main() {
 	}
 
 	log.Println("Archived image, took:", time.Since(start))
-	log.Printf("created new clip: <%+v>", ca)
+	log.Printf("created new clip: <%+v>", a)
 
 	// val := ca.Get("/rootfs/var/log/dpkg.log")
-	entries := ca.ListDirectory("/rootfs/var/log/")
+	entries := a.ListDirectory("/rootfs/var/log/")
 	for _, node := range entries {
 		log.Println(node.Path)
 	}
+
+	log.Println("extracting this shit...")
+	err = a.Extract(archive.ClipArchiveOptions{
+		ArchivePath: "test.clip",
+		OutputPath:  "test",
+	})
+
+	log.Printf("could not extract: %+v", err)
 
 	c, err := fuse.Mount(
 		"/tmp/test",
