@@ -246,7 +246,7 @@ func (ca *ClipArchive) writeBlocks(outFile *os.File) error {
 			table := crc64.MakeTable(crc64.ISO)
 			hash := crc64.New(table)
 
-			blockType := blockTypeData
+			blockType := blockTypeFile
 
 			// Write block type
 			if err := binary.Write(writer, binary.LittleEndian, blockType); err != nil {
@@ -277,7 +277,7 @@ func (ca *ClipArchive) writeBlocks(outFile *os.File) error {
 			}
 
 			// Increment position to account for checksum
-			pos += 8
+			pos += ChecksumLength
 
 			// Update each node with starting position and data length
 			node.DataPos = pos

@@ -5,6 +5,8 @@ import (
 	"hash/crc64"
 )
 
+const ChecksumLength = 8
+
 func computeChecksum(data []byte) []byte {
 	table := crc64.MakeTable(crc64.ISO)
 	checksum := crc64.Checksum(data, table)

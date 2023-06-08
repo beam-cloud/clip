@@ -9,18 +9,18 @@ type ClipArchiveHeader struct {
 	IndexSize             int
 }
 
-type ClipArchiveBlock struct {
+/*
+
+Data files are stored inside a clip in this format:
+
 	BlockType BlockType
 	Data      []byte
 	Checksum  []byte
-}
+
+*/
 
 type BlockType byte
 
 const (
-	blockTypeData BlockType = iota
-	blockTypeStartOfFile
-	blockTypeEndOfFile
-	blockTypeDirectory
-	blockTypeChecksum
+	blockTypeFile BlockType = iota
 )
