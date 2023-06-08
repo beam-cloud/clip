@@ -222,13 +222,13 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 	defer file.Close()
 	os.MkdirAll(opts.OutputPath, 0755)
 
-	// read and decode the header
+	// Read and decode the header
 	headerBytes := make([]byte, ClipHeaderLength)
 	if _, err := io.ReadFull(file, headerBytes); err != nil {
 		return fmt.Errorf("error reading header: %v", err)
 	}
 
-	// decode the header
+	// Decode the header
 	headerReader := bytes.NewReader(headerBytes)
 	headerDec := gob.NewDecoder(headerReader)
 	var header ClipArchiveHeader
@@ -236,18 +236,18 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 		return fmt.Errorf("error decoding header: %v", err)
 	}
 
-	// verify the header
+	// Verify the header
 	if !bytes.Equal(header.StartBytes, ClipFileStartBytes) || header.ClipFileFormatVersion != ClipFileFormatVersion {
 		return common.ErrFileHeaderMismatch
 	}
 
-	// seek to the correct position for the index
+	// Seek to the correct position for the index
 	_, err = file.Seek(header.IndexPos, 0)
 	if err != nil {
 		return fmt.Errorf("error seeking to index: %v", err)
 	}
 
-	// read and decode the index
+	// Read and decode the index
 	indexBytes := make([]byte, header.IndexSize)
 	if _, err := io.ReadFull(file, indexBytes); err != nil {
 		return fmt.Errorf("error reading index: %v", err)
@@ -265,20 +265,20 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 		ca.Index.Set(node)
 	}
 
-	// iterate over the index and extract every node
+	// Iterate over the index and extract every node
 	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
 		node := a.(*ClipNode)
 
 		if node.NodeType == FileNode {
 
-			// seek to the position of the file in the archive
+			// Seek to the position of the file in the archive
 			_, err := file.Seek(node.DataPos, 0)
 			if err != nil {
 				log.Printf("error seeking to file %s: %v", node.Path, err)
 				return false
 			}
 
-			// open the output file
+			// Open the output file
 			outFile, err := os.Create(path.Join(opts.OutputPath, node.Path))
 			if err != nil {
 				log.Printf("error creating file %s: %v", node.Path, err)
@@ -286,7 +286,7 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 			}
 			defer outFile.Close()
 
-			// copy the data from the archive to the output file
+			// Copy the data from the archive to the output file
 			_, err = io.CopyN(outFile, file, node.DataLen)
 			if err != nil {
 				log.Printf("error extracting file %s: %v", node.Path, err)
