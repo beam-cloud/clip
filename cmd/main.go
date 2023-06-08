@@ -13,7 +13,7 @@ import (
 func main() {
 	a := archive.NewClipArchive()
 	start := time.Now()
-	err := a.Dump(archive.ClipArchiveOptions{
+	err := a.Create(archive.ClipArchiveOptions{
 		SourcePath: "/images/748973e7feb2c29f",
 		OutputFile: "test.clip",
 	})

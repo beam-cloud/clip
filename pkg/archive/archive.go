@@ -148,7 +148,7 @@ func (ca *ClipArchive) PrintNodes() {
 	})
 }
 
-func (ca *ClipArchive) Dump(opts ClipArchiveOptions) error {
+func (ca *ClipArchive) Create(opts ClipArchiveOptions) error {
 	outFile, err := os.Create(opts.OutputFile)
 	if err != nil {
 		return err
@@ -160,11 +160,34 @@ func (ca *ClipArchive) Dump(opts ClipArchiveOptions) error {
 		return err
 	}
 
-	// Prepare and write header
+	// Prepare and write placeholder for the header
 	header := ClipArchiveHeader{
 		StartBytes:            ClipFileStartBytes,
 		ClipFileFormatVersion: ClipFileFormatVersion,
 		IndexSize:             0,
+	}
+
+	headerPos, err := outFile.Seek(0, os.SEEK_CUR) // Get current position
+	if err != nil {
+		return err
+	}
+
+	// Write placeholder bytes for the header
+	if _, err := outFile.Write(make([]byte, ClipHeaderLength)); err != nil {
+		return err
+	}
+
+	// Write data blocks
+	var initialOffset int64 = int64(ClipHeaderLength)
+	err = ca.writeBlocks(opts.SourcePath, outFile, initialOffset)
+	if err != nil {
+		return err
+	}
+
+	// Write the actual index data
+	indexPos, err := outFile.Seek(0, os.SEEK_CUR) // Get current position
+	if err != nil {
+		return err
 	}
 
 	indexBytes, err := ca.encodeIndex()
@@ -172,52 +195,27 @@ func (ca *ClipArchive) Dump(opts ClipArchiveOptions) error {
 		return err
 	}
 
-	header.IndexSize = len(indexBytes)
+	if _, err := outFile.Write(indexBytes); err != nil {
+		return err
+	}
+
+	// Update the header with the correct index size and position
+	header.IndexSize = int64(len(indexBytes))
+	header.IndexPos = indexPos
+
 	headerBytes, err := ca.encodeHeader(&header)
 	if err != nil {
 		return err
 	}
 
+	log.Println("encode header size: ", len(headerBytes))
+
+	_, err = outFile.Seek(headerPos, os.SEEK_SET) // Go back to header position
+	if err != nil {
+		return err
+	}
+
 	if _, err := outFile.Write(headerBytes); err != nil {
-		return err
-	}
-
-	indexPos, err := outFile.Seek(0, os.SEEK_CUR) // Get current position
-	if err != nil {
-		return err
-	}
-
-	// Write placeholder bytes for the index
-	placeholder := make([]byte, header.IndexSize)
-	if _, err := outFile.Write(placeholder); err != nil {
-		return err
-	}
-
-	var initialOffset int64 = int64(len(headerBytes) + len(indexBytes))
-
-	log.Println("initial offset:", initialOffset)
-	log.Println("wrote header of size:", len(headerBytes))
-	log.Println("wrote index of size:", header.IndexSize)
-
-	// Write data
-	err = ca.writeBlocks(opts.SourcePath, outFile, initialOffset)
-	if err != nil {
-		return err
-	}
-
-	// Write the actual index data
-	_, err = outFile.Seek(indexPos, os.SEEK_SET) // Go back to index position
-	if err != nil {
-		return err
-	}
-
-	// TODO: don't write the index twice -- come up with a better solution here
-	indexBytes, err = ca.encodeIndex()
-	if err != nil {
-		return err
-	}
-
-	if _, err := outFile.Write(indexBytes); err != nil {
 		return err
 	}
 
@@ -251,6 +249,12 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 	}
 
 	log.Println("read index of size: ", header.IndexSize)
+
+	// seek to the correct position for the index
+	_, err = file.Seek(header.IndexPos, 0)
+	if err != nil {
+		return fmt.Errorf("error seeking to index: %v", err)
+	}
 
 	// read and decode the index
 	indexBytes := make([]byte, header.IndexSize)
