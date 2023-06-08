@@ -26,8 +26,6 @@ func main() {
 		log.Fatalf("unable to create archive: %v", err)
 	}
 
-	// ca.PrintNodes()
-
 	log.Println("Archived image, took:", time.Since(start))
 	log.Printf("created new clip: <%+v>", ca)
 
