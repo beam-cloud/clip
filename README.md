@@ -1,6 +1,6 @@
 # CLIP
 
-CLIP (Compact and Lightweight Information Protocol) is a new transparent file format, similar to tar, but designed for efficient storage of read-only data. The primary feature of CLIP is its transparency, enabling direct access to its content without extraction, even over remote storage. CLIP can be mounted as a FUSE filesystem, or can be extracted like a tar file.
+CLIP (Compact and Lightweight Immutable Packaging) is a new transparent file format, similar to tar, but designed for efficient storage of read-only data. The primary feature of CLIP is its transparency, enabling direct access to its content without extraction, even over remote storage. CLIP can be mounted as a FUSE filesystem, or can be extracted like a tar file.
 
 ## Features
 

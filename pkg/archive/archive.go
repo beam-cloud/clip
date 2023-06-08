@@ -104,6 +104,33 @@ func (ca *ClipArchive) Get(path string) *ClipNode {
 	return item.(*ClipNode)
 }
 
+func (ca *ClipArchive) ListDirectory(path string) []*ClipNode {
+	var entries []*ClipNode
+
+	// Append null character to the path -- if we don't do this we could miss some child nodes.
+	// It works because \x00 is lower lexagraphically than any other character
+	pivot := &ClipNode{Path: path + "\x00"}
+	ca.Index.Ascend(pivot, func(a interface{}) bool {
+		node := a.(*ClipNode)
+
+		// Remove the prefix and check if there are any "/" left
+		relativePath := strings.TrimPrefix(node.Path, path)
+		if strings.Contains(relativePath, "/") {
+			// This node is not an immediate child, continue on
+			return true
+		}
+
+		// Node is an immediate child, so we append it to entries
+		if relativePath != "" {
+			entries = append(entries, node)
+		}
+
+		return true
+	})
+
+	return entries
+}
+
 func (ca *ClipArchive) Load(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -198,8 +225,8 @@ func (ca *ClipArchive) Dump(targetFile string) error {
 }
 
 func (ca *ClipArchive) writeBlocks(outFile *os.File) error {
-	bufWriter := bufio.NewWriterSize(outFile, 512*1024)
-	defer bufWriter.Flush() // Ensure all data gets written when we're done
+	writer := bufio.NewWriterSize(outFile, 512*1024)
+	defer writer.Flush() // Ensure all data gets written when we're done
 
 	var pos int64 = 0
 	ca.Index.Ascend(ca.Index.Min(), func(a interface{}) bool {
@@ -213,13 +240,13 @@ func (ca *ClipArchive) writeBlocks(outFile *os.File) error {
 			}
 			defer f.Close()
 
-			_, err = io.Copy(bufWriter, f)
+			_, err = io.Copy(writer, f)
 			if err != nil {
 				log.Printf("error copying file %s: %v", node.Path, err)
 				return false
 			}
 
-			// Update the index with the starting position and length of the data
+			// Update each node with starting position and data length
 			node.DataPos = pos
 			node.DataLen = int64(node.Attr.Size)
 

@@ -17,7 +17,11 @@ func main() {
 	}
 
 	start := time.Now()
-	ca, err := archiver.Create("/images/748973e7feb2c29f", "test.clip")
+	ca, err := archiver.Create(archive.ClipArchiverOptions{
+		SourcePath: "/images/748973e7feb2c29f",
+		OutputFile: "test.clip",
+	})
+
 	if err != nil {
 		log.Fatalf("unable to create archive: %v", err)
 	}
@@ -27,8 +31,11 @@ func main() {
 	log.Println("Archived image, took:", time.Since(start))
 	log.Printf("created new clip: <%+v>", ca)
 
-	val := ca.Get("/rootfs/var/log/dpkg.log")
-	log.Printf("v: %+v", val)
+	// val := ca.Get("/rootfs/var/log/dpkg.log")
+	entries := ca.ListDirectory("/rootfs/var/log/")
+	for _, node := range entries {
+		log.Println(node.Path)
+	}
 
 	c, err := fuse.Mount(
 		"/tmp/test",

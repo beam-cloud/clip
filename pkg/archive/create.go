@@ -4,20 +4,26 @@ type ClipArchiver struct {
 	archive *ClipArchive
 }
 
+type ClipArchiverOptions struct {
+	Compress   bool
+	SourcePath string
+	OutputFile string
+}
+
 func NewClipArchiver() (*ClipArchiver, error) {
 	return &ClipArchiver{
 		archive: nil,
 	}, nil
 }
 
-func (a *ClipArchiver) Create(sourcePath string, outputPath string) (*ClipArchive, error) {
-	a.archive = NewClipArchive(sourcePath)
+func (a *ClipArchiver) Create(opts ClipArchiverOptions) (*ClipArchive, error) {
+	a.archive = NewClipArchive(opts.SourcePath)
 	err := a.archive.CreateIndex()
 	if err != nil {
 		return nil, err
 	}
 
-	err = a.archive.Dump(outputPath)
+	err = a.archive.Dump(opts.OutputFile)
 	if err != nil {
 		return nil, err
 	}
@@ -25,12 +31,9 @@ func (a *ClipArchiver) Create(sourcePath string, outputPath string) (*ClipArchiv
 	return a.archive, nil
 }
 
-func (a *ClipArchiver) Extract(sourcePath string, outputPath string) (*ClipArchive, error) {
-	a.archive = NewClipArchive(sourcePath)
-	err := a.archive.CreateIndex()
-	if err != nil {
-		return nil, err
-	}
+func (a *ClipArchiver) Extract(opts ClipArchiverOptions) (*ClipArchive, error) {
+	a.archive = NewClipArchive(opts.SourcePath)
 
+	// TODO: extract the archive ASAP
 	return a.archive, nil
 }
