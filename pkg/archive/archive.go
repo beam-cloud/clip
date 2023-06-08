@@ -27,6 +27,7 @@ func init() {
 }
 
 type ClipArchiveOptions struct {
+	Verbose     bool
 	Compress    bool
 	ArchivePath string
 	SourcePath  string

@@ -8,3 +8,6 @@ TODO:
 - create distributable remote clip (rclip?)
 - add command to create mountable clip from existing clip file
 - add filesystem that allows me to interact with a local clip file to prove the concept
+- add optional compression
+- add optional verbose logging
+- verify checksum on extraction / archiving
