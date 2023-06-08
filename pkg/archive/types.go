@@ -1,6 +1,6 @@
 package archive
 
-import "bazil.org/fuse"
+import "github.com/hanwen/go-fuse/v2/fuse"
 
 type ClipNodeType string
 

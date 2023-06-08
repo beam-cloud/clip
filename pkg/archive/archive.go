@@ -15,8 +15,8 @@ import (
 	"strings"
 	"syscall"
 
-	"bazil.org/fuse"
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/karrick/godirwalk"
 	"github.com/tidwall/btree"
 )
@@ -81,19 +81,16 @@ func (ca *ClipArchive) createIndex(sourcePath string) error {
 					return err
 				}
 			}
-
 			attr := fuse.Attr{
-				Inode:     uint64(fi.Sys().(*syscall.Stat_t).Ino),
-				Size:      uint64(fi.Size()),
-				Blocks:    uint64(fi.Sys().(*syscall.Stat_t).Blocks),
-				Atime:     fi.ModTime(),
-				Mtime:     fi.ModTime(),
-				Mode:      fi.Mode(),
-				Nlink:     uint32(fi.Sys().(*syscall.Stat_t).Nlink),
-				Uid:       uint32(fi.Sys().(*syscall.Stat_t).Uid),
-				Gid:       uint32(fi.Sys().(*syscall.Stat_t).Gid),
-				BlockSize: uint32(fi.Sys().(*syscall.Stat_t).Blksize),
-				// Flags:     fuse.AttrFlags{}, // Assuming no specific flags at this point
+				Ino:    fi.Sys().(*syscall.Stat_t).Ino,
+				Size:   uint64(fi.Size()),
+				Blocks: uint64(fi.Sys().(*syscall.Stat_t).Blocks),
+				Atime:  uint64(fi.ModTime().Unix()),
+				Mtime:  uint64(fi.ModTime().Unix()),
+				Mode:   uint32(fi.Mode().Perm()),
+				// Nlink:  uint32(fi.Sys().(*syscall.Stat_t).Nlink),
+				// Uid:    uint32(fi.Sys().(*syscall.Stat_t).Uid),
+				// Gid:    uint32(fi.Sys().(*syscall.Stat_t).Gid),
 			}
 
 			ca.Index.Set(&ClipNode{Path: strings.TrimPrefix(path, sourcePath), NodeType: nodeType, Attr: attr, Target: target})
@@ -297,7 +294,7 @@ func (ca *ClipArchive) Extract(opts ClipArchiveOptions) error {
 			}
 
 		} else if node.NodeType == DirNode {
-			os.MkdirAll(path.Join(opts.OutputPath, node.Path), node.Attr.Mode)
+			os.MkdirAll(path.Join(opts.OutputPath, node.Path), fs.FileMode(node.Attr.Mode))
 		} else if node.NodeType == SymLinkNode {
 			os.Symlink(node.Target, path.Join(opts.OutputPath, node.Path))
 		}
