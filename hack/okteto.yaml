@@ -5,6 +5,7 @@ dev:
     sync:
       - ../:/workspace
     environment:
+      PATH: ${PATH}:/workspace/bin
       DEFAULT_NAMESPACE: ${OKTETO_NAMESPACE}
       BUILD_COMMAND: "umount -l /tmp/test; go build -o /workspace/bin/clip /workspace/cmd/main.go"
       BUILD_BINARY_PATH: "/workspace/bin/clip"

@@ -34,8 +34,8 @@ func runExtract(cmd *cobra.Command, args []string) {
 
 	log.Information(fmt.Sprintf("Extracting archive: %s", extractOpts.InputFile))
 
-	a := archive.NewClipArchive()
-	err := a.Extract(archive.ClipArchiveOptions{
+	a := archive.NewClipArchiver()
+	err := a.Extract(archive.ClipArchiverOptions{
 		ArchivePath: extractOpts.InputFile,
 		OutputPath:  extractOpts.OutputPath,
 	})

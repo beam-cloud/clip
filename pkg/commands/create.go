@@ -34,8 +34,8 @@ func runCreate(cmd *cobra.Command, args []string) {
 
 	log.Information(fmt.Sprintf("Creating a new archive from directory: %s", createOpts.InputPath))
 
-	a := archive.NewClipArchive()
-	err := a.Create(archive.ClipArchiveOptions{
+	a := archive.NewClipArchiver()
+	err := a.Create(archive.ClipArchiverOptions{
 		SourcePath: createOpts.InputPath,
 		OutputFile: createOpts.OutputPath,
 	})

@@ -17,6 +17,7 @@ func main() {
 
 	rootCmd.AddCommand(commands.CreateCmd)
 	rootCmd.AddCommand(commands.ExtractCmd)
+	rootCmd.AddCommand(commands.MountCmd)
 
 	// Setup signal catching
 	sigs := make(chan os.Signal, 1)
