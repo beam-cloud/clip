@@ -1,8 +1,6 @@
 package commands
 
 import (
-	"fmt"
-
 	"github.com/beam-cloud/clip/pkg/archive"
 	"github.com/spf13/cobra"
 )
@@ -62,13 +60,11 @@ func init() {
 }
 
 func runStoreS3(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Storing %s in S3 bucket %s...\n", storeS3Opts.InputFile, storeS3Opts.Bucket)
 
 	return nil
 }
 
 func runStoreLocal(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Storing %s in local directory %s...\n", storeLocalOpts.InputFile, storeLocalOpts.OutputFile)
 	a, err := archive.NewRClipArchiver(storeLocalOpts.InputFile)
 	if err != nil {
 		return err
