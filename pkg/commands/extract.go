@@ -19,7 +19,7 @@ var extractOpts = &ExtractCmdOptions{}
 var ExtractCmd = &cobra.Command{
 	Use:   "extract",
 	Short: "Extract an archive to the specified path",
-	Run:   runExtract,
+	RunE:  runExtract,
 }
 
 func init() {
@@ -29,7 +29,7 @@ func init() {
 	ExtractCmd.MarkFlagRequired("input")
 }
 
-func runExtract(cmd *cobra.Command, args []string) {
+func runExtract(cmd *cobra.Command, args []string) error {
 	log.Spinner("Extracting...")
 	log.StartSpinner()
 	defer log.StopSpinner()
@@ -44,8 +44,9 @@ func runExtract(cmd *cobra.Command, args []string) {
 	})
 
 	if err != nil {
-		log.Fail("An error occurred while extracting the archive: %s\n", err)
-	} else {
-		log.Success("Archive extracted successfully.")
+		return err
 	}
+
+	log.Success("Archive extracted successfully.")
+	return nil
 }

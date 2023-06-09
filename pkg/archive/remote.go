@@ -2,35 +2,34 @@ package archive
 
 import "log"
 
-type RClipArchive struct {
-	*ClipArchiver
-	RemotePath string
+type RClipArchiver struct {
+	clipArchiver *ClipArchiver
+	RemotePath   string
 }
 
-func NewRClipArchive(archivePath string) (*RClipArchive, error) {
-	ca := &ClipArchiver{}
+type RClipArchive struct {
+}
 
-	a := NewClipArchiver()
-	metadata, err := a.ExtractMetadata(ClipArchiverOptions{
-		ArchivePath: archivePath,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	log.Printf("header: %+v", metadata.Header)
-
-	return &RClipArchive{
-		ClipArchiver: ca,
+func NewRClipArchiver(archivePath string) (*RClipArchiver, error) {
+	return &RClipArchiver{
+		clipArchiver: NewClipArchiver(),
 	}, nil
 }
 
-func (rca *RClipArchive) Create(opts ClipArchiverOptions) error {
+func (rca *RClipArchiver) Create(opts ClipArchiverOptions) error {
+	metadata, err := rca.clipArchiver.ExtractMetadata(ClipArchiverOptions{
+		ArchivePath: opts.ArchivePath,
+	})
+	if err != nil {
+		return err
+	}
+
+	log.Println("loaded metadata: ", metadata)
 
 	return nil
 }
 
-func (rca *RClipArchive) Load(opts ClipArchiverOptions) error {
+func (rca *RClipArchiver) Load(opts ClipArchiverOptions) error {
 
 	return nil
 }

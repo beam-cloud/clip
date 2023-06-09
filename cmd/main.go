@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/signal"
 
@@ -17,6 +18,7 @@ func main() {
 
 	rootCmd.AddCommand(commands.CreateCmd)
 	rootCmd.AddCommand(commands.ExtractCmd)
+	rootCmd.AddCommand(commands.StoreCmd)
 	rootCmd.AddCommand(commands.MountCmd)
 
 	// Setup signal catching
@@ -33,7 +35,7 @@ func main() {
 	// If an error occurs, it will appear here.
 	if err := rootCmd.Execute(); err != nil {
 		log.StopSpinner()
-		log.Fail("Failed to execute command:", err)
+		log.Fail(fmt.Sprintf("Failed to execute command: %v", err))
 		os.Exit(1)
 	}
 }

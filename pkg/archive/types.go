@@ -44,8 +44,13 @@ func (m *ClipArchiveMetadata) Get(path string) *ClipNode {
 func (m *ClipArchiveMetadata) ListDirectory(path string) []*ClipNode {
 	var entries []*ClipNode
 
+	// Append '/' if not present at the end of the path
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+
 	// Append null character to the path -- if we don't do this we could miss some child nodes.
-	// It works because \x00 is lower lexagraphically than any other character
+	// It works because \x00 is lower lexographically than any other character
 	pivot := &ClipNode{Path: path + "\x00"}
 	m.Index.Ascend(pivot, func(a interface{}) bool {
 		node := a.(*ClipNode)

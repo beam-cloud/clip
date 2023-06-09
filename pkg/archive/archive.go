@@ -235,7 +235,8 @@ func (ca *ClipArchiver) ExtractMetadata(opts ClipArchiverOptions) (*ClipArchiveM
 	}
 
 	return &ClipArchiveMetadata{
-		Index: index,
+		Index:  index,
+		Header: header,
 	}, nil
 }
 

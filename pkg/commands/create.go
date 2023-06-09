@@ -19,7 +19,7 @@ var createOpts = &CreateCmdOptions{}
 var CreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create an archive from the specified path",
-	Run:   runCreate,
+	RunE:  runCreate,
 }
 
 func init() {
@@ -29,7 +29,7 @@ func init() {
 	CreateCmd.MarkFlagRequired("input")
 }
 
-func runCreate(cmd *cobra.Command, args []string) {
+func runCreate(cmd *cobra.Command, args []string) error {
 	log.Spinner("Archiving...")
 	log.StartSpinner()
 	defer log.StopSpinner()
@@ -42,10 +42,10 @@ func runCreate(cmd *cobra.Command, args []string) {
 		OutputFile: createOpts.OutputPath,
 		Verbose:    createOpts.Verbose,
 	})
-
 	if err != nil {
-		log.Fail("An error occurred while creating the archive: %s\n", err)
-	} else {
-		log.Success("Archive created successfully.")
+		return err
 	}
+
+	log.Success("Archive created successfully.")
+	return nil
 }

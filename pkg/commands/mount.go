@@ -41,9 +41,8 @@ func runMount(cmd *cobra.Command, args []string) {
 	// }
 
 	// // Create and mount the file system
-	// fsys := fs.NewFS(a)
-	// err = fsys.Mount(mountOptions.mountPoint)
-
+	// fsys := fs.NewFS()
+	// err := fsys.Root()
 	// if err != nil {
 	// 	log.Fatalf("Failed to mount the file system: %s\n", err)
 	// }
