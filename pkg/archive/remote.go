@@ -1,35 +1,61 @@
 package archive
 
-import "log"
+import (
+	"errors"
+
+	log "github.com/okteto/okteto/pkg/log"
+)
+
+type StorageInfo interface {
+	Type() string
+}
+
+type LocalStorageInfo struct {
+	Path string
+}
+
+func (lsi LocalStorageInfo) Type() string {
+	return "local"
+}
+
+type S3StorageInfo struct {
+	Bucket string
+	Key    string
+	// possibly other S3 related info (region, credentials, etc.)
+}
+
+func (ssi S3StorageInfo) Type() string {
+	return "s3"
+}
 
 type RClipArchiver struct {
-	clipArchiver *ClipArchiver
-	RemotePath   string
+	ClipArchiver *ClipArchiver
+	StorageInfo  StorageInfo
 }
 
-type RClipArchive struct {
-}
-
-func NewRClipArchiver(archivePath string) (*RClipArchiver, error) {
+func NewRClipArchiver(si StorageInfo) (*RClipArchiver, error) {
 	return &RClipArchiver{
-		clipArchiver: NewClipArchiver(),
+		ClipArchiver: NewClipArchiver(),
+		StorageInfo:  si,
 	}, nil
 }
 
 func (rca *RClipArchiver) Create(opts ClipArchiverOptions) error {
-	metadata, err := rca.clipArchiver.ExtractMetadata(ClipArchiverOptions{
+	_, err := rca.ClipArchiver.ExtractMetadata(ClipArchiverOptions{
 		ArchivePath: opts.ArchivePath,
 	})
 	if err != nil {
 		return err
 	}
 
-	log.Println("loaded metadata: ", metadata)
-
-	return nil
-}
-
-func (rca *RClipArchiver) Load(opts ClipArchiverOptions) error {
+	switch rca.StorageInfo.Type() {
+	case "local":
+		log.Println("creating local storage RCLIP")
+	case "s3":
+		log.Println("creating s3 storage RCLIP")
+	default:
+		return errors.New("unsupported storage type")
+	}
 
 	return nil
 }

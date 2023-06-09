@@ -40,7 +40,6 @@ type ClipArchiver struct {
 }
 
 func NewClipArchiver() *ClipArchiver {
-
 	return &ClipArchiver{}
 }
 

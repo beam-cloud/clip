@@ -22,15 +22,16 @@ var StoreS3Cmd = &cobra.Command{
 
 var StoreLocalCmd = &cobra.Command{
 	Use:   "local",
-	Short: "Generate an RCLIP archive based by a local file.",
+	Short: "Generate an RCLIP archive backed by a local file.",
 	RunE:  runStoreLocal,
 }
 
 type StoreS3Options struct {
-	InputFile string
-	AccessKey string
-	SecretKey string
-	Bucket    string
+	InputFile  string
+	AccessKey  string
+	SecretKey  string
+	Bucket     string
+	OutputFile string
 }
 
 type StoreLocalOptions struct {
@@ -46,7 +47,7 @@ func init() {
 	StoreCmd.AddCommand(StoreLocalCmd)
 
 	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.InputFile, "input", "i", "", "Input CLIP archive path")
-	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.InputFile, "output", "o", "", "Output RCLIP archive path")
+	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.OutputFile, "output", "o", "", "Output RCLIP archive path")
 	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.AccessKey, "access-key", "a", "", "S3 access key")
 	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.SecretKey, "secret-key", "s", "", "S3 secret key")
 	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.Bucket, "bucket", "b", "", "S3 bucket")
@@ -60,12 +61,23 @@ func init() {
 }
 
 func runStoreS3(cmd *cobra.Command, args []string) error {
+	storageInfo := &archive.S3StorageInfo{Bucket: storeS3Opts.Bucket}
+	a, err := archive.NewRClipArchiver(storageInfo)
+	if err != nil {
+		return err
+	}
+
+	err = a.Create(archive.ClipArchiverOptions{ArchivePath: storeS3Opts.InputFile})
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
 
 func runStoreLocal(cmd *cobra.Command, args []string) error {
-	a, err := archive.NewRClipArchiver(storeLocalOpts.InputFile)
+	storageInfo := &archive.LocalStorageInfo{Path: storeLocalOpts.InputFile}
+	a, err := archive.NewRClipArchiver(storageInfo)
 	if err != nil {
 		return err
 	}
