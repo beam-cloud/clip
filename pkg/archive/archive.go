@@ -125,7 +125,8 @@ func (ca *ClipArchiver) Create(opts ClipArchiverOptions) error {
 	header := ClipArchiveHeader{
 		StartBytes:            ClipFileStartBytes,
 		ClipFileFormatVersion: ClipFileFormatVersion,
-		IndexSize:             0,
+		IndexLength:           0,
+		StorageInfoSize:       0,
 	}
 
 	headerPos, err := outFile.Seek(0, io.SeekCurrent) // Get current position
@@ -161,7 +162,7 @@ func (ca *ClipArchiver) Create(opts ClipArchiverOptions) error {
 	}
 
 	// Update the header with the correct index size and position
-	header.IndexSize = int64(len(indexBytes))
+	header.IndexLength = int64(len(indexBytes))
 	header.IndexPos = indexPos
 
 	headerBytes, err := ca.EncodeHeader(&header)
@@ -215,7 +216,7 @@ func (ca *ClipArchiver) ExtractMetadata(opts ClipArchiverOptions) (*ClipArchiveM
 	}
 
 	// Read and decode the index
-	indexBytes := make([]byte, header.IndexSize)
+	indexBytes := make([]byte, header.IndexLength)
 	if _, err := io.ReadFull(file, indexBytes); err != nil {
 		return nil, fmt.Errorf("error reading index: %v", err)
 	}
@@ -273,7 +274,7 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	}
 
 	// Read and decode the index
-	indexBytes := make([]byte, header.IndexSize)
+	indexBytes := make([]byte, header.IndexLength)
 	if _, err := io.ReadFull(file, indexBytes); err != nil {
 		return fmt.Errorf("error reading index: %v", err)
 	}

@@ -10,8 +10,10 @@ const (
 type ClipArchiveHeader struct {
 	StartBytes            []byte
 	ClipFileFormatVersion uint8
-	IndexSize             int64
+	IndexLength           int64
 	IndexPos              int64
+	StorageInfoSize       int64
+	StorageInfoPos        int64
 }
 
 /*

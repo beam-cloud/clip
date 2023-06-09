@@ -10,14 +10,6 @@ type StorageInfo interface {
 	Type() string
 }
 
-type LocalStorageInfo struct {
-	Path string
-}
-
-func (lsi LocalStorageInfo) Type() string {
-	return "local"
-}
-
 type S3StorageInfo struct {
 	Bucket string
 	Key    string
@@ -49,8 +41,6 @@ func (rca *RClipArchiver) Create(opts ClipArchiverOptions) error {
 	}
 
 	switch rca.StorageInfo.Type() {
-	case "local":
-		log.Println("creating local storage RCLIP")
 	case "s3":
 		log.Println("creating s3 storage RCLIP")
 	default:
