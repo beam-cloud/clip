@@ -24,7 +24,6 @@ import (
 
 func init() {
 	gob.Register(&ClipNode{})
-	gob.Register(&ClipArchiveHeader{})
 }
 
 type ClipArchiverOptions struct {
@@ -123,11 +122,12 @@ func (ca *ClipArchiver) Create(opts ClipArchiverOptions) error {
 
 	// Prepare and write placeholder for the header
 	header := ClipArchiveHeader{
-		StartBytes:            ClipFileStartBytes,
 		ClipFileFormatVersion: ClipFileFormatVersion,
 		IndexLength:           0,
-		StorageInfoSize:       0,
+		StorageInfoLength:     0,
+		StorageInfoPos:        0,
 	}
+	copy(header.StartBytes[:], ClipFileStartBytes)
 
 	headerPos, err := outFile.Seek(0, io.SeekCurrent) // Get current position
 	if err != nil {
@@ -193,19 +193,17 @@ func (ca *ClipArchiver) ExtractMetadata(opts ClipArchiverOptions) (*ClipArchiveM
 	// Read and decode the header
 	headerBytes := make([]byte, ClipHeaderLength)
 	if _, err := io.ReadFull(file, headerBytes); err != nil {
-		return nil, fmt.Errorf("error reading header: %v", err)
+		return nil, common.ErrFileHeaderMismatch
 	}
 
 	// Decode the header
-	headerReader := bytes.NewReader(headerBytes)
-	headerDec := gob.NewDecoder(headerReader)
-	var header ClipArchiveHeader
-	if err := headerDec.Decode(&header); err != nil {
-		return nil, fmt.Errorf("error decoding header: %v", err)
+	header, err := ca.DecodeHeader(headerBytes)
+	if err != nil {
+		return nil, common.ErrFileHeaderMismatch
 	}
 
 	// Verify the header
-	if !bytes.Equal(header.StartBytes, ClipFileStartBytes) || header.ClipFileFormatVersion != ClipFileFormatVersion {
+	if !bytes.Equal(header.StartBytes[:], ClipFileStartBytes) || header.ClipFileFormatVersion != ClipFileFormatVersion {
 		return nil, common.ErrFileHeaderMismatch
 	}
 
@@ -236,7 +234,7 @@ func (ca *ClipArchiver) ExtractMetadata(opts ClipArchiverOptions) (*ClipArchiveM
 
 	return &ClipArchiveMetadata{
 		Index:  index,
-		Header: header,
+		Header: *header,
 	}, nil
 }
 
@@ -251,19 +249,17 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	// Read and decode the header
 	headerBytes := make([]byte, ClipHeaderLength)
 	if _, err := io.ReadFull(file, headerBytes); err != nil {
-		return fmt.Errorf("error reading header: %v", err)
+		return common.ErrFileHeaderMismatch
 	}
 
 	// Decode the header
-	headerReader := bytes.NewReader(headerBytes)
-	headerDec := gob.NewDecoder(headerReader)
-	var header ClipArchiveHeader
-	if err := headerDec.Decode(&header); err != nil {
-		return fmt.Errorf("error decoding header: %v", err)
+	header, err := ca.DecodeHeader(headerBytes)
+	if err != nil {
+		return common.ErrFileHeaderMismatch
 	}
 
 	// Verify the header
-	if !bytes.Equal(header.StartBytes, ClipFileStartBytes) || header.ClipFileFormatVersion != ClipFileFormatVersion {
+	if !bytes.Equal(header.StartBytes[:], ClipFileStartBytes) || header.ClipFileFormatVersion != ClipFileFormatVersion {
 		return common.ErrFileHeaderMismatch
 	}
 
@@ -312,7 +308,9 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 			// Open the output file
 			outFile, err := os.Create(path.Join(opts.OutputPath, node.Path))
 			if err != nil {
-				log.Printf("error creating file %s: %v", node.Path, err)
+				if opts.Verbose {
+					log.Printf("error creating file %s: %v", node.Path, err)
+				}
 				return false
 			}
 			defer outFile.Close()
@@ -320,7 +318,9 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 			// Copy the data from the archive to the output file
 			_, err = io.CopyN(outFile, file, node.DataLen)
 			if err != nil {
-				log.Printf("error extracting file %s: %v", node.Path, err)
+				if opts.Verbose {
+					log.Printf("error extracting file %s: %v", node.Path, err)
+				}
 				return false
 			}
 
@@ -409,12 +409,20 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 }
 
 func (ca *ClipArchiver) EncodeHeader(header *ClipArchiveHeader) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	if err := enc.Encode(header); err != nil {
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.LittleEndian, header); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func (ca *ClipArchiver) DecodeHeader(headerBytes []byte) (*ClipArchiveHeader, error) {
+	header := new(ClipArchiveHeader)
+	buf := bytes.NewBuffer(headerBytes)
+	if err := binary.Read(buf, binary.LittleEndian, header); err != nil {
+		return nil, err
+	}
+	return header, nil
 }
 
 func (ca *ClipArchiver) EncodeIndex(index *btree.BTree) ([]byte, error) {
