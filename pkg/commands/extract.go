@@ -11,6 +11,7 @@ import (
 type ExtractCmdOptions struct {
 	InputFile  string
 	OutputPath string
+	Verbose    bool
 }
 
 var extractOpts = &ExtractCmdOptions{}
@@ -24,6 +25,7 @@ var ExtractCmd = &cobra.Command{
 func init() {
 	ExtractCmd.Flags().StringVarP(&extractOpts.InputFile, "input", "i", "", "Input file to extract")
 	ExtractCmd.Flags().StringVarP(&extractOpts.OutputPath, "output", "o", ".", "Output path for the extraction")
+	ExtractCmd.Flags().BoolVarP(&extractOpts.Verbose, "verbose", "v", false, "Verbose output")
 	ExtractCmd.MarkFlagRequired("input")
 }
 
@@ -38,6 +40,7 @@ func runExtract(cmd *cobra.Command, args []string) {
 	err := a.Extract(archive.ClipArchiverOptions{
 		ArchivePath: extractOpts.InputFile,
 		OutputPath:  extractOpts.OutputPath,
+		Verbose:     extractOpts.Verbose,
 	})
 
 	if err != nil {

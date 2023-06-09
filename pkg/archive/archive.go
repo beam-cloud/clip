@@ -9,11 +9,12 @@ import (
 	"hash/crc64"
 	"io"
 	"io/fs"
-	"log"
 	"os"
 	"path"
 	"strings"
 	"syscall"
+
+	log "github.com/okteto/okteto/pkg/log"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -140,7 +141,7 @@ func (ca *ClipArchiver) Create(opts ClipArchiverOptions) error {
 
 	// Write data blocks
 	var initialOffset int64 = int64(ClipHeaderLength)
-	err = ca.writeBlocks(index, opts.SourcePath, outFile, initialOffset)
+	err = ca.writeBlocks(index, opts.SourcePath, outFile, initialOffset, opts)
 	if err != nil {
 		return err
 	}
@@ -294,6 +295,10 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	index.Ascend(index.Min(), func(a interface{}) bool {
 		node := a.(*ClipNode)
 
+		if opts.Verbose {
+			log.Spinner(fmt.Sprintf("Extracting... %s", node.Path))
+		}
+
 		if node.NodeType == FileNode {
 
 			// Seek to the position of the file in the archive
@@ -330,13 +335,17 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	return nil
 }
 
-func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFile *os.File, offset int64) error {
+func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFile *os.File, offset int64, opts ClipArchiverOptions) error {
 	writer := bufio.NewWriterSize(outFile, 512*1024)
 	defer writer.Flush() // Ensure all data gets written when we're done
 
 	var pos int64 = offset
 	index.Ascend(index.Min(), func(a interface{}) bool {
 		node := a.(*ClipNode)
+
+		if opts.Verbose {
+			log.Spinner(fmt.Sprintf("Archiving... %s", node.Path))
+		}
 
 		if node.NodeType == FileNode {
 			f, err := os.Open(path.Join(sourcePath, node.Path))
@@ -376,7 +385,6 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 
 			// Compute final CRC64 checksum
 			checksum := hash.Sum(nil)
-			log.Printf("checksum: %0xd", checksum)
 
 			// Write checksum to output file
 			if _, err := writer.Write(checksum); err != nil {

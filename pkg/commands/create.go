@@ -11,6 +11,7 @@ import (
 type CreateCmdOptions struct {
 	InputPath  string
 	OutputPath string
+	Verbose    bool
 }
 
 var createOpts = &CreateCmdOptions{}
@@ -24,6 +25,7 @@ var CreateCmd = &cobra.Command{
 func init() {
 	CreateCmd.Flags().StringVarP(&createOpts.InputPath, "input", "i", "", "Input directory to archive")
 	CreateCmd.Flags().StringVarP(&createOpts.OutputPath, "output", "o", "test.clip", "Output file for the archive")
+	CreateCmd.Flags().BoolVarP(&createOpts.Verbose, "verbose", "v", false, "Verbose output")
 	CreateCmd.MarkFlagRequired("input")
 }
 
@@ -38,6 +40,7 @@ func runCreate(cmd *cobra.Command, args []string) {
 	err := a.Create(archive.ClipArchiverOptions{
 		SourcePath: createOpts.InputPath,
 		OutputFile: createOpts.OutputPath,
+		Verbose:    createOpts.Verbose,
 	})
 
 	if err != nil {
