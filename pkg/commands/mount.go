@@ -2,6 +2,13 @@ package commands
 
 import (
 	"fmt"
+	"os/exec"
+
+	"github.com/beam-cloud/clip/pkg/archive"
+	clipfs "github.com/beam-cloud/clip/pkg/fs"
+	storage "github.com/beam-cloud/clip/pkg/storage"
+	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 
 	log "github.com/okteto/okteto/pkg/log"
 	"github.com/spf13/cobra"
@@ -27,25 +34,55 @@ func init() {
 	MountCmd.MarkFlagRequired("mountpoint")
 }
 
+func forceUnmount() {
+	unmountCommand := exec.Command("umount", "-f", mountOptions.mountPoint)
+	unmountCommand.Run()
+}
+
 func runMount(cmd *cobra.Command, args []string) {
 	log.Information(fmt.Sprintf("Mounting archive: %s to %s", mountOptions.archivePath, mountOptions.mountPoint))
 
-	// // Load the archive
-	// a := archive.NewClipArchive()
-	// err := a.Load(archive.ClipArchiveOptions{
-	// 	ArchivePath: mountOptions.archivePath,
-	// })
+	forceUnmount() // Force unmount the file system if it's already mounted
 
-	// if err != nil {
-	// 	log.Fatalf("Failed to load the archive: %s\n", err)
-	// }
+	ca := archive.NewClipArchiver()
+	metadata, err := ca.ExtractMetadata(mountOptions.archivePath)
+	if err != nil {
+		log.Fatalf("invalid archive: %v", err)
+	}
 
-	// // Create and mount the file system
-	// fsys := fs.NewFS()
-	// err := fsys.Root()
-	// if err != nil {
-	// 	log.Fatalf("Failed to mount the file system: %s\n", err)
-	// }
+	header := metadata.Header
+	var storageType string = ""
+	var storageOpts storage.ClipStorageOpts
+
+	// This a remote archive, so we have to load that particular storage implementation
+	if header.StorageInfoLength > 0 {
+	} else {
+		storageType = "local"
+		storageOpts = storage.LocalClipStorageOpts{}
+	}
+
+	s, err := storage.NewClipStorage(metadata, storageType, storageOpts)
+	if err != nil {
+		log.Fatalf("Could not load storage: %v", err)
+	}
+
+	clipfs := clipfs.NewFileSystem(s)
+	root, _ := clipfs.Root()
+
+	fsOptions := &fs.Options{}
+	server, err := fuse.NewServer(fs.NewNodeFS(root, fsOptions), mountOptions.mountPoint, &fuse.MountOptions{})
+	if err != nil {
+		log.Fatalf("Could not create server: %v", err)
+	}
+
+	go server.Serve() // Run the FUSE server in the background
+
+	if err := server.WaitMount(); err != nil {
+		log.Fatalf("Failed to mount: %v", err)
+	}
 
 	log.Success("Mounted successfully.")
+
+	// Block until the FUSE server stops, this will happen when the filesystem is unmounted.
+	server.Wait()
 }

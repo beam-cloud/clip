@@ -90,9 +90,11 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				Atime:  uint64(fi.ModTime().Unix()),
 				Mtime:  uint64(fi.ModTime().Unix()),
 				Mode:   uint32(fi.Mode().Perm()),
-				// Nlink:  uint32(fi.Sys().(*syscall.Stat_t).Nlink),
-				// Uid:    uint32(fi.Sys().(*syscall.Stat_t).Uid),
-				// Gid:    uint32(fi.Sys().(*syscall.Stat_t).Gid),
+				Nlink:  uint32(fi.Sys().(*syscall.Stat_t).Nlink),
+				Owner: fuse.Owner{
+					Uid: fi.Sys().(*syscall.Stat_t).Uid,
+					Gid: fi.Sys().(*syscall.Stat_t).Gid,
+				},
 			}
 
 			index.Set(&ClipNode{Path: strings.TrimPrefix(path, sourcePath), NodeType: nodeType, Attr: attr, Target: target})
@@ -182,13 +184,12 @@ func (ca *ClipArchiver) Create(opts ClipArchiverOptions) error {
 	return nil
 }
 
-func (ca *ClipArchiver) ExtractMetadata(opts ClipArchiverOptions) (*ClipArchiveMetadata, error) {
-	file, err := os.Open(opts.ArchivePath)
+func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*ClipArchiveMetadata, error) {
+	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	os.MkdirAll(opts.OutputPath, 0755)
 
 	// Read and decode the header
 	headerBytes := make([]byte, ClipHeaderLength)
@@ -297,7 +298,6 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 		}
 
 		if node.NodeType == FileNode {
-
 			// Seek to the position of the file in the archive
 			_, err := file.Seek(node.DataPos, 0)
 			if err != nil {

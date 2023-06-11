@@ -1,13 +1,36 @@
 package storage
 
+import (
+	"log"
+
+	"github.com/beam-cloud/clip/pkg/archive"
+)
+
 type LocalClipStorage struct {
+	archivePath string
+	metadata    *archive.ClipArchiveMetadata
 }
 
-func (s *LocalClipStorage) ReadIndex() error {
-	return nil
+type LocalClipStorageOpts struct {
+	archivePath string
 }
 
-func (s *LocalClipStorage) ReadFile(start int64, end int64) (int, error) {
+func NewLocalClipStorage(metadata *archive.ClipArchiveMetadata, opts LocalClipStorageOpts) (*LocalClipStorage, error) {
+	return &LocalClipStorage{
+		metadata:    metadata,
+		archivePath: opts.archivePath,
+	}, nil
+}
 
+func (s *LocalClipStorage) ReadFile(path string) (int, error) {
 	return 0, nil
+}
+
+func (s *LocalClipStorage) ListDir(path string) {
+	node := s.metadata.Get(path)
+	log.Println("NODE: ", node.Path)
+}
+
+func (s *LocalClipStorage) Metadata() *archive.ClipArchiveMetadata {
+	return s.metadata
 }

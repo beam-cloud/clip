@@ -1,25 +1,36 @@
 package storage
 
 import (
-	"context"
+	"errors"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/beam-cloud/clip/pkg/archive"
 )
 
 type ClipStorageInterface interface {
-	ReadIndex() error
-	ReadFile(int64, int64) (int, error)
+	ReadFile(string) (int, error)
+	ListDir(string)
+	Metadata() *archive.ClipArchiveMetadata
 }
 
-func NewClipStorage(bucket string, region string) (ClipStorageInterface, error) {
-	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+type ClipStorageOpts interface {
+}
+
+func NewClipStorage(metadata *archive.ClipArchiveMetadata, storageType string, storageOpts ClipStorageOpts) (ClipStorageInterface, error) {
+	var storage ClipStorageInterface = nil
+	var err error = nil
+
+	switch storageType {
+	case "s3":
+		storage, err = NewS3ClipStorage(storageOpts.(S3ClipStorageOpts))
+	case "local":
+		storage, err = NewLocalClipStorage(metadata, storageOpts.(LocalClipStorageOpts))
+	default:
+		err = errors.New("unsupported storage type")
+	}
+
 	if err != nil {
 		return nil, err
 	}
 
-	return &S3ClipStorage{
-		svc:    s3.NewFromConfig(cfg),
-		bucket: bucket,
-	}, nil
+	return storage, nil
 }

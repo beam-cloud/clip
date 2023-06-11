@@ -8,16 +8,20 @@ import (
 
 type StorageInfo interface {
 	Type() string
+	Encode() []byte
 }
 
 type S3StorageInfo struct {
 	Bucket string
 	Key    string
-	// possibly other S3 related info (region, credentials, etc.)
 }
 
 func (ssi S3StorageInfo) Type() string {
 	return "s3"
+}
+
+func (ssi S3StorageInfo) Encode() []byte {
+	return nil
 }
 
 type RClipArchiver struct {
@@ -33,9 +37,7 @@ func NewRClipArchiver(si StorageInfo) (*RClipArchiver, error) {
 }
 
 func (rca *RClipArchiver) Create(opts ClipArchiverOptions) error {
-	_, err := rca.ClipArchiver.ExtractMetadata(ClipArchiverOptions{
-		ArchivePath: opts.ArchivePath,
-	})
+	_, err := rca.ClipArchiver.ExtractMetadata(opts.ArchivePath)
 	if err != nil {
 		return err
 	}
@@ -46,6 +48,11 @@ func (rca *RClipArchiver) Create(opts ClipArchiverOptions) error {
 	default:
 		return errors.New("unsupported storage type")
 	}
+
+	return nil
+}
+
+func (rca *RClipArchiver) write() error {
 
 	return nil
 }
