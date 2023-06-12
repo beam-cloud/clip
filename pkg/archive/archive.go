@@ -71,6 +71,7 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				nodeType = DirNode
 			} else if de.IsSymlink() {
 				_target, err := os.Readlink(path)
+
 				if err != nil {
 					return fmt.Errorf("error reading symlink target %s: %v", path, err)
 				}
@@ -98,6 +99,8 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 			mode := uint32(fi.Mode())
 			if fi.IsDir() {
 				mode |= syscall.S_IFDIR
+			} else if de.IsSymlink() {
+				mode |= syscall.S_IFLNK
 			} else {
 				mode |= syscall.S_IFREG
 			}
