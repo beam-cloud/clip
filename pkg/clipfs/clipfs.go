@@ -22,9 +22,9 @@ func NewFileSystem(s storage.ClipStorageInterface, verbose bool) *ClipFileSystem
 	metadata := s.Metadata()
 	rootNode := metadata.Get("/")
 	cfs.root = &FSNode{
-		cfs:      cfs,
-		attr:     rootNode.Attr,
-		clipNode: rootNode,
+		filesystem: cfs,
+		attr:       rootNode.Attr,
+		clipNode:   rootNode,
 	}
 
 	return cfs

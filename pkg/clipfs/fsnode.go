@@ -14,13 +14,13 @@ import (
 
 type FSNode struct {
 	fs.Inode
-	cfs      *ClipFileSystem
-	clipNode *archive.ClipNode
-	attr     fuse.Attr
+	filesystem *ClipFileSystem
+	clipNode   *archive.ClipNode
+	attr       fuse.Attr
 }
 
 func (n *FSNode) log(format string, v ...interface{}) {
-	if n.cfs.verbose {
+	if n.filesystem.verbose {
 		log.Printf(fmt.Sprintf("[INFO] (%s) %s", n.clipNode.Path, format), v...)
 	}
 }
@@ -33,7 +33,7 @@ func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	n.log("Getattr called")
 
 	// Fetch the node attributes
-	node := n.cfs.s.Metadata().Get(n.clipNode.Path)
+	node := n.filesystem.s.Metadata().Get(n.clipNode.Path)
 	if node == nil {
 		return syscall.ENOENT
 	}
@@ -59,7 +59,7 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	childPath := path.Join(n.clipNode.Path, name)
 
 	// Lookup the child node
-	child := n.cfs.s.Metadata().Get(childPath)
+	child := n.filesystem.s.Metadata().Get(childPath)
 	if child == nil {
 		// No child with the requested name exists
 		return nil, syscall.ENOENT
@@ -69,7 +69,7 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	out.Attr = child.Attr
 
 	// Create a new Inode for the child
-	childInode := n.NewInode(ctx, &FSNode{cfs: n.cfs, clipNode: child, attr: child.Attr}, fs.StableAttr{Mode: child.Attr.Mode, Ino: child.Attr.Ino})
+	childInode := n.NewInode(ctx, &FSNode{filesystem: n.filesystem, clipNode: child, attr: child.Attr}, fs.StableAttr{Mode: child.Attr.Mode, Ino: child.Attr.Ino})
 	return childInode, fs.OK
 }
 
@@ -86,7 +86,7 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
-	nRead, err := n.cfs.s.ReadFile(n.clipNode, dest, off)
+	nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 	if err != nil {
 		return nil, syscall.EIO
 	}
@@ -112,7 +112,7 @@ func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 func (n *FSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	n.log("Readdir called")
 
-	dirEntries := n.cfs.s.Metadata().ListDirectory(n.clipNode.Path)
+	dirEntries := n.filesystem.s.Metadata().ListDirectory(n.clipNode.Path)
 	return fs.NewListDirStream(dirEntries), fs.OK
 }
 
