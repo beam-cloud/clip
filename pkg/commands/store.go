@@ -22,11 +22,11 @@ var StoreS3Cmd = &cobra.Command{
 }
 
 type StoreS3Options struct {
-	InputFile  string
-	AccessKey  string
-	SecretKey  string
-	Bucket     string
-	OutputFile string
+	ArchivePath string
+	AccessKey   string
+	SecretKey   string
+	Bucket      string
+	OutputFile  string
 }
 
 var storeS3Opts = &StoreS3Options{}
@@ -34,7 +34,7 @@ var storeS3Opts = &StoreS3Options{}
 func init() {
 	StoreCmd.AddCommand(StoreS3Cmd)
 
-	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.InputFile, "input", "i", "", "Input CLIP archive path")
+	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.ArchivePath, "input", "i", "", "Input CLIP archive path")
 	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.OutputFile, "output", "o", "", "Output RCLIP archive path")
 	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.AccessKey, "access-key", "a", "", "S3 access key")
 	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.SecretKey, "secret-key", "s", "", "S3 secret key")
@@ -51,7 +51,7 @@ func runStoreS3(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	err = a.Create(archive.ClipArchiverOptions{ArchivePath: storeS3Opts.InputFile})
+	err = a.Create(archive.ClipArchiverOptions{ArchivePath: storeS3Opts.ArchivePath})
 	if err != nil {
 		return err
 	}
