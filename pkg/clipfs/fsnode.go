@@ -70,43 +70,51 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return nil, syscall.ENOENT
 	}
 
+	// Fill out the child node's attributes
+	out.Attr = fuse.Attr{
+		Ino:   child.Attr.Ino,
+		Size:  child.Attr.Size,
+		Atime: child.Attr.Atime,
+		Mtime: child.Attr.Mtime,
+		Ctime: child.Attr.Ctime,
+		Mode:  child.Attr.Mode,
+		Nlink: child.Attr.Nlink,
+		Owner: fuse.Owner{
+			Uid: child.Attr.Owner.Uid,
+			Gid: child.Attr.Owner.Gid,
+		},
+	}
+
 	// Create a new Inode for the child
 	childInode := n.NewInode(ctx, &FSNode{cfs: n.cfs, clipNode: child, attr: child.Attr}, fs.StableAttr{Mode: child.Attr.Mode, Ino: child.Attr.Ino})
 	return childInode, fs.OK
 }
 
 func (n *FSNode) Opendir(ctx context.Context) syscall.Errno {
-	log.Println("OpenDir called")
 	return 0
 }
 
 func (n *FSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	log.Println("ReadDir called")
 	dirEntries := n.cfs.s.Metadata().ListDirectory(n.clipNode.Path)
 	return fs.NewListDirStream(dirEntries), fs.OK
 }
 
 func (n *FSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	log.Println("Create called")
 	return nil, nil, 0, syscall.EROFS
 }
 
 func (n *FSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	log.Println("Mkdir called")
-	return nil, syscall.EPERM
+	return nil, syscall.EROFS
 }
 
 func (n *FSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	log.Println("Rmdir called")
-	return syscall.EPERM
+	return syscall.EROFS
 }
 
 func (n *FSNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	log.Println("Unlink called")
-	return fs.OK
+	return syscall.EROFS
 }
 
 func (n *FSNode) Rename(ctx context.Context, oldName string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	log.Println("Rename called")
-	return fs.OK
+	return syscall.EROFS
 }

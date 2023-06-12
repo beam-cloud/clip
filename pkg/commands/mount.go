@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os/exec"
+	"time"
 
 	"github.com/beam-cloud/clip/pkg/archive"
 	clipfs "github.com/beam-cloud/clip/pkg/clipfs"
@@ -69,7 +70,12 @@ func runMount(cmd *cobra.Command, args []string) {
 	clipfs := clipfs.NewFileSystem(s)
 	root, _ := clipfs.Root()
 
-	fsOptions := &fs.Options{}
+	attrTimeout := time.Second * 60
+	entryTimeout := time.Second * 60
+	fsOptions := &fs.Options{
+		AttrTimeout:  &attrTimeout,
+		EntryTimeout: &entryTimeout,
+	}
 	server, err := fuse.NewServer(fs.NewNodeFS(root, fsOptions), mountOptions.mountPoint, &fuse.MountOptions{})
 	if err != nil {
 		log.Fatalf("Could not create server: %v", err)
