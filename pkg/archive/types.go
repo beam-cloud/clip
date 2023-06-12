@@ -29,6 +29,11 @@ func (n *ClipNode) IsDir() bool {
 	return n.NodeType == DirNode
 }
 
+// IsSymlink returns true if the ClipNode represents a symlink.
+func (n *ClipNode) IsSymlink() bool {
+	return n.NodeType == SymLinkNode
+}
+
 type ClipArchiveMetadata struct {
 	Header ClipArchiveHeader
 	Index  *btree.BTree

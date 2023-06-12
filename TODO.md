@@ -7,7 +7,7 @@ TODO:
   - test archiving actual file content - DONE
 - create distributable remote clip (rclip?)
 - add command to create mountable clip from existing clip file
-- add filesystem that allows me to interact with a local clip file to prove the concept
+- add filesystem that allows me to interact with a local clip file to prove the concept - DONE
 - add optional compression
-- add optional verbose logging
+- add optional verbose logging - DONE
 - verify checksum on extraction / archiving
