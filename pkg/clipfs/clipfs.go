@@ -3,6 +3,7 @@ package clipfs
 import (
 	"fmt"
 
+	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 )
@@ -13,7 +14,7 @@ type ClipFileSystem struct {
 	verbose bool
 }
 
-func NewFileSystem(s storage.ClipStorageInterface, verbose bool) *ClipFileSystem {
+func NewFileSystem(s storage.ClipStorageInterface, verbose bool) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
 		s:       s,
 		verbose: verbose,
@@ -21,13 +22,17 @@ func NewFileSystem(s storage.ClipStorageInterface, verbose bool) *ClipFileSystem
 
 	metadata := s.Metadata()
 	rootNode := metadata.Get("/")
+	if rootNode == nil {
+		return nil, common.ErrMissingArchiveRoot
+	}
+
 	cfs.root = &FSNode{
 		filesystem: cfs,
 		attr:       rootNode.Attr,
 		clipNode:   rootNode,
 	}
 
-	return cfs
+	return cfs, nil
 }
 
 func (cfs *ClipFileSystem) Root() (fs.InodeEmbedder, error) {

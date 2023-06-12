@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -47,6 +48,15 @@ func runMount(cmd *cobra.Command, args []string) {
 
 	forceUnmount() // Force unmount the file system if it's already mounted
 
+	// Check if the mount point directory exists, if not, create it
+	if _, err := os.Stat(mountOptions.mountPoint); os.IsNotExist(err) {
+		err = os.MkdirAll(mountOptions.mountPoint, 0755)
+		if err != nil {
+			log.Fatalf("Failed to create mount point directory: %v", err)
+		}
+		log.Information("Mount point directory created.")
+	}
+
 	ca := archive.NewClipArchiver()
 	metadata, err := ca.ExtractMetadata(mountOptions.archivePath)
 	if err != nil {
@@ -71,7 +81,11 @@ func runMount(cmd *cobra.Command, args []string) {
 		log.Fatalf("Could not load storage: %v", err)
 	}
 
-	clipfs := clipfs.NewFileSystem(s, mountOptions.Verbose)
+	clipfs, err := clipfs.NewFileSystem(s, mountOptions.Verbose)
+	if err != nil {
+		log.Fatalf("Could not create filesystem: %v", err)
+	}
+
 	root, _ := clipfs.Root()
 
 	attrTimeout := time.Second * 60
