@@ -8,13 +8,15 @@ import (
 )
 
 type ClipFileSystem struct {
-	s    storage.ClipStorageInterface
-	root *FSNode
+	s       storage.ClipStorageInterface
+	root    *FSNode
+	verbose bool
 }
 
-func NewFileSystem(s storage.ClipStorageInterface) *ClipFileSystem {
+func NewFileSystem(s storage.ClipStorageInterface, verbose bool) *ClipFileSystem {
 	cfs := &ClipFileSystem{
-		s: s,
+		s:       s,
+		verbose: verbose,
 	}
 
 	metadata := s.Metadata()

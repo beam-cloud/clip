@@ -7,7 +7,7 @@ import (
 )
 
 type ClipStorageInterface interface {
-	ReadFile(string) (int, error)
+	ReadFile(node *archive.ClipNode, dest []byte, offset int64) (int, error)
 	Metadata() *archive.ClipArchiveMetadata
 }
 

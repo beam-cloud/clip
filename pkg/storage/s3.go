@@ -39,7 +39,7 @@ func NewS3ClipStorage(metadata *archive.ClipArchiveMetadata, opts S3ClipStorageO
 	}, nil
 }
 
-func (s3c *S3ClipStorage) ReadFile(path string) (int, error) {
+func (s3c *S3ClipStorage) ReadFile(node *archive.ClipNode, dest []byte, off int64) (int, error) {
 	start := 0
 	end := 0
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)

@@ -18,6 +18,7 @@ import (
 type MountOptions struct {
 	archivePath string
 	mountPoint  string
+	Verbose     bool
 }
 
 var mountOptions MountOptions
@@ -31,6 +32,7 @@ var MountCmd = &cobra.Command{
 func init() {
 	MountCmd.Flags().StringVarP(&mountOptions.archivePath, "input", "i", "", "Archive file to mount")
 	MountCmd.Flags().StringVarP(&mountOptions.mountPoint, "mountpoint", "m", "", "Directory to mount the archive")
+	MountCmd.Flags().BoolVarP(&mountOptions.Verbose, "verbose", "v", false, "Verbose output")
 	MountCmd.MarkFlagRequired("input")
 	MountCmd.MarkFlagRequired("mountpoint")
 }
@@ -59,7 +61,9 @@ func runMount(cmd *cobra.Command, args []string) {
 	if header.StorageInfoLength > 0 {
 	} else {
 		storageType = "local"
-		storageOpts = storage.LocalClipStorageOpts{}
+		storageOpts = storage.LocalClipStorageOpts{
+			ArchivePath: mountOptions.archivePath,
+		}
 	}
 
 	s, err := storage.NewClipStorage(metadata, storageType, storageOpts)
@@ -67,7 +71,7 @@ func runMount(cmd *cobra.Command, args []string) {
 		log.Fatalf("Could not load storage: %v", err)
 	}
 
-	clipfs := clipfs.NewFileSystem(s)
+	clipfs := clipfs.NewFileSystem(s, mountOptions.Verbose)
 	root, _ := clipfs.Root()
 
 	attrTimeout := time.Second * 60
