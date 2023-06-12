@@ -26,6 +26,9 @@ import (
 
 func init() {
 	gob.Register(&common.ClipNode{})
+	gob.Register(&common.StorageInfoWrapper{})
+	gob.Register(&common.S3StorageInfo{})
+
 }
 
 type ClipArchiverOptions struct {
@@ -267,9 +270,26 @@ func (ca *ClipArchiver) CreateRemoteArchive(storageInfo common.ClipStorageInfo, 
 		return err
 	}
 
+	// Wrap encoded storage info in a StorageInfoWrapper
+	wrapper := common.StorageInfoWrapper{
+		Type: storageInfo.Type(),
+		Data: storageInfoBytes,
+	}
+
+	// Encode the wrapper
+	var buf bytes.Buffer
+	wrapperEnc := gob.NewEncoder(&buf)
+	if err := wrapperEnc.Encode(wrapper); err != nil {
+		return err
+	}
+
+	wrapperBytes := buf.Bytes()
+
+	log.Println("wrapper length: ", len(wrapperBytes))
+
 	// Write storage info at the end of the file
-	header.StorageInfoLength = int64(len(storageInfoBytes))
-	if _, err := outFile.Write(storageInfoBytes); err != nil {
+	header.StorageInfoLength = int64(len(wrapperBytes))
+	if _, err := outFile.Write(wrapperBytes); err != nil {
 		return err
 	}
 
@@ -340,9 +360,43 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 		index.Set(node)
 	}
 
+	var storageInfo common.ClipStorageInfo
+	if header.StorageInfoLength > 0 {
+		// Read and decode the storage info
+		_, err = file.Seek(header.StorageInfoPos, 0)
+		if err != nil {
+			return nil, fmt.Errorf("error seeking to storage info: %v", err)
+		}
+
+		storageBytes := make([]byte, header.StorageInfoLength)
+		if _, err := io.ReadFull(file, storageBytes); err != nil {
+			return nil, fmt.Errorf("error reading storage info: %v", err)
+		}
+
+		storageReader := bytes.NewReader(storageBytes)
+		storageDec := gob.NewDecoder(storageReader)
+
+		var wrapper common.StorageInfoWrapper
+		if err := storageDec.Decode(&wrapper); err != nil {
+			return nil, fmt.Errorf("error decoding storage info: %v", err)
+		}
+
+		switch wrapper.Type {
+		case "s3":
+			var s3Info common.S3StorageInfo
+			if err := gob.NewDecoder(bytes.NewReader(wrapper.Data)).Decode(&s3Info); err != nil {
+				return nil, fmt.Errorf("error decoding s3 storage info: %v", err)
+			}
+			storageInfo = s3Info
+		default:
+			return nil, fmt.Errorf("unsupported storage info type: %s", wrapper.Type)
+		}
+	}
+
 	return &common.ClipArchiveMetadata{
-		Index:  index,
-		Header: *header,
+		Index:       index,
+		Header:      *header,
+		StorageInfo: storageInfo,
 	}, nil
 }
 

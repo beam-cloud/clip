@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/beam-cloud/clip/pkg/archive"
+	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/okteto/okteto/pkg/log"
 	"github.com/spf13/cobra"
 )
@@ -50,7 +51,7 @@ func runStoreS3(cmd *cobra.Command, args []string) error {
 		storeS3Opts.Key = filepath.Base(storeS3Opts.ArchivePath)
 	}
 
-	storageInfo := &archive.S3StorageInfo{Bucket: storeS3Opts.Bucket, Key: storeS3Opts.Key, Region: region}
+	storageInfo := &common.S3StorageInfo{Bucket: storeS3Opts.Bucket, Key: storeS3Opts.Key, Region: region}
 	a, err := archive.NewRClipArchiver(storageInfo)
 	if err != nil {
 		return err

@@ -1,7 +1,6 @@
 package archive
 
 import (
-	"bytes"
 	"encoding/gob"
 	"errors"
 	"os"
@@ -11,28 +10,8 @@ import (
 	log "github.com/okteto/okteto/pkg/log"
 )
 
-type S3StorageInfo struct {
-	Bucket string
-	Region string
-	Key    string
-}
-
-func (ssi S3StorageInfo) Type() string {
-	return "s3"
-}
-
-func (ssi S3StorageInfo) Encode() ([]byte, error) {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	if err := enc.Encode(ssi); err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
-}
-
 func init() {
-	gob.Register(&S3StorageInfo{})
+	gob.Register(&common.S3StorageInfo{})
 }
 
 type RClipArchiver struct {
@@ -55,17 +34,11 @@ func (rca *RClipArchiver) Create(archivePath string, outputPath string) error {
 
 	switch rca.StorageInfo.Type() {
 	case "s3":
-		var storageInfo *S3StorageInfo = rca.StorageInfo.(*S3StorageInfo)
-
-		accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-
+		var storageInfo *common.S3StorageInfo = rca.StorageInfo.(*common.S3StorageInfo)
 		clipStorage, err := storage.NewS3ClipStorage(metadata, storage.S3ClipStorageOpts{
-			AccessKey: accessKey,
-			SecretKey: secretKey,
-			Region:    storageInfo.Region,
-			Bucket:    storageInfo.Bucket,
-			Key:       storageInfo.Key,
+			Region: storageInfo.Region,
+			Bucket: storageInfo.Bucket,
+			Key:    storageInfo.Key,
 		})
 		if err != nil {
 			return err
@@ -77,7 +50,7 @@ func (rca *RClipArchiver) Create(archivePath string, outputPath string) error {
 			return err
 		}
 
-		err = clipStorage.Upload(outputPath)
+		err = clipStorage.Upload(archivePath)
 		if err != nil {
 			os.Remove(outputPath)
 			return err

@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,15 +25,16 @@ type S3ClipStorage struct {
 }
 
 type S3ClipStorageOpts struct {
-	Bucket    string
-	Key       string
-	Region    string
-	AccessKey string
-	SecretKey string
+	Bucket string
+	Key    string
+	Region string
 }
 
 func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
-	cfg, err := getAWSConfig(opts.AccessKey, opts.SecretKey, opts.Region)
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+
+	cfg, err := getAWSConfig(accessKey, secretKey, opts.Region)
 	if err != nil {
 		return nil, err
 	}
@@ -40,8 +43,8 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		svc:       s3.NewFromConfig(cfg),
 		bucket:    opts.Bucket,
 		key:       opts.Key,
-		accessKey: opts.AccessKey,
-		secretKey: opts.SecretKey,
+		accessKey: accessKey,
+		secretKey: secretKey,
 		metadata:  metadata,
 	}, nil
 }
@@ -63,7 +66,7 @@ func getAWSConfig(accessKey string, secretKey string, region string) (aws.Config
 func (s3c *S3ClipStorage) Upload(archivePath string) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
-		return fmt.Errorf("failed to open archive %q, %v", archivePath, err)
+		return fmt.Errorf("failed to open archive <%s>: %v", archivePath, err)
 	}
 	defer f.Close()
 
@@ -75,20 +78,20 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 
 	_, err = s3c.svc.PutObject(context.TODO(), input)
 	if err != nil {
-		return fmt.Errorf("failed to upload file, %v", err)
+		return fmt.Errorf("failed to upload archive: %v", err)
 	}
 
 	return nil
 }
 
 func (s3c *S3ClipStorage) Download(objectKey string, destPath string) error {
-	// Implement the method to download a file from S3
+	// TODO: Implement full download of the original archive
 	return nil
 }
 
 func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
-	start := 0
-	end := 0
+	start := node.DataPos + off
+	end := start + int64(len(dest)) - 1 // Byte ranges in HTTP RANGE requests are inclusive, so we have to subtract one
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
@@ -102,11 +105,17 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	}
 	defer resp.Body.Close()
 
-	if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
+	if end-start+1 > int64(len(dest)) {
+		return 0, errors.New("dest slice is too small")
+	}
+
+	buf := bytes.NewBuffer(dest[:0]) // clear buffer but keep capacity
+	n, err := io.Copy(buf, resp.Body)
+	if err != nil {
 		return 0, err
 	}
 
-	return 0, nil
+	return int(n), nil
 }
 
 func (s3c *S3ClipStorage) Metadata() *common.ClipArchiveMetadata {

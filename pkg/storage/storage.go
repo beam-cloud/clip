@@ -14,15 +14,34 @@ type ClipStorageInterface interface {
 type ClipStorageOpts interface {
 }
 
-func NewClipStorage(metadata *common.ClipArchiveMetadata, storageType string, storageOpts ClipStorageOpts) (ClipStorageInterface, error) {
+func NewClipStorage(archivePath string, metadata *common.ClipArchiveMetadata) (ClipStorageInterface, error) {
 	var storage ClipStorageInterface = nil
+	var storageType string
 	var err error = nil
+
+	header := metadata.Header
+
+	// This a remote archive, so we have to load that particular storage implementation
+	if header.StorageInfoLength > 0 {
+		storageType = metadata.StorageInfo.Type()
+	} else {
+		storageType = "local"
+	}
 
 	switch storageType {
 	case "s3":
-		storage, err = NewS3ClipStorage(metadata, storageOpts.(S3ClipStorageOpts))
+		storageInfo := metadata.StorageInfo.(common.S3StorageInfo)
+		opts := S3ClipStorageOpts{
+			Bucket: storageInfo.Bucket,
+			Region: storageInfo.Region,
+			Key:    storageInfo.Key,
+		}
+		storage, err = NewS3ClipStorage(metadata, opts)
 	case "local":
-		storage, err = NewLocalClipStorage(metadata, storageOpts.(LocalClipStorageOpts))
+		opts := LocalClipStorageOpts{
+			ArchivePath: archivePath,
+		}
+		storage, err = NewLocalClipStorage(metadata, opts)
 	default:
 		err = errors.New("unsupported storage type")
 	}

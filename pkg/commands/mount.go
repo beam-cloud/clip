@@ -63,20 +63,7 @@ func runMount(cmd *cobra.Command, args []string) {
 		log.Fatalf("invalid archive: %v", err)
 	}
 
-	header := metadata.Header
-	var storageType string = ""
-	var storageOpts storage.ClipStorageOpts
-
-	// This a remote archive, so we have to load that particular storage implementation
-	if header.StorageInfoLength > 0 {
-	} else {
-		storageType = "local"
-		storageOpts = storage.LocalClipStorageOpts{
-			ArchivePath: mountOptions.archivePath,
-		}
-	}
-
-	s, err := storage.NewClipStorage(metadata, storageType, storageOpts)
+	s, err := storage.NewClipStorage(mountOptions.archivePath, metadata)
 	if err != nil {
 		log.Fatalf("Could not load storage: %v", err)
 	}
