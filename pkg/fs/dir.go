@@ -11,7 +11,7 @@ import (
 
 type Dir struct {
 	fs.Inode
-	fsys *FileSystem
+	cfs  *ClipFileSystem
 	attr fuse.Attr
 	// You could add more fields here, such as the directory's name,
 	// its metadata, its contents, etc.
@@ -33,8 +33,7 @@ func (d *Dir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) 
 
 	log.Println("attr: ", d.attr)
 	*out = fuse.AttrOut{
-		Attr:      d.attr,
-		AttrValid: 1,
+		Attr: d.attr,
 	}
 	return fs.OK
 }
@@ -54,7 +53,8 @@ func (d *Dir) Opendir(ctx context.Context) syscall.Errno {
 }
 
 func (d *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	log.Println("Readdir called")
+	metadata := d.cfs.s.Metadata()
+	log.Println("ReadDir called: ", metadata.Get("/log"))
 	return nil, syscall.ENOENT
 }
 

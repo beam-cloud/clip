@@ -11,9 +11,7 @@ import (
 
 type File struct {
 	fs.Inode
-	fsys *FileSystem
-	// You could add more fields here, such as the file's name,
-	// its metadata, its contents, etc.
+	cfs *ClipFileSystem
 }
 
 func (f *File) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {

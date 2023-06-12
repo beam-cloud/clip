@@ -8,13 +8,13 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 )
 
-type FileSystem struct {
+type ClipFileSystem struct {
 	s    storage.ClipStorageInterface
 	root *Dir
 }
 
-func NewFileSystem(s storage.ClipStorageInterface) *FileSystem {
-	fsys := &FileSystem{
+func NewFileSystem(s storage.ClipStorageInterface) *ClipFileSystem {
+	cfs := &ClipFileSystem{
 		s: s,
 	}
 
@@ -22,17 +22,17 @@ func NewFileSystem(s storage.ClipStorageInterface) *FileSystem {
 	rootNode := metadata.Get("/log")
 
 	log.Println("root node: ", rootNode)
-	fsys.root = &Dir{
-		fsys: fsys,
+	cfs.root = &Dir{
+		cfs:  cfs,
 		attr: rootNode.Attr,
 	}
 
-	return fsys
+	return cfs
 }
 
-func (fsys *FileSystem) Root() (fs.InodeEmbedder, error) {
-	if fsys.root == nil {
+func (cfs *ClipFileSystem) Root() (fs.InodeEmbedder, error) {
+	if cfs.root == nil {
 		return nil, fmt.Errorf("root not initialized")
 	}
-	return fsys.root, nil
+	return cfs.root, nil
 }

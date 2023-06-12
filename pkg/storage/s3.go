@@ -13,9 +13,10 @@ import (
 )
 
 type S3ClipStorage struct {
-	svc    *s3.Client
-	bucket string
-	key    string
+	svc      *s3.Client
+	bucket   string
+	key      string
+	metadata *archive.ClipArchiveMetadata
 }
 
 type S3ClipStorageOpts struct {
@@ -24,16 +25,17 @@ type S3ClipStorageOpts struct {
 	region string
 }
 
-func NewS3ClipStorage(opts S3ClipStorageOpts) (*S3ClipStorage, error) {
+func NewS3ClipStorage(metadata *archive.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(opts.region))
 	if err != nil {
 		return nil, err
 	}
 
 	return &S3ClipStorage{
-		svc:    s3.NewFromConfig(cfg),
-		bucket: opts.bucket,
-		key:    opts.key,
+		svc:      s3.NewFromConfig(cfg),
+		bucket:   opts.bucket,
+		key:      opts.key,
+		metadata: metadata,
 	}, nil
 }
 
@@ -65,5 +67,5 @@ func (s3c *S3ClipStorage) ListDir(path string) {
 }
 
 func (s3c *S3ClipStorage) Metadata() *archive.ClipArchiveMetadata {
-	return nil
+	return s3c.metadata
 }

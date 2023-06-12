@@ -21,7 +21,7 @@ func NewClipStorage(metadata *archive.ClipArchiveMetadata, storageType string, s
 
 	switch storageType {
 	case "s3":
-		storage, err = NewS3ClipStorage(storageOpts.(S3ClipStorageOpts))
+		storage, err = NewS3ClipStorage(metadata, storageOpts.(S3ClipStorageOpts))
 	case "local":
 		storage, err = NewLocalClipStorage(metadata, storageOpts.(LocalClipStorageOpts))
 	default:

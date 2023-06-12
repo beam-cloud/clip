@@ -83,6 +83,7 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 					return err
 				}
 			}
+
 			attr := fuse.Attr{
 				Ino:    fi.Sys().(*syscall.Stat_t).Ino,
 				Size:   uint64(fi.Size()),
