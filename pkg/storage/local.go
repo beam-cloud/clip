@@ -1,8 +1,6 @@
 package storage
 
 import (
-	"log"
-
 	"github.com/beam-cloud/clip/pkg/archive"
 )
 
@@ -24,11 +22,6 @@ func NewLocalClipStorage(metadata *archive.ClipArchiveMetadata, opts LocalClipSt
 
 func (s *LocalClipStorage) ReadFile(path string) (int, error) {
 	return 0, nil
-}
-
-func (s *LocalClipStorage) ListDir(path string) {
-	node := s.metadata.Get(path)
-	log.Println("NODE: ", node.Path)
 }
 
 func (s *LocalClipStorage) Metadata() *archive.ClipArchiveMetadata {

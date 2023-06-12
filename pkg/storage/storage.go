@@ -8,7 +8,6 @@ import (
 
 type ClipStorageInterface interface {
 	ReadFile(string) (int, error)
-	ListDir(string)
 	Metadata() *archive.ClipArchiveMetadata
 }
 

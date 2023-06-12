@@ -62,10 +62,6 @@ func (s3c *S3ClipStorage) ReadFile(path string) (int, error) {
 	return 0, nil
 }
 
-func (s3c *S3ClipStorage) ListDir(path string) {
-
-}
-
 func (s3c *S3ClipStorage) Metadata() *archive.ClipArchiveMetadata {
 	return s3c.metadata
 }
