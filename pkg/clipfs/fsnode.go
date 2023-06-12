@@ -7,7 +7,7 @@ import (
 	"path"
 	"syscall"
 
-	"github.com/beam-cloud/clip/pkg/archive"
+	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -15,7 +15,7 @@ import (
 type FSNode struct {
 	fs.Inode
 	filesystem *ClipFileSystem
-	clipNode   *archive.ClipNode
+	clipNode   *common.ClipNode
 	attr       fuse.Attr
 }
 
@@ -97,7 +97,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	n.log("Readlink called")
 
-	if n.clipNode.NodeType != archive.SymLinkNode {
+	if n.clipNode.NodeType != common.SymLinkNode {
 		// This node is not a symlink
 		return nil, syscall.EINVAL
 	}

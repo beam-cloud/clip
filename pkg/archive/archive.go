@@ -17,7 +17,7 @@ import (
 
 	log "github.com/okteto/okteto/pkg/log"
 
-	"github.com/beam-cloud/clip/pkg/common"
+	common "github.com/beam-cloud/clip/pkg/common"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/karrick/godirwalk"
@@ -25,7 +25,7 @@ import (
 )
 
 func init() {
-	gob.Register(&ClipNode{})
+	gob.Register(&common.ClipNode{})
 }
 
 type ClipArchiverOptions struct {
@@ -46,16 +46,16 @@ func NewClipArchiver() *ClipArchiver {
 
 func (ca *ClipArchiver) newIndex() *btree.BTree {
 	compare := func(a, b interface{}) bool {
-		return a.(*ClipNode).Path < b.(*ClipNode).Path
+		return a.(*common.ClipNode).Path < b.(*common.ClipNode).Path
 	}
 	return btree.New(compare)
 }
 
-// populateIndex creates an representation of the filesystem/folder structure being archived
+// populateIndex creates an representation of the filesystem/folder being archived
 func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) error {
-	root := &ClipNode{
+	root := &common.ClipNode{
 		Path:     "/",
-		NodeType: DirNode,
+		NodeType: common.DirNode,
 		Attr: fuse.Attr{
 			Mode: uint32(os.ModeDir | 0755),
 		},
@@ -65,10 +65,10 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
 			var target string = ""
-			var nodeType ClipNodeType
+			var nodeType common.ClipNodeType
 
 			if de.IsDir() {
-				nodeType = DirNode
+				nodeType = common.DirNode
 			} else if de.IsSymlink() {
 				_target, err := os.Readlink(path)
 
@@ -77,14 +77,14 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				}
 
 				target = _target
-				nodeType = SymLinkNode
+				nodeType = common.SymLinkNode
 			} else {
-				nodeType = FileNode
+				nodeType = common.FileNode
 			}
 
 			var err error
 			var fi fs.FileInfo
-			if nodeType == SymLinkNode {
+			if nodeType == common.SymLinkNode {
 				fi, err = os.Lstat(path)
 				if err != nil {
 					return err
@@ -120,7 +120,7 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 			}
 
 			pathWithPrefix := filepath.Join("/", strings.TrimPrefix(path, sourcePath))
-			index.Set(&ClipNode{Path: pathWithPrefix, NodeType: nodeType, Attr: attr, Target: target})
+			index.Set(&common.ClipNode{Path: pathWithPrefix, NodeType: nodeType, Attr: attr, Target: target})
 
 			return nil
 		},
@@ -146,13 +146,16 @@ func (ca *ClipArchiver) Create(opts ClipArchiverOptions) error {
 	}
 
 	// Prepare and write placeholder for the header
-	header := ClipArchiveHeader{
-		ClipFileFormatVersion: ClipFileFormatVersion,
+	var storageType [12]byte
+	copy(storageType[:], []byte(""))
+	header := common.ClipArchiveHeader{
+		ClipFileFormatVersion: common.ClipFileFormatVersion,
 		IndexLength:           0,
 		StorageInfoLength:     0,
 		StorageInfoPos:        0,
+		StorageInfoType:       storageType,
 	}
-	copy(header.StartBytes[:], ClipFileStartBytes)
+	copy(header.StartBytes[:], common.ClipFileStartBytes)
 
 	headerPos, err := outFile.Seek(0, io.SeekCurrent) // Get current position
 	if err != nil {
@@ -160,12 +163,12 @@ func (ca *ClipArchiver) Create(opts ClipArchiverOptions) error {
 	}
 
 	// Write placeholder bytes for the header
-	if _, err := outFile.Write(make([]byte, ClipHeaderLength)); err != nil {
+	if _, err := outFile.Write(make([]byte, common.ClipHeaderLength)); err != nil {
 		return err
 	}
 
 	// Write data blocks
-	var initialOffset int64 = int64(ClipHeaderLength)
+	var initialOffset int64 = int64(common.ClipHeaderLength)
 	err = ca.writeBlocks(index, opts.SourcePath, outFile, initialOffset, opts)
 	if err != nil {
 		return err
@@ -207,7 +210,88 @@ func (ca *ClipArchiver) Create(opts ClipArchiverOptions) error {
 	return nil
 }
 
-func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*ClipArchiveMetadata, error) {
+func (ca *ClipArchiver) CreateRemoteArchive(storageInfo common.ClipStorageInfo, metadata *common.ClipArchiveMetadata, outputFile string) error {
+	outFile, err := os.Create(outputFile)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	// Prepare and write placeholder for the header
+	var storageType [12]byte
+	copy(storageType[:], []byte(storageInfo.Type()))
+
+	header := common.ClipArchiveHeader{
+		ClipFileFormatVersion: common.ClipFileFormatVersion,
+		IndexLength:           0,
+		StorageInfoLength:     0,
+		StorageInfoPos:        0,
+		StorageInfoType:       storageType,
+	}
+	copy(header.StartBytes[:], common.ClipFileStartBytes)
+
+	headerPos, err := outFile.Seek(0, io.SeekCurrent) // Get current position
+	if err != nil {
+		return err
+	}
+
+	// Write placeholder bytes for the header
+	if _, err := outFile.Write(make([]byte, common.ClipHeaderLength)); err != nil {
+		return err
+	}
+
+	// Write the actual index data
+	indexPos, err := outFile.Seek(0, io.SeekCurrent) // Get current position
+	if err != nil {
+		return err
+	}
+
+	indexBytes, err := ca.EncodeIndex(metadata.Index)
+	if err != nil {
+		return err
+	}
+
+	if _, err := outFile.Write(indexBytes); err != nil {
+		return err
+	}
+
+	// Update the header with the correct index size and position
+	header.IndexLength = int64(len(indexBytes))
+	header.IndexPos = indexPos
+
+	// Encode storage info
+	header.StorageInfoPos = header.IndexPos + header.IndexLength
+
+	storageInfoBytes, err := storageInfo.Encode()
+	if err != nil {
+		return err
+	}
+
+	// Write storage info at the end of the file
+	header.StorageInfoLength = int64(len(storageInfoBytes))
+	if _, err := outFile.Write(storageInfoBytes); err != nil {
+		return err
+	}
+
+	// Finally, encode and write the header
+	headerBytes, err := ca.EncodeHeader(&header)
+	if err != nil {
+		return err
+	}
+
+	_, err = outFile.Seek(headerPos, os.SEEK_SET) // Go back to header position
+	if err != nil {
+		return err
+	}
+
+	if _, err := outFile.Write(headerBytes); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchiveMetadata, error) {
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, err
@@ -215,7 +299,7 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*ClipArchiveMetadat
 	defer file.Close()
 
 	// Read and decode the header
-	headerBytes := make([]byte, ClipHeaderLength)
+	headerBytes := make([]byte, common.ClipHeaderLength)
 	if _, err := io.ReadFull(file, headerBytes); err != nil {
 		return nil, common.ErrFileHeaderMismatch
 	}
@@ -227,7 +311,7 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*ClipArchiveMetadat
 	}
 
 	// Verify the header
-	if !bytes.Equal(header.StartBytes[:], ClipFileStartBytes) || header.ClipFileFormatVersion != ClipFileFormatVersion {
+	if !bytes.Equal(header.StartBytes[:], common.ClipFileStartBytes) || header.ClipFileFormatVersion != common.ClipFileFormatVersion {
 		return nil, common.ErrFileHeaderMismatch
 	}
 
@@ -246,7 +330,7 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*ClipArchiveMetadat
 	indexReader := bytes.NewReader(indexBytes)
 	indexDec := gob.NewDecoder(indexReader)
 
-	var nodes []*ClipNode
+	var nodes []*common.ClipNode
 	if err := indexDec.Decode(&nodes); err != nil {
 		return nil, fmt.Errorf("error decoding index: %v", err)
 	}
@@ -256,7 +340,7 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*ClipArchiveMetadat
 		index.Set(node)
 	}
 
-	return &ClipArchiveMetadata{
+	return &common.ClipArchiveMetadata{
 		Index:  index,
 		Header: *header,
 	}, nil
@@ -271,7 +355,7 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	os.MkdirAll(opts.OutputPath, 0755)
 
 	// Read and decode the header
-	headerBytes := make([]byte, ClipHeaderLength)
+	headerBytes := make([]byte, common.ClipHeaderLength)
 	if _, err := io.ReadFull(file, headerBytes); err != nil {
 		return common.ErrFileHeaderMismatch
 	}
@@ -283,7 +367,7 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	}
 
 	// Verify the header
-	if !bytes.Equal(header.StartBytes[:], ClipFileStartBytes) || header.ClipFileFormatVersion != ClipFileFormatVersion {
+	if !bytes.Equal(header.StartBytes[:], common.ClipFileStartBytes) || header.ClipFileFormatVersion != common.ClipFileFormatVersion {
 		return common.ErrFileHeaderMismatch
 	}
 
@@ -302,7 +386,7 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	indexReader := bytes.NewReader(indexBytes)
 	indexDec := gob.NewDecoder(indexReader)
 
-	var nodes []*ClipNode
+	var nodes []*common.ClipNode
 	if err := indexDec.Decode(&nodes); err != nil {
 		return fmt.Errorf("error decoding index: %v", err)
 	}
@@ -314,13 +398,13 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 
 	// Iterate over the index and extract every node
 	index.Ascend(index.Min(), func(a interface{}) bool {
-		node := a.(*ClipNode)
+		node := a.(*common.ClipNode)
 
 		if opts.Verbose {
 			log.Spinner(fmt.Sprintf("Extracting... %s", node.Path))
 		}
 
-		if node.NodeType == FileNode {
+		if node.NodeType == common.FileNode {
 			// Seek to the position of the file in the archive
 			_, err := file.Seek(node.DataPos, 0)
 			if err != nil {
@@ -347,9 +431,9 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 				return false
 			}
 
-		} else if node.NodeType == DirNode {
+		} else if node.NodeType == common.DirNode {
 			os.MkdirAll(path.Join(opts.OutputPath, node.Path), fs.FileMode(node.Attr.Mode))
-		} else if node.NodeType == SymLinkNode {
+		} else if node.NodeType == common.SymLinkNode {
 			os.Symlink(node.Target, path.Join(opts.OutputPath, node.Path))
 		}
 
@@ -365,13 +449,13 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 
 	var pos int64 = offset
 	index.Ascend(index.Min(), func(a interface{}) bool {
-		node := a.(*ClipNode)
+		node := a.(*common.ClipNode)
 
 		if opts.Verbose {
 			log.Spinner(fmt.Sprintf("Archiving... %s", node.Path))
 		}
 
-		if node.NodeType == FileNode {
+		if node.NodeType == common.FileNode {
 			f, err := os.Open(path.Join(sourcePath, node.Path))
 			if err != nil {
 				log.Printf("error opening source file %s: %v", node.Path, err)
@@ -383,7 +467,7 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 			table := crc64.MakeTable(crc64.ISO)
 			hash := crc64.New(table)
 
-			blockType := blockTypeFile
+			blockType := common.BlockTypeFile
 
 			// Write block type
 			if err := binary.Write(writer, binary.LittleEndian, blockType); err != nil {
@@ -431,7 +515,7 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 	return nil
 }
 
-func (ca *ClipArchiver) EncodeHeader(header *ClipArchiveHeader) ([]byte, error) {
+func (ca *ClipArchiver) EncodeHeader(header *common.ClipArchiveHeader) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	if err := binary.Write(buf, binary.LittleEndian, header); err != nil {
 		return nil, err
@@ -439,8 +523,8 @@ func (ca *ClipArchiver) EncodeHeader(header *ClipArchiveHeader) ([]byte, error) 
 	return buf.Bytes(), nil
 }
 
-func (ca *ClipArchiver) DecodeHeader(headerBytes []byte) (*ClipArchiveHeader, error) {
-	header := new(ClipArchiveHeader)
+func (ca *ClipArchiver) DecodeHeader(headerBytes []byte) (*common.ClipArchiveHeader, error) {
+	header := new(common.ClipArchiveHeader)
 	buf := bytes.NewBuffer(headerBytes)
 	if err := binary.Read(buf, binary.LittleEndian, header); err != nil {
 		return nil, err
@@ -449,9 +533,9 @@ func (ca *ClipArchiver) DecodeHeader(headerBytes []byte) (*ClipArchiveHeader, er
 }
 
 func (ca *ClipArchiver) EncodeIndex(index *btree.BTree) ([]byte, error) {
-	var nodes []*ClipNode
+	var nodes []*common.ClipNode
 	index.Ascend(index.Min(), func(a interface{}) bool {
-		nodes = append(nodes, a.(*ClipNode))
+		nodes = append(nodes, a.(*common.ClipNode))
 		return true
 	})
 

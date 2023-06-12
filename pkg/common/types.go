@@ -1,4 +1,4 @@
-package archive
+package common
 
 import (
 	"strings"

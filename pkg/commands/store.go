@@ -1,18 +1,17 @@
 package commands
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/beam-cloud/clip/pkg/archive"
+	"github.com/okteto/okteto/pkg/log"
 	"github.com/spf13/cobra"
 )
 
-type StoreCmdOptions struct {
-	InputFile  string
-	RemotePath string
-}
-
 var StoreCmd = &cobra.Command{
 	Use:   "store",
-	Short: "Store a CLIP archive elsewhere and create an RCLIP archive",
+	Short: "Store a CLIP archive in remote storage and create an RCLIP archive",
 }
 
 var StoreS3Cmd = &cobra.Command{
@@ -23,10 +22,9 @@ var StoreS3Cmd = &cobra.Command{
 
 type StoreS3Options struct {
 	ArchivePath string
-	AccessKey   string
-	SecretKey   string
-	Bucket      string
 	OutputFile  string
+	Bucket      string
+	Key         string
 }
 
 var storeS3Opts = &StoreS3Options{}
@@ -36,25 +34,33 @@ func init() {
 
 	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.ArchivePath, "input", "i", "", "Input CLIP archive path")
 	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.OutputFile, "output", "o", "", "Output RCLIP archive path")
-	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.AccessKey, "access-key", "a", "", "S3 access key")
-	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.SecretKey, "secret-key", "s", "", "S3 secret key")
-	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.Bucket, "bucket", "b", "", "S3 bucket")
+	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.Bucket, "bucket", "b", "", "S3 bucket name")
+	StoreS3Cmd.Flags().StringVarP(&storeS3Opts.Key, "key", "k", "", "S3 bucket key (optional)")
+
 	StoreS3Cmd.MarkFlagRequired("input")
 	StoreS3Cmd.MarkFlagRequired("output")
-
+	StoreS3Cmd.MarkFlagRequired("bucket")
 }
 
 func runStoreS3(cmd *cobra.Command, args []string) error {
-	storageInfo := &archive.S3StorageInfo{Bucket: storeS3Opts.Bucket}
+	region := os.Getenv("AWS_REGION")
+
+	// If no key is provided, use the base name of the input archive as key
+	if storeS3Opts.Key == "" {
+		storeS3Opts.Key = filepath.Base(storeS3Opts.ArchivePath)
+	}
+
+	storageInfo := &archive.S3StorageInfo{Bucket: storeS3Opts.Bucket, Key: storeS3Opts.Key, Region: region}
 	a, err := archive.NewRClipArchiver(storageInfo)
 	if err != nil {
 		return err
 	}
 
-	err = a.Create(archive.ClipArchiverOptions{ArchivePath: storeS3Opts.ArchivePath})
+	err = a.Create(storeS3Opts.ArchivePath, storeS3Opts.OutputFile)
 	if err != nil {
 		return err
 	}
 
+	log.Success("Done.")
 	return nil
 }

@@ -3,18 +3,18 @@ package storage
 import (
 	"errors"
 
-	"github.com/beam-cloud/clip/pkg/archive"
+	"github.com/beam-cloud/clip/pkg/common"
 )
 
 type ClipStorageInterface interface {
-	ReadFile(node *archive.ClipNode, dest []byte, offset int64) (int, error)
-	Metadata() *archive.ClipArchiveMetadata
+	ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error)
+	Metadata() *common.ClipArchiveMetadata
 }
 
 type ClipStorageOpts interface {
 }
 
-func NewClipStorage(metadata *archive.ClipArchiveMetadata, storageType string, storageOpts ClipStorageOpts) (ClipStorageInterface, error) {
+func NewClipStorage(metadata *common.ClipArchiveMetadata, storageType string, storageOpts ClipStorageOpts) (ClipStorageInterface, error) {
 	var storage ClipStorageInterface = nil
 	var err error = nil
 
