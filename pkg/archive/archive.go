@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -115,7 +116,8 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				},
 			}
 
-			index.Set(&ClipNode{Path: strings.TrimPrefix(path, sourcePath), NodeType: nodeType, Attr: attr, Target: target})
+			pathWithPrefix := filepath.Join("/", strings.TrimPrefix(path, sourcePath))
+			index.Set(&ClipNode{Path: pathWithPrefix, NodeType: nodeType, Attr: attr, Target: target})
 
 			return nil
 		},

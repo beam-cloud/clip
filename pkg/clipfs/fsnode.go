@@ -94,6 +94,21 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	return fuse.ReadResultData(dest[:nRead]), fs.OK
 }
 
+func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	n.log("Readlink called")
+
+	if n.clipNode.NodeType != archive.SymLinkNode {
+		// This node is not a symlink
+		return nil, syscall.EINVAL
+	}
+
+	// Use the symlink target path directly
+	symlinkTarget := n.clipNode.Target
+
+	// In this case, we don't need to read the file
+	return []byte(symlinkTarget), fs.OK
+}
+
 func (n *FSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	n.log("Readdir called")
 
