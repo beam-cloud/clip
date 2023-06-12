@@ -5,7 +5,7 @@ import (
 	"os/exec"
 
 	"github.com/beam-cloud/clip/pkg/archive"
-	clipfs "github.com/beam-cloud/clip/pkg/fs"
+	clipfs "github.com/beam-cloud/clip/pkg/clipfs"
 	storage "github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"

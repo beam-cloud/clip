@@ -17,6 +17,7 @@ import (
 	log "github.com/okteto/okteto/pkg/log"
 
 	"github.com/beam-cloud/clip/pkg/common"
+
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/karrick/godirwalk"
 	"github.com/tidwall/btree"
@@ -51,6 +52,15 @@ func (ca *ClipArchiver) newIndex() *btree.BTree {
 
 // populateIndex creates an representation of the filesystem/folder structure being archived
 func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) error {
+	root := &ClipNode{
+		Path:     "/",
+		NodeType: DirNode,
+		Attr: fuse.Attr{
+			Mode: uint32(os.ModeDir | 0755),
+		},
+	}
+	index.Set(root)
+
 	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
 			var target string = ""
@@ -84,13 +94,20 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				}
 			}
 
+			mode := uint32(fi.Mode())
+			if fi.IsDir() {
+				mode |= syscall.S_IFDIR
+			} else {
+				mode |= syscall.S_IFREG
+			}
+
 			attr := fuse.Attr{
 				Ino:    fi.Sys().(*syscall.Stat_t).Ino,
 				Size:   uint64(fi.Size()),
 				Blocks: uint64(fi.Sys().(*syscall.Stat_t).Blocks),
 				Atime:  uint64(fi.ModTime().Unix()),
 				Mtime:  uint64(fi.ModTime().Unix()),
-				Mode:   uint32(fi.Mode().Perm()),
+				Mode:   mode,
 				Nlink:  uint32(fi.Sys().(*syscall.Stat_t).Nlink),
 				Owner: fuse.Owner{
 					Uid: fi.Sys().(*syscall.Stat_t).Uid,

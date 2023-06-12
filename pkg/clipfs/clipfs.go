@@ -1,8 +1,7 @@
-package fs
+package clipfs
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -10,7 +9,7 @@ import (
 
 type ClipFileSystem struct {
 	s    storage.ClipStorageInterface
-	root *Dir
+	root *FSNode
 }
 
 func NewFileSystem(s storage.ClipStorageInterface) *ClipFileSystem {
@@ -19,12 +18,11 @@ func NewFileSystem(s storage.ClipStorageInterface) *ClipFileSystem {
 	}
 
 	metadata := s.Metadata()
-	rootNode := metadata.Get("/log")
-
-	log.Println("root node: ", rootNode)
-	cfs.root = &Dir{
-		cfs:  cfs,
-		attr: rootNode.Attr,
+	rootNode := metadata.Get("/")
+	cfs.root = &FSNode{
+		cfs:      cfs,
+		attr:     rootNode.Attr,
+		clipNode: rootNode,
 	}
 
 	return cfs

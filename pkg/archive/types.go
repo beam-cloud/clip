@@ -24,6 +24,11 @@ type ClipNode struct {
 	DataLen  int64 // Length of the nodes data
 }
 
+// IsDir returns true if the ClipNode represents a directory.
+func (n *ClipNode) IsDir() bool {
+	return n.NodeType == DirNode
+}
+
 type ClipArchiveMetadata struct {
 	Header ClipArchiveHeader
 	Index  *btree.BTree
@@ -41,8 +46,8 @@ func (m *ClipArchiveMetadata) Get(path string) *ClipNode {
 	return item.(*ClipNode)
 }
 
-func (m *ClipArchiveMetadata) ListDirectory(path string) []*ClipNode {
-	var entries []*ClipNode
+func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
+	var entries []fuse.DirEntry
 
 	// Append '/' if not present at the end of the path
 	if !strings.HasSuffix(path, "/") {
@@ -64,7 +69,10 @@ func (m *ClipArchiveMetadata) ListDirectory(path string) []*ClipNode {
 
 		// Node is an immediate child, so we append it to entries
 		if relativePath != "" {
-			entries = append(entries, node)
+			entries = append(entries, fuse.DirEntry{
+				Mode: node.Attr.Mode,
+				Name: relativePath,
+			})
 		}
 
 		return true
