@@ -1,20 +1,11 @@
 package commands
 
 import (
-	"fmt"
-
-	"github.com/beam-cloud/clip/pkg/archive"
-	log "github.com/okteto/okteto/pkg/log"
+	"github.com/beam-cloud/clip/pkg/clip"
 	"github.com/spf13/cobra"
 )
 
-type ExtractCmdOptions struct {
-	InputFile  string
-	OutputPath string
-	Verbose    bool
-}
-
-var extractOpts = &ExtractCmdOptions{}
+var extractOpts = &clip.ExtractOptions{}
 
 var ExtractCmd = &cobra.Command{
 	Use:   "extract",
@@ -30,23 +21,5 @@ func init() {
 }
 
 func runExtract(cmd *cobra.Command, args []string) error {
-	log.Spinner("Extracting...")
-	log.StartSpinner()
-	defer log.StopSpinner()
-
-	log.Information(fmt.Sprintf("Extracting archive: %s", extractOpts.InputFile))
-
-	a := archive.NewClipArchiver()
-	err := a.Extract(archive.ClipArchiverOptions{
-		ArchivePath: extractOpts.InputFile,
-		OutputPath:  extractOpts.OutputPath,
-		Verbose:     extractOpts.Verbose,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	log.Success("Archive extracted successfully.")
-	return nil
+	return clip.ExtractClipArchive(*extractOpts)
 }

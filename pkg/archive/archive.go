@@ -285,8 +285,6 @@ func (ca *ClipArchiver) CreateRemoteArchive(storageInfo common.ClipStorageInfo, 
 
 	wrapperBytes := buf.Bytes()
 
-	log.Println("wrapper length: ", len(wrapperBytes))
-
 	// Write storage info at the end of the file
 	header.StorageInfoLength = int64(len(wrapperBytes))
 	if _, err := outFile.Write(wrapperBytes); err != nil {

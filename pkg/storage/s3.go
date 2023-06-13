@@ -39,8 +39,19 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		return nil, err
 	}
 
+	svc := s3.NewFromConfig(cfg)
+
+	// Check bucket access
+	_, err = svc.HeadBucket(context.TODO(), &s3.HeadBucketInput{
+		Bucket: aws.String(opts.Bucket),
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("cannot access bucket <%s>: %v", opts.Bucket, err)
+	}
+
 	return &S3ClipStorage{
-		svc:       s3.NewFromConfig(cfg),
+		svc:       svc,
 		bucket:    opts.Bucket,
 		key:       opts.Key,
 		accessKey: accessKey,
