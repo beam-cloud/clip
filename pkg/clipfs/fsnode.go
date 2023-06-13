@@ -21,7 +21,7 @@ type FSNode struct {
 
 func (n *FSNode) log(format string, v ...interface{}) {
 	if n.filesystem.verbose {
-		log.Printf(fmt.Sprintf("[INFO] (%s) %s", n.clipNode.Path, format), v...)
+		log.Printf(fmt.Sprintf("[CLIPFS] (%s) %s", n.clipNode.Path, format), v...)
 	}
 }
 

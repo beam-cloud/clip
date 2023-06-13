@@ -22,11 +22,34 @@ type ClipArchiveHeader struct {
 	StorageInfoType       [12]byte
 }
 
+/*
+
+Data files are stored inside a clip in this format:
+
+	BlockType BlockType
+	Data      []byte
+	Checksum  []byte
+
+*/
+
+type BlockType byte
+
+const (
+	BlockTypeFile BlockType = iota
+)
+
+// Storage info is a structure containing data describing remote storage config
+type StorageInfoWrapper struct {
+	Type string
+	Data []byte
+}
+
 type ClipStorageInfo interface {
 	Type() string
 	Encode() ([]byte, error)
 }
 
+// Storage Info Implementations
 type S3StorageInfo struct {
 	Bucket string
 	Region string
@@ -46,24 +69,3 @@ func (ssi S3StorageInfo) Encode() ([]byte, error) {
 
 	return buf.Bytes(), nil
 }
-
-type StorageInfoWrapper struct {
-	Type string
-	Data []byte
-}
-
-/*
-
-Data files are stored inside a clip in this format:
-
-	BlockType BlockType
-	Data      []byte
-	Checksum  []byte
-
-*/
-
-type BlockType byte
-
-const (
-	BlockTypeFile BlockType = iota
-)
