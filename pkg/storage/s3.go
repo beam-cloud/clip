@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -27,10 +28,9 @@ type S3ClipStorage struct {
 }
 
 type S3ClipStorageOpts struct {
-	Bucket         string
-	Key            string
-	Region         string
-	LocalCachePath string
+	Bucket string
+	Key    string
+	Region string
 }
 
 func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
@@ -53,20 +53,19 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		return nil, fmt.Errorf("cannot access bucket <%s>: %v", opts.Bucket, err)
 	}
 
-	storage := &S3ClipStorage{
-		svc:                svc,
-		bucket:             opts.Bucket,
-		key:                opts.Key,
-		accessKey:          accessKey,
-		secretKey:          secretKey,
-		metadata:           metadata,
-		localCachePath:     opts.LocalCachePath,
-		lastDownloadedByte: -1,
+	c := &S3ClipStorage{
+		svc:            svc,
+		bucket:         opts.Bucket,
+		key:            opts.Key,
+		accessKey:      accessKey,
+		secretKey:      secretKey,
+		metadata:       metadata,
+		localCachePath: "/images/" + opts.Key,
 	}
 
-	go storage.startBackgroundDownload()
+	go c.startBackgroundDownload()
 
-	return storage, nil
+	return c, nil
 }
 
 func getAWSConfig(accessKey string, secretKey string, region string) (aws.Config, error) {
@@ -83,17 +82,54 @@ func getAWSConfig(accessKey string, secretKey string, region string) (aws.Config
 	return cfg, err
 }
 
-func (s *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
+func (s3c *S3ClipStorage) Upload(archivePath string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to open archive <%s>: %v", archivePath, err)
+	}
+	defer f.Close()
+
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(s3c.bucket),
+		Key:    aws.String(s3c.key),
+		Body:   f,
+	}
+
+	_, err = s3c.svc.PutObject(context.TODO(), input)
+	if err != nil {
+		return fmt.Errorf("failed to upload archive: %v", err)
+	}
+
+	return nil
+}
+
+func (s3c *S3ClipStorage) startBackgroundDownload() {
+	chunkSize := int64(1024 * 1024) // 1 MB
+	nextByte := int64(0)
+
+	for {
+		s3c.downloadedLock.Lock()
+		nextByte = s3c.lastDownloadedByte + 1
+		s3c.downloadedLock.Unlock()
+
+		_, err := s3c.downloadChunk(nextByte, nextByte+chunkSize-1, true)
+		if err != nil {
+			// TODO: handle error
+		}
+	}
+}
+
+func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
 	start := node.DataPos + off
 	end := start + int64(len(dest)) - 1 // Byte ranges in HTTP RANGE requests are inclusive, so we have to subtract one
 
 	// Check if we have downloaded the needed byte range before
-	s.downloadedLock.Lock()
-	if end > s.lastDownloadedByte {
-		s.downloadedLock.Unlock()
+	s3c.downloadedLock.Lock()
+	if end > s3c.lastDownloadedByte {
+		s3c.downloadedLock.Unlock()
 
 		// If we haven't, download it from S3
-		data, err := s.downloadChunk(start, end)
+		data, err := s3c.downloadChunk(start, end, false)
 		if err != nil {
 			return 0, err
 		}
@@ -102,10 +138,10 @@ func (s *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) 
 
 		return len(data), nil
 	}
-	s.downloadedLock.Unlock()
+	s3c.downloadedLock.Unlock()
 
 	// Read from local cache
-	f, err := os.Open(s.localCachePath)
+	f, err := os.Open(s3c.localCachePath)
 	if err != nil {
 		return 0, err
 	}
@@ -114,63 +150,49 @@ func (s *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) 
 	return f.ReadAt(dest, start)
 }
 
-func (s *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) {
+func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential bool) ([]byte, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	getObjectInput := &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.key),
+		Bucket: aws.String(s3c.bucket),
+		Key:    aws.String(s3c.key),
 		Range:  aws.String(rangeHeader),
 	}
 
-	resp, err := s.svc.GetObject(context.Background(), getObjectInput)
+	// Attempt to download chunk from S3
+	resp, err := s3c.svc.GetObject(context.Background(), getObjectInput)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	data := make([]byte, end-start+1)
-	if _, err := io.ReadFull(resp.Body, data); err != nil {
+	buf := new(bytes.Buffer)
+	_, err = io.Copy(buf, resp.Body)
+	if err != nil {
 		return nil, err
 	}
 
 	// Write to local cache
-	f, err := os.OpenFile(s.localCachePath, os.O_WRONLY|os.O_CREATE, 0644)
+	f, err := os.OpenFile(s3c.localCachePath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	if _, err := f.WriteAt(data, start); err != nil {
+	n, err := f.WriteAt(buf.Bytes(), start)
+	if err != nil {
 		return nil, err
 	}
 
-	// Update lastDownloadedByte
-	s.downloadedLock.Lock()
-	if end > s.lastDownloadedByte {
-		s.lastDownloadedByte = end
+	// If the download is sequential, update the lastDownloadedByte
+	if isSequential {
+		s3c.downloadedLock.Lock()
+		s3c.lastDownloadedByte = end
+		s3c.downloadedLock.Unlock()
 	}
-	s.downloadedLock.Unlock()
 
-	return data, nil
+	return buf.Bytes()[:n], nil
 }
 
-func (s *S3ClipStorage) startBackgroundDownload() {
-	chunkSize := int64(1024 * 1024) // 1 MB
-	nextByte := int64(0)
-
-	for {
-		s.downloadedLock.Lock()
-		nextByte = s.lastDownloadedByte + 1
-		s.downloadedLock.Unlock()
-
-		if _, err := s.downloadChunk(nextByte, nextByte+chunkSize-1); err != nil {
-			// handle error
-			fmt.Println(err)
-			return
-		}
-	}
-}
-
-func (s *S3ClipStorage) Metadata() *common.ClipArchiveMetadata {
-	return s.metadata
+func (s3c *S3ClipStorage) Metadata() *common.ClipArchiveMetadata {
+	return s3c.metadata
 }
