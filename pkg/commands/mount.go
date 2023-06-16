@@ -22,6 +22,7 @@ func init() {
 	MountCmd.Flags().StringVarP(&mountOptions.ArchivePath, "input", "i", "", "Archive file to mount")
 	MountCmd.Flags().StringVarP(&mountOptions.MountPoint, "mountpoint", "m", "", "Directory to mount the archive")
 	MountCmd.Flags().BoolVarP(&mountOptions.Verbose, "verbose", "v", false, "Verbose output")
+	MountCmd.Flags().StringVarP(&mountOptions.CachePath, "cache", "c", "", "Cache clip locally")
 	MountCmd.MarkFlagRequired("input")
 	MountCmd.MarkFlagRequired("mountpoint")
 }

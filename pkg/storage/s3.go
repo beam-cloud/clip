@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/okteto/okteto/pkg/log"
 )
 
 type S3ClipStorage struct {
@@ -22,16 +23,19 @@ type S3ClipStorage struct {
 	accessKey          string
 	secretKey          string
 	metadata           *common.ClipArchiveMetadata
-	localCachePath     string
 	lastDownloadedByte int64
 	downloadedLock     sync.Mutex
+	localCachePath     string
 }
 
 type S3ClipStorageOpts struct {
-	Bucket string
-	Key    string
-	Region string
+	Bucket    string
+	Key       string
+	Region    string
+	CachePath string
 }
+
+const chunkSize int64 = int64(1024 * 1024 * 100) // 100 MB
 
 func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
@@ -44,7 +48,7 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 
 	svc := s3.NewFromConfig(cfg)
 
-	// Check bucket access
+	// Check to see if we have access to the bucket
 	_, err = svc.HeadBucket(context.TODO(), &s3.HeadBucketInput{
 		Bucket: aws.String(opts.Bucket),
 	})
@@ -60,10 +64,12 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		accessKey:      accessKey,
 		secretKey:      secretKey,
 		metadata:       metadata,
-		localCachePath: "/images/" + opts.Key,
+		localCachePath: opts.CachePath,
 	}
 
-	go c.startBackgroundDownload()
+	if opts.CachePath != "" {
+		go c.startBackgroundDownload()
+	}
 
 	return c, nil
 }
@@ -104,19 +110,45 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 }
 
 func (s3c *S3ClipStorage) startBackgroundDownload() {
-	chunkSize := int64(1024 * 1024) // 1 MB
+	chunkSize := chunkSize
 	nextByte := int64(0)
+
+	// Get total size of remote clip
+	totalSize, err := s3c.getFileSize()
+	if err != nil {
+		// TODO: handle error
+	}
 
 	for {
 		s3c.downloadedLock.Lock()
 		nextByte = s3c.lastDownloadedByte + 1
 		s3c.downloadedLock.Unlock()
 
+		if nextByte > totalSize {
+			break
+		}
+
 		_, err := s3c.downloadChunk(nextByte, nextByte+chunkSize-1, true)
 		if err != nil {
 			// TODO: handle error
 		}
 	}
+
+	log.Success("Archive successfully cached.")
+}
+
+func (s3c *S3ClipStorage) getFileSize() (int64, error) {
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(s3c.bucket),
+		Key:    aws.String(s3c.key),
+	}
+
+	resp, err := s3c.svc.HeadObject(context.TODO(), input)
+	if err != nil {
+		return 0, err
+	}
+
+	return resp.ContentLength, nil
 }
 
 func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
