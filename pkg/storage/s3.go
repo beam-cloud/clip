@@ -156,9 +156,9 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	end := start + int64(len(dest)) - 1 // Byte ranges in HTTP RANGE requests are inclusive, so we have to subtract one
 
 	// Check if we have downloaded the needed byte range before
-	s3c.downloadedLock.Lock()
+	// s3c.downloadedLock.Lock()
 	if end > s3c.lastDownloadedByte || s3c.localCachePath == "" {
-		s3c.downloadedLock.Unlock()
+		// s3c.downloadedLock.Unlock()
 
 		// If we haven't, or if there's no local cache, download it from S3
 		data, err := s3c.downloadChunk(start, end, false)
@@ -170,7 +170,7 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 
 		return len(data), nil
 	}
-	s3c.downloadedLock.Unlock()
+	// s3c.downloadedLock.Unlock()
 
 	// Read from local cache
 	f, err := os.Open(s3c.localCachePath)
