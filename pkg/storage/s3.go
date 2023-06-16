@@ -157,10 +157,10 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 
 	// Check if we have downloaded the needed byte range before
 	s3c.downloadedLock.Lock()
-	if end > s3c.lastDownloadedByte {
+	if end > s3c.lastDownloadedByte || s3c.localCachePath == "" {
 		s3c.downloadedLock.Unlock()
 
-		// If we haven't, download it from S3
+		// If we haven't, or if there's no local cache, download it from S3
 		data, err := s3c.downloadChunk(start, end, false)
 		if err != nil {
 			return 0, err
@@ -203,16 +203,22 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential boo
 		return nil, err
 	}
 
-	// Write to local cache
-	f, err := os.OpenFile(s3c.localCachePath, os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
+	var n int
 
-	n, err := f.WriteAt(buf.Bytes(), start)
-	if err != nil {
-		return nil, err
+	// Write to local cache if localCachePath is set
+	if s3c.localCachePath != "" {
+		f, err := os.OpenFile(s3c.localCachePath, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		n, err = f.WriteAt(buf.Bytes(), start)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		n = buf.Len()
 	}
 
 	// If the download is sequential, update the lastDownloadedByte
