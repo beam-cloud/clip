@@ -16,26 +16,35 @@ CLIP (Compact and Lightweight Immutable Packaging) is a new transparent file for
 
 Before you can use CLIP, you need to install it on your system:
 
-\`\`\`bash
+```bash
 go get github.com/beam-cloud/clip
-\`\`\`
+```
 
 ### Usage
 
-Here's a quick example on how you can use CLIP to store your data:
+**Create a CLIP archive**
 
-\`\`\`bash
+```bash
+clip create -i /path/to/data -o mydata.clip
+```
 
-# Create a CLIP file
+**Mount a CLIP archive**
 
-clip create mydata.clip /path/to/data
+```bash
+clip mount -i mydata.clip -m /mnt/mydata
+```
 
-# Mount a CLIP file
+**Store a CLIP archive in s3**
 
-clip mount mydata.clip /mnt/mydata
-\`\`\`
+```bash
+clip store s3 -i mydata.clip -o remote.clip --bucket some-s3-bucket
+```
 
-After running the above commands, the data stored in `mydata.clip` will be accessible under `/mnt/mydata`.
+**Mount the "remote" CLIP archive**
+
+```bash
+clip store s3 -i remote.clip -m /mnt/mydata2
+```
 
 ## Documentation
 
