@@ -14,10 +14,10 @@ CLIP (Compact and Lightweight Immutable Packaging) is a new transparent file for
 
 ### Installation
 
-Before you can use CLIP, you need to install it on your system:
+Before you can use CLIP, you need to install the CLI on your system:
 
 ```bash
-go get github.com/beam-cloud/clip
+curl -sSL https://raw.githubusercontent.com/beam-cloud/clip/master/bin/install.sh | bash
 ```
 
 ### Usage

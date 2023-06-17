@@ -52,13 +52,15 @@ jobs:
       uses: actions/download-artifact@v2
       with:
         name: linux-amd64-clip
+        path: ./clip
+
     - name: Upload Release Asset
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./linux-amd64-clip/clip
+        asset_path: ./clip
         asset_name: linux-amd64-clip
         asset_content_type: application/octet-stream
 
@@ -66,13 +68,15 @@ jobs:
       uses: actions/download-artifact@v2
       with:
         name: darwin-amd64-clip
+        path: ./clip
+
     - name: Upload Release Asset
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./darwin-amd64-clip/clip
+        asset_path: ./clip
         asset_name: darwin-amd64-clip
         asset_content_type: application/octet-stream
 
@@ -80,12 +84,14 @@ jobs:
       uses: actions/download-artifact@v2
       with:
         name: darwin-arm64-clip
+        path: ./clip
+
     - name: Upload Release Asset
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./darwin-arm64-clip/clip
+        asset_path: ./clip
         asset_name: darwin-arm64-clip
         asset_content_type: application/octet-stream
