@@ -51,4 +51,5 @@ func runMount(cmd *cobra.Command, args []string) {
 			log.Fatalf("Server error: %v", err)
 		}
 	}
+
 }

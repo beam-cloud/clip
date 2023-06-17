@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sync"
 	"sync/atomic"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -25,7 +24,6 @@ type S3ClipStorage struct {
 	secretKey          string
 	metadata           *common.ClipArchiveMetadata
 	lastDownloadedByte int64
-	downloadedLock     sync.Mutex
 	localCachePath     string
 }
 
