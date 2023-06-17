@@ -151,6 +151,9 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 
 // Store CLIP in remote storage
 func StoreS3(storeS3Opts StoreS3Options) error {
+	log.Spinner("Uploading...")
+	log.StartSpinner()
+
 	region := os.Getenv("AWS_REGION")
 
 	// If no key is provided, use the base name of the input archive as key

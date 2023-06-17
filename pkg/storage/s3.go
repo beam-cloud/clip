@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -113,16 +114,14 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	chunkSize := chunkSize
 	nextByte := int64(0)
 
-	// Get total size of remote clip
 	totalSize, err := s3c.getFileSize()
 	if err != nil {
-		// TODO: handle error
+		log.Fatalf("Unable to get file size: %v", err)
 	}
 
 	for {
-		s3c.downloadedLock.Lock()
-		nextByte = s3c.lastDownloadedByte + 1
-		s3c.downloadedLock.Unlock()
+		lastDownloadedByte := atomic.LoadInt64(&s3c.lastDownloadedByte)
+		nextByte = lastDownloadedByte + 1
 
 		if nextByte > totalSize {
 			break
@@ -130,8 +129,10 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 
 		_, err := s3c.downloadChunk(nextByte, nextByte+chunkSize-1, true)
 		if err != nil {
-			// TODO: handle error
+			log.Fatalf("Failed to download chunk: %v", err)
 		}
+
+		atomic.StoreInt64(&s3c.lastDownloadedByte, nextByte+chunkSize-1)
 	}
 
 	log.Success("Archive successfully cached.")
@@ -153,14 +154,11 @@ func (s3c *S3ClipStorage) getFileSize() (int64, error) {
 
 func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
 	start := node.DataPos + off
-	end := start + int64(len(dest)) - 1 // Byte ranges in HTTP RANGE requests are inclusive, so we have to subtract one
+	end := start + int64(len(dest)) - 1
 
-	// Check if we have downloaded the needed byte range before
-	// s3c.downloadedLock.Lock()
-	if end > s3c.lastDownloadedByte || s3c.localCachePath == "" {
-		// s3c.downloadedLock.Unlock()
+	lastDownloadedByte := atomic.LoadInt64(&s3c.lastDownloadedByte)
 
-		// If we haven't, or if there's no local cache, download it from S3
+	if end > lastDownloadedByte || s3c.localCachePath == "" {
 		data, err := s3c.downloadChunk(start, end, false)
 		if err != nil {
 			return 0, err
@@ -170,7 +168,6 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 
 		return len(data), nil
 	}
-	// s3c.downloadedLock.Unlock()
 
 	// Read from local cache
 	f, err := os.Open(s3c.localCachePath)
