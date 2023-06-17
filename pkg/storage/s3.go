@@ -219,10 +219,10 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential boo
 	}
 
 	// If the download is sequential, update the lastDownloadedByte
+	// This only happens during background download of an archive
+	// Random access should never update this value
 	if isSequential {
-		s3c.downloadedLock.Lock()
-		s3c.lastDownloadedByte = end
-		s3c.downloadedLock.Unlock()
+		atomic.StoreInt64(&s3c.lastDownloadedByte, end)
 	}
 
 	return buf.Bytes()[:n], nil
