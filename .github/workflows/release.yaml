@@ -1,4 +1,4 @@
-name: Build and Release Clip CLI
+name: Build and Release Clip Binary
 
 on:
   release:
@@ -11,7 +11,7 @@ jobs:
     strategy:
       matrix:
         goversion: ['1.20']
-        os: ['ubuntu-latest', 'macos-latest', 'windows-latest']
+        os: ['ubuntu-latest', 'macos-latest', 'windows-latest', 'macos-latest-arm']
         include:
         - os: ubuntu-latest
           ARCH: amd64
@@ -22,6 +22,9 @@ jobs:
         - os: windows-latest
           ARCH: amd64
           PLATFORM: windows
+        - os: macos-latest-arm
+          ARCH: arm64
+          PLATFORM: darwin
 
     steps:
     - name: Set up Go
@@ -36,9 +39,9 @@ jobs:
       env:
         GOOS: ${{ matrix.PLATFORM }}
         GOARCH: ${{ matrix.ARCH }}
-      run: go build -o /workspace/bin/clip /workspace/cmd/main.go
+      run: go build -o ./clip ./cmd/main.go
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
       with:
-        name: ${{ matrix.PLATFORM }}-clip
-        path: /workspace/bin/clip
+        name: ${{ matrix.PLATFORM }}-${{ matrix.ARCH }}-clip
+        path: ./clip
