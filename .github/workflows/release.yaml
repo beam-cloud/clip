@@ -1,4 +1,4 @@
-name: Build and Release Clip CLI
+name: Build and Release Clip Binary
 
 on:
   release:
@@ -36,12 +36,16 @@ jobs:
       env:
         GOOS: ${{ matrix.PLATFORM }}
         GOARCH: ${{ matrix.ARCH }}
-      run: go build -o ./clip ./cmd/main.go
+      run: go build -o clip ./cmd/main.go
+    - name: Create artifacts directory
+      run: mkdir -p artifacts/${{ matrix.PLATFORM }}-${{ matrix.ARCH }}-clip
+    - name: Move binary to artifacts directory
+      run: mv clip artifacts/${{ matrix.PLATFORM }}-${{ matrix.ARCH }}-clip/clip
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
       with:
         name: ${{ matrix.PLATFORM }}-${{ matrix.ARCH }}-clip
-        path: ./clip
+        path: artifacts/${{ matrix.PLATFORM }}-${{ matrix.ARCH }}-clip
 
   release:
     needs: [build]
@@ -52,46 +56,46 @@ jobs:
       uses: actions/download-artifact@v2
       with:
         name: linux-amd64-clip
-        path: ./clip
+        path: artifacts/linux-amd64-clip
 
-    - name: Upload Release Asset
+    - name: Upload Release Asset - Linux amd64
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./clip
         asset_name: linux-amd64-clip
+        asset_path: artifacts/linux-amd64-clip/clip
         asset_content_type: application/octet-stream
 
     - name: Download artifacts
       uses: actions/download-artifact@v2
       with:
         name: darwin-amd64-clip
-        path: ./clip
+        path: artifacts/darwin-amd64-clip
 
-    - name: Upload Release Asset
+    - name: Upload Release Asset - macOS amd64
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./clip
         asset_name: darwin-amd64-clip
+        asset_path: artifacts/darwin-amd64-clip/clip
         asset_content_type: application/octet-stream
 
     - name: Download artifacts
       uses: actions/download-artifact@v2
       with:
         name: darwin-arm64-clip
-        path: ./clip
+        path: artifacts/darwin-arm64-clip
 
-    - name: Upload Release Asset
+    - name: Upload Release Asset - macOS arm64
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./clip
         asset_name: darwin-arm64-clip
+        asset_path: artifacts/darwin-arm64-clip/clip
         asset_content_type: application/octet-stream
