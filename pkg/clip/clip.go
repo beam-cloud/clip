@@ -31,6 +31,7 @@ type MountOptions struct {
 	ArchivePath string
 	MountPoint  string
 	Verbose     bool
+	CachePath   string
 }
 
 type StoreS3Options struct {
@@ -38,6 +39,7 @@ type StoreS3Options struct {
 	OutputFile  string
 	Bucket      string
 	Key         string
+	CachePath   string
 }
 
 // Create Archive
@@ -103,7 +105,7 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 		return nil, nil, fmt.Errorf("invalid archive: %v", err)
 	}
 
-	s, err := storage.NewClipStorage(options.ArchivePath, metadata)
+	s, err := storage.NewClipStorage(options.ArchivePath, options.CachePath, metadata)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
@@ -149,6 +151,9 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 
 // Store CLIP in remote storage
 func StoreS3(storeS3Opts StoreS3Options) error {
+	log.Spinner("Uploading...")
+	log.StartSpinner()
+
 	region := os.Getenv("AWS_REGION")
 
 	// If no key is provided, use the base name of the input archive as key

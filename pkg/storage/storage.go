@@ -14,7 +14,7 @@ type ClipStorageInterface interface {
 type ClipStorageOpts interface {
 }
 
-func NewClipStorage(archivePath string, metadata *common.ClipArchiveMetadata) (ClipStorageInterface, error) {
+func NewClipStorage(archivePath string, cachePath string, metadata *common.ClipArchiveMetadata) (ClipStorageInterface, error) {
 	var storage ClipStorageInterface = nil
 	var storageType string
 	var err error = nil
@@ -32,9 +32,10 @@ func NewClipStorage(archivePath string, metadata *common.ClipArchiveMetadata) (C
 	case "s3":
 		storageInfo := metadata.StorageInfo.(common.S3StorageInfo)
 		opts := S3ClipStorageOpts{
-			Bucket: storageInfo.Bucket,
-			Region: storageInfo.Region,
-			Key:    storageInfo.Key,
+			Bucket:    storageInfo.Bucket,
+			Region:    storageInfo.Region,
+			Key:       storageInfo.Key,
+			CachePath: cachePath,
 		}
 		storage, err = NewS3ClipStorage(metadata, opts)
 	case "local":
