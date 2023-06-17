@@ -43,7 +43,7 @@ clip store s3 -i mydata.clip -o remote.clip --bucket some-s3-bucket
 **Mount the "remote" CLIP archive**
 
 ```bash
-clip store s3 -i remote.clip -m /mnt/mydata2
+clip mount -i remote.clip -m /mnt/mydata2
 ```
 
 ## Documentation
