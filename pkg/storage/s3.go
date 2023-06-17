@@ -67,6 +67,7 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 	}
 
 	if opts.CachePath != "" {
+		os.Remove(opts.CachePath) // Clear cache path before starting the background download
 		go c.startBackgroundDownload()
 	}
 
