@@ -21,6 +21,12 @@ type CreateOptions struct {
 	Verbose    bool
 }
 
+type CreateRemoteOptions struct {
+	InputPath  string
+	OutputPath string
+	Verbose    bool
+}
+
 type ExtractOptions struct {
 	InputFile  string
 	OutputPath string
@@ -56,6 +62,44 @@ func CreateClipArchive(options CreateOptions) error {
 		OutputFile: options.OutputPath,
 		Verbose:    options.Verbose,
 	})
+	if err != nil {
+		return err
+	}
+
+	log.Success("Archive created successfully.")
+	return nil
+}
+
+func CreateAndUploadClipArchive(options CreateOptions, si common.ClipStorageInfo) error {
+	log.Spinner("Archiving...")
+	log.StartSpinner()
+	defer log.StopSpinner()
+
+	log.Information(fmt.Sprintf("Creating a new archive from directory: %s", options.InputPath))
+
+	// Create a temporary file for storing the clip
+	tempFile, err := os.CreateTemp("", "temp-clip-*.clip")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tempFile.Name()) // Cleanup the temporary clip (after upload it is stored remotely)
+
+	localArchiver := archive.NewClipArchiver()
+	err = localArchiver.Create(archive.ClipArchiverOptions{
+		SourcePath: options.InputPath,
+		OutputFile: tempFile.Name(),
+		Verbose:    options.Verbose,
+	})
+	if err != nil {
+		return err
+	}
+
+	remoteArchiver, err := archive.NewRClipArchiver(si)
+	if err != nil {
+		return err
+	}
+
+	err = remoteArchiver.Create(tempFile.Name(), options.OutputPath)
 	if err != nil {
 		return err
 	}

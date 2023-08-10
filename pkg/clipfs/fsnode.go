@@ -94,6 +94,13 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	return fuse.ReadResultData(dest[:nRead]), fs.OK
 }
 
+func (n *FSNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	n.log("Getxattr called with attr: %s", attr)
+
+	// TODO: Implement xattr logic
+	return 0, syscall.ENODATA
+}
+
 func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	n.log("Readlink called")
 
