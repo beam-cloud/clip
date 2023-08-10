@@ -25,6 +25,7 @@ type S3ClipStorage struct {
 	metadata           *common.ClipArchiveMetadata
 	lastDownloadedByte int64
 	localCachePath     string
+	localCacheFile     *os.File
 }
 
 type S3ClipStorageOpts struct {
@@ -68,6 +69,12 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 
 	if opts.CachePath != "" {
 		os.Remove(opts.CachePath) // Clear cache path before starting the background download
+
+		c.localCacheFile, err = os.OpenFile(c.localCachePath, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open cache file: %v", err)
+		}
+
 		go c.startBackgroundDownload()
 	}
 
@@ -168,14 +175,7 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 		return len(data), nil
 	}
 
-	// Read from local cache
-	f, err := os.Open(s3c.localCachePath)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	return f.ReadAt(dest, start)
+	return s3c.localCacheFile.ReadAt(dest, start)
 }
 
 func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential bool) ([]byte, error) {
@@ -203,13 +203,7 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential boo
 
 	// Write to local cache if localCachePath is set
 	if s3c.localCachePath != "" {
-		f, err := os.OpenFile(s3c.localCachePath, os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return nil, err
-		}
-		defer f.Close()
-
-		n, err = f.WriteAt(buf.Bytes(), start)
+		n, err = s3c.localCacheFile.WriteAt(buf.Bytes(), start)
 		if err != nil {
 			return nil, err
 		}

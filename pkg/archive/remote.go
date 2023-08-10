@@ -55,7 +55,6 @@ func (rca *RClipArchiver) Create(archivePath string, outputPath string) error {
 			os.Remove(outputPath)
 			return err
 		}
-
 	default:
 		return errors.New("unsupported storage type")
 	}
