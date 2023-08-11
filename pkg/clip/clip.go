@@ -167,7 +167,7 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 		AttrTimeout:  &attrTimeout,
 		EntryTimeout: &entryTimeout,
 		MountOptions: fuse.MountOptions{
-			MaxBackground:        128,
+			MaxBackground:        256,
 			DisableXAttrs:        true,
 			EnableSymlinkCaching: true,
 			SyncRead:             false,
