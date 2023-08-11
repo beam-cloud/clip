@@ -166,6 +166,12 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 	fsOptions := &fs.Options{
 		AttrTimeout:  &attrTimeout,
 		EntryTimeout: &entryTimeout,
+		MountOptions: fuse.MountOptions{
+			MaxBackground:        128,
+			DisableXAttrs:        true,
+			EnableSymlinkCaching: true,
+			SyncRead:             false,
+		},
 	}
 	server, err := fuse.NewServer(fs.NewNodeFS(root, fsOptions), options.MountPoint, &fuse.MountOptions{})
 	if err != nil {
