@@ -172,7 +172,6 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 			EnableSymlinkCaching: true,
 			SyncRead:             false,
 			RememberInodes:       true,
-			Debug:                true,
 		},
 	}
 	server, err := fuse.NewServer(fs.NewNodeFS(root, fsOptions), options.MountPoint, &fuse.MountOptions{})
