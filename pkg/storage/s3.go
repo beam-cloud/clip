@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -205,20 +204,11 @@ func (s3c *S3ClipStorage) downloadChunkIntoBuffer(start int64, end int64, dest [
 	return n, nil
 }
 
-type writeAtBuffer struct {
-	*bytes.Buffer
-}
-
-func (w *writeAtBuffer) WriteAt(p []byte, off int64) (int, error) {
-	// Ignore 'off' for now; it's used by the download manager to track which part of the file to write to.
-	return w.Buffer.Write(p)
-}
-
 func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential bool) ([]byte, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	downloader := manager.NewDownloader(s3c.svc)
-	buf := &writeAtBuffer{}
 
+	buf := manager.NewWriteAtBuffer(nil)
 	_, err := downloader.Download(context.TODO(), buf, &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
 		Key:    aws.String(s3c.key),
@@ -237,7 +227,7 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential boo
 			return nil, err
 		}
 	} else {
-		n = buf.Len()
+		n = len(buf.Bytes())
 	}
 
 	// If the download is sequential, update the lastDownloadedByte
