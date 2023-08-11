@@ -11,7 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/okteto/okteto/pkg/log"
@@ -207,15 +206,21 @@ func (s3c *S3ClipStorage) downloadChunkIntoBuffer(start int64, end int64, dest [
 
 func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential bool) ([]byte, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
-	downloader := manager.NewDownloader(s3c.svc)
-
-	var b bytes.Buffer
-	buf := manager.NewWriteAtBuffer(b.Bytes())
-	_, err := downloader.Download(context.TODO(), buf, &s3.GetObjectInput{
+	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
 		Key:    aws.String(s3c.key),
 		Range:  aws.String(rangeHeader),
-	})
+	}
+
+	// Attempt to download chunk from S3
+	resp, err := s3c.svc.GetObject(context.Background(), getObjectInput)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	buf := new(bytes.Buffer)
+	_, err = io.Copy(buf, resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +234,7 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential boo
 			return nil, err
 		}
 	} else {
-		n = len(buf.Bytes())
+		n = buf.Len()
 	}
 
 	// If the download is sequential, update the lastDownloadedByte
