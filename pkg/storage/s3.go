@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -208,7 +209,8 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential boo
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	downloader := manager.NewDownloader(s3c.svc)
 
-	buf := manager.NewWriteAtBuffer(nil)
+	var b bytes.Buffer
+	buf := manager.NewWriteAtBuffer(b.Bytes())
 	_, err := downloader.Download(context.TODO(), buf, &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
 		Key:    aws.String(s3c.key),
