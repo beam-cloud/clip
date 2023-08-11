@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/okteto/okteto/pkg/log"
@@ -204,23 +205,25 @@ func (s3c *S3ClipStorage) downloadChunkIntoBuffer(start int64, end int64, dest [
 	return n, nil
 }
 
+type writeAtBuffer struct {
+	*bytes.Buffer
+}
+
+func (w *writeAtBuffer) WriteAt(p []byte, off int64) (int, error) {
+	// Ignore 'off' for now; it's used by the download manager to track which part of the file to write to.
+	return w.Buffer.Write(p)
+}
+
 func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential bool) ([]byte, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
-	getObjectInput := &s3.GetObjectInput{
+	downloader := manager.NewDownloader(s3c.svc)
+	buf := &writeAtBuffer{}
+
+	_, err := downloader.Download(context.TODO(), buf, &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
 		Key:    aws.String(s3c.key),
 		Range:  aws.String(rangeHeader),
-	}
-
-	// Attempt to download chunk from S3
-	resp, err := s3c.svc.GetObject(context.Background(), getObjectInput)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	buf := new(bytes.Buffer)
-	_, err = io.Copy(buf, resp.Body)
+	})
 	if err != nil {
 		return nil, err
 	}
