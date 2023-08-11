@@ -6,6 +6,7 @@ import (
 	"log"
 	"path"
 	"syscall"
+	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -31,6 +32,7 @@ func (n *FSNode) OnAdd(ctx context.Context) {
 
 func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	n.log("Getattr called")
+	startTime := time.Now()
 
 	// Fetch the node attributes
 	node := n.filesystem.s.Metadata().Get(n.clipNode.Path)
@@ -49,11 +51,17 @@ func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	out.Nlink = node.Attr.Nlink
 	out.Owner = node.Attr.Owner
 
+	if n.filesystem.verbose {
+		n.filesystem.profilingData.Calls["Getattr"]++
+		n.filesystem.profilingData.Times["Getattr"] += time.Since(startTime)
+	}
+
 	return fs.OK
 }
 
 func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	n.log("Lookup called with name: %s", name)
+	startTime := time.Now()
 
 	// Create the full path of the child node
 	childPath := path.Join(n.clipNode.Path, name)
@@ -70,6 +78,11 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 
 	// Create a new Inode for the child
 	childInode := n.NewInode(ctx, &FSNode{filesystem: n.filesystem, clipNode: child, attr: child.Attr}, fs.StableAttr{Mode: child.Attr.Mode, Ino: child.Attr.Ino})
+
+	if n.filesystem.verbose {
+		n.filesystem.profilingData.Calls["Lookup"]++
+		n.filesystem.profilingData.Times["Lookup"] += time.Since(startTime)
+	}
 	return childInode, fs.OK
 }
 
@@ -85,10 +98,16 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
+	startTime := time.Now()
 
 	nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 	if err != nil {
 		return nil, syscall.EIO
+	}
+
+	if n.filesystem.verbose {
+		n.filesystem.profilingData.Calls["Read"]++
+		n.filesystem.profilingData.Times["Read"] += time.Since(startTime)
 	}
 
 	return fuse.ReadResultData(dest[:nRead]), fs.OK
