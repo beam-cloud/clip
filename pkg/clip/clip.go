@@ -166,13 +166,6 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 	fsOptions := &fs.Options{
 		AttrTimeout:  &attrTimeout,
 		EntryTimeout: &entryTimeout,
-		MountOptions: fuse.MountOptions{
-			MaxBackground:        256,
-			DisableXAttrs:        true,
-			EnableSymlinkCaching: true,
-			SyncRead:             false,
-			RememberInodes:       true,
-		},
 	}
 	server, err := fuse.NewServer(fs.NewNodeFS(root, fsOptions), options.MountPoint, &fuse.MountOptions{
 		MaxBackground:        512,
@@ -180,7 +173,9 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 		EnableSymlinkCaching: true,
 		SyncRead:             false,
 		RememberInodes:       true,
+		MaxReadAhead:         0,
 	})
+
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not create server: %v", err)
 	}
