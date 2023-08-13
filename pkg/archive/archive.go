@@ -500,71 +500,99 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 	defer writer.Flush() // Ensure all data gets written when we're done
 
 	var pos int64 = offset
+
+	// Push specific directories towards the front of the clip
+	priorityDirs := []string{}
+	processed := make(map[*common.ClipNode]bool)
+
+	// Process priority directories first
+	for _, dir := range priorityDirs {
+		index.Ascend(index.Min(), func(a interface{}) bool {
+			node := a.(*common.ClipNode)
+			if strings.HasPrefix(node.Path, dir) && node.NodeType == common.FileNode {
+				if !processed[node] {
+					if !ca.processNode(node, writer, sourcePath, &pos, opts) {
+						return false
+					}
+					processed[node] = true
+				}
+			}
+			return true
+		})
+	}
+
+	// Process the rest of the nodes
 	index.Ascend(index.Min(), func(a interface{}) bool {
 		node := a.(*common.ClipNode)
-
-		if opts.Verbose {
-			log.Spinner(fmt.Sprintf("Archiving... %s", node.Path))
+		if !processed[node] && node.NodeType == common.FileNode {
+			if !ca.processNode(node, writer, sourcePath, &pos, opts) {
+				return false
+			}
 		}
-
-		if node.NodeType == common.FileNode {
-			f, err := os.Open(path.Join(sourcePath, node.Path))
-			if err != nil {
-				log.Printf("error opening source file %s: %v", node.Path, err)
-				return false
-			}
-			defer f.Close()
-
-			// Initialize CRC64 table and hash
-			table := crc64.MakeTable(crc64.ISO)
-			hash := crc64.New(table)
-
-			blockType := common.BlockTypeFile
-
-			// Write block type
-			if err := binary.Write(writer, binary.LittleEndian, blockType); err != nil {
-				log.Printf("error writing block type: %v", err)
-				return false
-			}
-
-			// Increment position to account for block type
-			pos += 1
-
-			// Update data position
-			node.DataPos = pos
-
-			// Create a multi-writer that writes to both the checksum and the writer
-			multi := io.MultiWriter(hash, writer)
-
-			// Use io.Copy to simultaneously write the file to the output and update the checksum
-			copied, err := io.Copy(multi, f)
-			if err != nil {
-				log.Printf("error copying file %s: %v", node.Path, err)
-				return false
-			}
-
-			// Compute final CRC64 checksum
-			checksum := hash.Sum(nil)
-
-			// Write checksum to output file
-			if _, err := writer.Write(checksum); err != nil {
-				log.Printf("error writing checksum: %v", err)
-				return false
-			}
-
-			// Increment position to account for checksum
-			pos += ChecksumLength
-
-			// Update node with data length
-			node.DataLen = copied
-
-			pos += copied
-		}
-
 		return true
 	})
 
 	return nil
+}
+
+func (ca *ClipArchiver) processNode(node *common.ClipNode, writer *bufio.Writer, sourcePath string, pos *int64, opts ClipArchiverOptions) bool {
+	if opts.Verbose {
+		log.Spinner(fmt.Sprintf("Archiving... %s", node.Path))
+	}
+
+	f, err := os.Open(path.Join(sourcePath, node.Path))
+	if err != nil {
+		log.Printf("error opening source file %s: %v", node.Path, err)
+		return false
+	}
+	defer f.Close()
+
+	// Initialize CRC64 table and hash
+	table := crc64.MakeTable(crc64.ISO)
+	hash := crc64.New(table)
+
+	blockType := common.BlockTypeFile
+
+	// Write block type
+	if err := binary.Write(writer, binary.LittleEndian, blockType); err != nil {
+		log.Printf("error writing block type: %v", err)
+		return false
+	}
+
+	// Increment position to account for block type
+	*pos += 1
+
+	// Update data position
+	node.DataPos = *pos
+
+	// Create a multi-writer that writes to both the checksum and the writer
+	multi := io.MultiWriter(hash, writer)
+
+	// Use io.Copy to simultaneously write the file to the output and update the checksum
+	copied, err := io.Copy(multi, f)
+	if err != nil {
+		log.Printf("error copying file %s: %v", node.Path, err)
+		return false
+	}
+
+	// Compute final CRC64 checksum
+	checksum := hash.Sum(nil)
+
+	// Write checksum to output file
+	if _, err := writer.Write(checksum); err != nil {
+		log.Printf("error writing checksum: %v", err)
+		return false
+	}
+
+	// Increment position to account for checksum
+	*pos += ChecksumLength
+
+	// Update node with data length
+	node.DataLen = copied
+
+	*pos += copied
+
+	return true
 }
 
 func (ca *ClipArchiver) EncodeHeader(header *common.ClipArchiveHeader) ([]byte, error) {
