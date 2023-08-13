@@ -501,36 +501,54 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 
 	var pos int64 = offset
 
-	// Push specific directories towards the front of the clip
-	priorityDirs := []string{}
-	processed := make(map[*common.ClipNode]bool)
-
-	// Process priority directories first
-	for _, dir := range priorityDirs {
-		index.Ascend(index.Min(), func(a interface{}) bool {
-			node := a.(*common.ClipNode)
-			if strings.HasPrefix(node.Path, dir) && node.NodeType == common.FileNode {
-				if !processed[node] {
-					if !ca.processNode(node, writer, sourcePath, &pos, opts) {
-						return false
-					}
-					processed[node] = true
-				}
-			}
-			return true
-		})
+	// Push specific directories towards the front of the archive
+	priorityDirs := []string{
+		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.7/dist-packages"),
+		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.8/dist-packages"),
+		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.9/dist-packages"),
+		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.10/dist-packages"),
 	}
+	// Create slices for priority nodes and other nodes
+	var priorityNodes []*common.ClipNode
+	var otherNodes []*common.ClipNode
 
-	// Process the rest of the nodes
+	// Separate nodes into priority and other
 	index.Ascend(index.Min(), func(a interface{}) bool {
 		node := a.(*common.ClipNode)
-		if !processed[node] && node.NodeType == common.FileNode {
-			if !ca.processNode(node, writer, sourcePath, &pos, opts) {
-				return false
+		isPriority := false
+		nodeFullPath := path.Join(sourcePath, node.Path) // Adding sourcePath to the node path
+		for _, dir := range priorityDirs {
+			if strings.HasPrefix(nodeFullPath, dir) {
+				isPriority = true
+				break
 			}
+		}
+
+		if isPriority {
+			priorityNodes = append(priorityNodes, node)
+		} else {
+			otherNodes = append(otherNodes, node)
 		}
 		return true
 	})
+
+	// Process priority nodes first
+	for _, node := range priorityNodes {
+		if node.NodeType == common.FileNode {
+			if !ca.processNode(node, writer, sourcePath, &pos, opts) {
+				return fmt.Errorf("error processing priority node %s", node.Path)
+			}
+		}
+	}
+
+	// Process other nodes
+	for _, node := range otherNodes {
+		if node.NodeType == common.FileNode {
+			if !ca.processNode(node, writer, sourcePath, &pos, opts) {
+				return fmt.Errorf("error processing other node %s", node.Path)
+			}
+		}
+	}
 
 	return nil
 }
