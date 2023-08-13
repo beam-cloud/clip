@@ -503,8 +503,8 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 
 	// Push specific directories towards the front of the archive
 	priorityDirs := []string{
-		// path.Join(sourcePath, "/rootfs/usr/lib"),
-		// path.Join(sourcePath, "/rootfs/usr/bin"),
+		path.Join(sourcePath, "/rootfs/usr/lib"),
+		path.Join(sourcePath, "/rootfs/usr/bin"),
 		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.7/dist-packages"),
 		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.8/dist-packages"),
 		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.9/dist-packages"),
