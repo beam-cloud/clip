@@ -58,6 +58,15 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	// Create the full path of the child node
 	childPath := path.Join(n.clipNode.Path, name)
 
+	// Check the cache
+	n.filesystem.cacheMutex.RLock()
+	childInode, found := n.filesystem.lookupCache[childPath]
+	n.filesystem.cacheMutex.RUnlock()
+	if found {
+		n.log("Lookup cache hit for name: %s", name)
+		return childInode, fs.OK
+	}
+
 	// Lookup the child node
 	child := n.filesystem.s.Metadata().Get(childPath)
 	if child == nil {
@@ -69,7 +78,13 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	out.Attr = child.Attr
 
 	// Create a new Inode for the child
-	childInode := n.NewInode(ctx, &FSNode{filesystem: n.filesystem, clipNode: child, attr: child.Attr}, fs.StableAttr{Mode: child.Attr.Mode, Ino: child.Attr.Ino})
+	childInode = n.NewInode(ctx, &FSNode{filesystem: n.filesystem, clipNode: child, attr: child.Attr}, fs.StableAttr{Mode: child.Attr.Mode, Ino: child.Attr.Ino})
+
+	// Cache the result
+	n.filesystem.cacheMutex.Lock()
+	n.filesystem.lookupCache[childPath] = childInode
+	n.filesystem.cacheMutex.Unlock()
+
 	return childInode, fs.OK
 }
 

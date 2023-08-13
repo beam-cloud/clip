@@ -2,6 +2,7 @@ package clipfs
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
@@ -9,15 +10,18 @@ import (
 )
 
 type ClipFileSystem struct {
-	s       storage.ClipStorageInterface
-	root    *FSNode
-	verbose bool
+	s           storage.ClipStorageInterface
+	root        *FSNode
+	lookupCache map[string]*fs.Inode
+	cacheMutex  sync.RWMutex
+	verbose     bool
 }
 
 func NewFileSystem(s storage.ClipStorageInterface, verbose bool) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
-		s:       s,
-		verbose: verbose,
+		s:           s,
+		verbose:     verbose,
+		lookupCache: make(map[string]*fs.Inode),
 	}
 
 	metadata := s.Metadata()
