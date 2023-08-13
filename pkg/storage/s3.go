@@ -35,7 +35,7 @@ type S3ClipStorageOpts struct {
 	CachePath string
 }
 
-const chunkSize int64 = int64(1024 * 1024 * 50) // 50 MB
+const chunkSize int64 = int64(1024 * 1024 * 200) // 200 MB
 
 func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
