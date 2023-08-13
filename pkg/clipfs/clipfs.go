@@ -7,21 +7,27 @@ import (
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 type ClipFileSystem struct {
 	s           storage.ClipStorageInterface
 	root        *FSNode
-	lookupCache map[string]*fs.Inode
+	lookupCache map[string]*cacheEntry
 	cacheMutex  sync.RWMutex
 	verbose     bool
+}
+
+type cacheEntry struct {
+	inode *fs.Inode
+	attr  fuse.Attr
 }
 
 func NewFileSystem(s storage.ClipStorageInterface, verbose bool) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
 		s:           s,
 		verbose:     verbose,
-		lookupCache: make(map[string]*fs.Inode),
+		lookupCache: make(map[string]*cacheEntry),
 	}
 
 	metadata := s.Metadata()
