@@ -133,7 +133,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 			break
 		}
 
-		_, err := s3c.downloadChunk(nextByte, nextByte+chunkSize-1, true)
+		_, err := s3c.downloadChunk(nextByte, nextByte+chunkSize-1)
 		if err != nil {
 			log.Fatalf("Failed to download chunk: %v", err)
 		}
@@ -173,10 +173,10 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	}
 
 	// If the local cache is not being used or the requested data is not in the cache, download it from S3
-	return s3c.downloadChunkIntoBuffer(start, end, dest, false)
+	return s3c.downloadChunkIntoBuffer(start, end, dest)
 }
 
-func (s3c *S3ClipStorage) downloadChunkIntoBuffer(start int64, end int64, dest []byte, isSequential bool) (int, error) {
+func (s3c *S3ClipStorage) downloadChunkIntoBuffer(start int64, end int64, dest []byte) (int, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
@@ -196,15 +196,10 @@ func (s3c *S3ClipStorage) downloadChunkIntoBuffer(start int64, end int64, dest [
 		return 0, err
 	}
 
-	// If downloading sequentially, update the lastDownloadedByte
-	if isSequential {
-		atomic.StoreInt64(&s3c.lastDownloadedByte, end)
-	}
-
 	return n, nil
 }
 
-func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential bool) ([]byte, error) {
+func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
@@ -225,21 +220,14 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential boo
 		return nil, err
 	}
 
-	var n int
-
-	n = buf.Len()
-
 	// If the download is sequential, update the lastDownloadedByte
 	// This only happens during background download of an archive
 	// Random access should never update this value
 
 	// Write to local cache if localCachePath is set
-	if isSequential {
-		n, err = s3c.localCacheFile.WriteAt(buf.Bytes(), start)
-		if err != nil {
-			return nil, err
-		}
-		atomic.StoreInt64(&s3c.lastDownloadedByte, end)
+	n, err := s3c.localCacheFile.WriteAt(buf.Bytes(), start)
+	if err != nil {
+		return nil, err
 	}
 
 	return buf.Bytes()[:n], nil
