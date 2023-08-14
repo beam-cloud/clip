@@ -58,13 +58,14 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 	}
 
 	c := &S3ClipStorage{
-		svc:            svc,
-		bucket:         opts.Bucket,
-		key:            opts.Key,
-		accessKey:      accessKey,
-		secretKey:      secretKey,
-		metadata:       metadata,
-		localCachePath: opts.CachePath,
+		svc:                svc,
+		bucket:             opts.Bucket,
+		key:                opts.Key,
+		accessKey:          accessKey,
+		secretKey:          secretKey,
+		metadata:           metadata,
+		localCachePath:     opts.CachePath,
+		lastDownloadedByte: 0,
 	}
 
 	if opts.CachePath != "" {
@@ -128,16 +129,24 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	for {
 		lastDownloadedByte := atomic.LoadInt64(&s3c.lastDownloadedByte)
 		nextByte = lastDownloadedByte
-		if nextByte > totalSize {
+
+		// Determine the range of the chunk to download
+		endByte := nextByte + chunkSize - 1
+		if endByte >= totalSize {
+			endByte = totalSize - 1
+		}
+
+		if nextByte > endByte {
 			break
 		}
 
-		_, err := s3c.downloadChunk(nextByte, nextByte+chunkSize-1)
+		n, err := s3c.downloadChunk(nextByte, endByte)
 		if err != nil {
 			log.Fatalf("Failed to download chunk: %v", err)
 		}
 
-		atomic.StoreInt64(&s3c.lastDownloadedByte, nextByte+chunkSize-1)
+		// Update the last downloaded byte based on the actual number of bytes downloaded
+		atomic.StoreInt64(&s3c.lastDownloadedByte, nextByte+int64(n)-1)
 	}
 
 	log.Success("Archive successfully cached.")
@@ -198,7 +207,7 @@ func (s3c *S3ClipStorage) downloadChunkIntoBuffer(start int64, end int64, dest [
 	return n, nil
 }
 
-func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) {
+func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) (int64, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
@@ -209,23 +218,23 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) 
 	// Attempt to download chunk from S3
 	resp, err := s3c.svc.GetObject(context.Background(), getObjectInput)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer resp.Body.Close()
 
 	buf := new(bytes.Buffer)
-	_, err = io.Copy(buf, resp.Body)
+	n, err := io.Copy(buf, resp.Body)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	// Write to local cache
-	n, err := s3c.localCacheFile.WriteAt(buf.Bytes(), start)
+	_, err = s3c.localCacheFile.WriteAt(buf.Bytes(), start)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	return buf.Bytes()[:n], nil
+	return n, nil
 }
 
 func (s3c *S3ClipStorage) Metadata() *common.ClipArchiveMetadata {
