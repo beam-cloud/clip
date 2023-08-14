@@ -118,6 +118,10 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		return nil, syscall.EIO
 	}
 
+	if n.filesystem.contentCache != nil {
+		go n.filesystem.contentCache.Store("something", dest)
+	}
+
 	return fuse.ReadResultData(dest[:nRead]), fs.OK
 }
 
