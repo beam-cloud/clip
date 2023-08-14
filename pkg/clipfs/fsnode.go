@@ -106,7 +106,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	length := int64(len(dest))
 
 	// Check the cache if it exists
-	if n.filesystem.contentCache != nil {
+	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
 		content, err := n.filesystem.contentCache.Get(n.clipNode.ContentHash, off, length)
 		if err == nil { // Content found in cache
 			copy(dest, content)
@@ -122,7 +122,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	}
 
 	// Store contents in cache
-	if n.filesystem.contentCache != nil {
+	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
 		fileContent := make([]byte, n.clipNode.DataLen)
 		_, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, 0)
 		if err != nil {
