@@ -118,6 +118,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 	nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 	if err != nil {
+		n.log("unable to read file contents: %v", err)
 		return nil, syscall.EIO
 	}
 
@@ -126,10 +127,13 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		fileContent := make([]byte, n.clipNode.DataLen)
 		_, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, 0)
 		if err != nil {
+			n.log("err reading file: %v", err)
 			return nil, syscall.EIO
 		}
+
 		_, err = n.filesystem.contentCache.StoreContent(fileContent)
 		if err != nil {
+			n.log("err storing file contents: %v", err)
 			return nil, syscall.EIO
 		}
 	}
