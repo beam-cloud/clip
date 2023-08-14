@@ -105,18 +105,21 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	// Length of the content to read
 	length := int64(len(dest))
 
-	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
+	// If we have provided a contentCache, try and use it
+	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" && n.clipNode.DataLen > 0 {
 		content, err := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, length)
-		if err == nil { // Content found in cache
+		// Content found in cache
+		if err == nil {
 			copy(dest, content)
 			return fuse.ReadResultData(dest[:len(content)]), fs.OK
 		} else { // Cache miss - read from the underlying source and store in cache
 			nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 			if err != nil {
-				n.log("unable to read file contents: %v", err)
+				n.log("unable to read file contents from cache: %v", err)
 				return nil, syscall.EIO
 			}
 
+			// Store entire file in CAS
 			go func() {
 				if n.clipNode.DataLen > 0 {
 					fileContent := make([]byte, n.clipNode.DataLen)
