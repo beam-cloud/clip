@@ -5,15 +5,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sync/atomic"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/beam-cloud/clip/pkg/common"
-	"github.com/okteto/okteto/pkg/log"
 )
 
 type S3ClipStorage struct {
@@ -118,6 +119,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		log.Fatalf("Unable to get file size: %v", err)
 	}
 
+	startTime := time.Now()
 	for {
 		lastDownloadedByte := atomic.LoadInt64(&s3c.lastDownloadedByte)
 		nextByte = lastDownloadedByte + 1
@@ -134,7 +136,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		atomic.StoreInt64(&s3c.lastDownloadedByte, nextByte+chunkSize-1)
 	}
 
-	log.Success("Archive successfully cached.")
+	log.Printf("archive <%v> cached in %v", s3c.localCachePath, time.Since(startTime))
 }
 
 func (s3c *S3ClipStorage) getFileSize() (int64, error) {

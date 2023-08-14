@@ -2,6 +2,7 @@ package clip
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,7 +13,6 @@ import (
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	log "github.com/okteto/okteto/pkg/log"
 )
 
 type CreateOptions struct {
@@ -51,11 +51,8 @@ type StoreS3Options struct {
 
 // Create Archive
 func CreateClipArchive(options CreateOptions) error {
-	log.Spinner("Archiving...")
-	log.StartSpinner()
-	defer log.StopSpinner()
-
-	log.Information(fmt.Sprintf("Creating a new archive from directory: %s", options.InputPath))
+	log.Println("Archiving...")
+	log.Printf("Creating a new archive from directory: %s\n", options.InputPath)
 
 	a := archive.NewClipArchiver()
 	err := a.Create(archive.ClipArchiverOptions{
@@ -67,16 +64,13 @@ func CreateClipArchive(options CreateOptions) error {
 		return err
 	}
 
-	log.Success("Archive created successfully.")
+	log.Println("Archive created successfully.")
 	return nil
 }
 
 func CreateAndUploadClipArchive(options CreateOptions, si common.ClipStorageInfo) error {
-	log.Spinner("Archiving...")
-	log.StartSpinner()
-	defer log.StopSpinner()
-
-	log.Information(fmt.Sprintf("Creating a new archive from directory: %s", options.InputPath))
+	log.Printf("Archiving...")
+	log.Printf("Creating a new archive from directory: %s\n", options.InputPath)
 
 	// Create a temporary file for storing the clip
 	tempFile, err := os.CreateTemp("", "temp-clip-*.clip")
@@ -105,17 +99,14 @@ func CreateAndUploadClipArchive(options CreateOptions, si common.ClipStorageInfo
 		return err
 	}
 
-	log.Success("Archive created successfully.")
+	log.Printf("Archive created successfully.")
 	return nil
 }
 
 // Extract Archive
 func ExtractClipArchive(options ExtractOptions) error {
-	log.Spinner("Extracting...")
-	log.StartSpinner()
-	defer log.StopSpinner()
-
-	log.Information(fmt.Sprintf("Extracting archive: %s", options.InputFile))
+	log.Println("Extracting...")
+	log.Printf("Extracting archive: %s\n", options.InputFile)
 
 	a := archive.NewClipArchiver()
 	err := a.Extract(archive.ClipArchiverOptions{
@@ -128,20 +119,20 @@ func ExtractClipArchive(options ExtractOptions) error {
 		return err
 	}
 
-	log.Success("Archive extracted successfully.")
+	log.Println("Archive extracted successfully.")
 	return nil
 }
 
 // Mount a clip archive to a directory
 func MountArchive(options MountOptions) (func() error, <-chan error, error) {
-	log.Information(fmt.Sprintf("Mounting archive %s to %s.", options.ArchivePath, options.MountPoint))
+	log.Printf("Mounting archive %s to %s\n.", options.ArchivePath, options.MountPoint)
 
 	if _, err := os.Stat(options.MountPoint); os.IsNotExist(err) {
 		err = os.MkdirAll(options.MountPoint, 0755)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create mount point directory: %v", err)
 		}
-		log.Information("Mount point directory created.")
+		log.Println("Mount point directory created.")
 	}
 
 	ca := archive.NewClipArchiver()
@@ -203,9 +194,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, error) {
 
 // Store CLIP in remote storage
 func StoreS3(storeS3Opts StoreS3Options) error {
-	log.Spinner("Uploading...")
-	log.StartSpinner()
-
+	log.Println("Uploading...")
 	region := os.Getenv("AWS_REGION")
 
 	// If no key is provided, use the base name of the input archive as key
@@ -224,6 +213,6 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 		return err
 	}
 
-	log.Success("Done.")
+	log.Println("Done uploading.")
 	return nil
 }
