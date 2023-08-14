@@ -10,24 +10,36 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-type ClipFileSystem struct {
-	s           storage.ClipStorageInterface
-	root        *FSNode
-	lookupCache map[string]*cacheEntry
-	cacheMutex  sync.RWMutex
-	verbose     bool
+type ClipFileSystemOpts struct {
+	Verbose      bool
+	ContentCache ContentCache
 }
 
-type cacheEntry struct {
+type ClipFileSystem struct {
+	s            storage.ClipStorageInterface
+	root         *FSNode
+	lookupCache  map[string]*lookupCacheEntry
+	contentCache ContentCache
+	cacheMutex   sync.RWMutex
+	verbose      bool
+}
+
+type lookupCacheEntry struct {
 	inode *fs.Inode
 	attr  fuse.Attr
 }
 
-func NewFileSystem(s storage.ClipStorageInterface, verbose bool) (*ClipFileSystem, error) {
+type ContentCache interface {
+	GetContent(hash string, offset int64, length int64) ([]byte, error)
+	StoreContent(content []byte) (string, error)
+}
+
+func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
-		s:           s,
-		verbose:     verbose,
-		lookupCache: make(map[string]*cacheEntry),
+		s:            s,
+		verbose:      opts.Verbose,
+		lookupCache:  make(map[string]*lookupCacheEntry),
+		contentCache: opts.ContentCache,
 	}
 
 	metadata := s.Metadata()

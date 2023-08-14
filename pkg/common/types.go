@@ -16,12 +16,13 @@ const (
 )
 
 type ClipNode struct {
-	NodeType ClipNodeType
-	Path     string
-	Attr     fuse.Attr
-	Target   string
-	DataPos  int64 // Position of the nodes data in the final binary
-	DataLen  int64 // Length of the nodes data
+	NodeType    ClipNodeType
+	Path        string
+	Attr        fuse.Attr
+	Target      string
+	ContentHash string
+	DataPos     int64 // Position of the nodes data in the final binary
+	DataLen     int64 // Length of the nodes data
 }
 
 // IsDir returns true if the ClipNode represents a directory.

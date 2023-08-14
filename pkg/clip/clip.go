@@ -34,10 +34,11 @@ type ExtractOptions struct {
 }
 
 type MountOptions struct {
-	ArchivePath string
-	MountPoint  string
-	Verbose     bool
-	CachePath   string
+	ArchivePath  string
+	MountPoint   string
+	Verbose      bool
+	CachePath    string
+	ContentCache clipfs.ContentCache
 }
 
 type StoreS3Options struct {
@@ -131,8 +132,8 @@ func ExtractClipArchive(options ExtractOptions) error {
 	return nil
 }
 
-// Mount
-func MountClipArchive(options MountOptions) (func() error, <-chan error, error) {
+// Mount a clip archive to a directory
+func MountArchive(options MountOptions) (func() error, <-chan error, error) {
 	log.Information(fmt.Sprintf("Mounting archive %s to %s.", options.ArchivePath, options.MountPoint))
 
 	if _, err := os.Stat(options.MountPoint); os.IsNotExist(err) {
@@ -154,7 +155,7 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 		return nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := clipfs.NewFileSystem(s, options.Verbose)
+	clipfs, err := clipfs.NewFileSystem(s, clipfs.ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache})
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
@@ -191,7 +192,6 @@ func MountClipArchive(options MountOptions) (func() error, <-chan error, error) 
 			}
 
 			server.Wait()
-
 			close(serverError)
 		}()
 

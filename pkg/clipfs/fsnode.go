@@ -83,7 +83,7 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 
 	// Cache the result
 	n.filesystem.cacheMutex.Lock()
-	n.filesystem.lookupCache[childPath] = &cacheEntry{inode: childInode, attr: child.Attr}
+	n.filesystem.lookupCache[childPath] = &lookupCacheEntry{inode: childInode, attr: child.Attr}
 	n.filesystem.cacheMutex.Unlock()
 
 	return childInode, fs.OK
@@ -102,19 +102,39 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
+	// Length of the content to read
+	length := int64(len(dest))
+
+	// Check the cache if it exists
+	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
+		content, err := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, length)
+		if err == nil { // Content found in cache
+			copy(dest, content)
+			return fuse.ReadResultData(dest[:len(content)]), fs.OK
+		}
+
+		// If no cache hit - fall through to read from the underlying source
+	}
+
 	nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 	if err != nil {
 		return nil, syscall.EIO
 	}
 
+	// Store contents in cache
+	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
+		fileContent := make([]byte, n.clipNode.DataLen)
+		_, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, 0)
+		if err != nil {
+			return nil, syscall.EIO
+		}
+		_, err = n.filesystem.contentCache.StoreContent(fileContent)
+		if err != nil {
+			return nil, syscall.EIO
+		}
+	}
+
 	return fuse.ReadResultData(dest[:nRead]), fs.OK
-}
-
-func (n *FSNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
-	n.log("Getxattr called with attr: %s", attr)
-
-	// TODO: Implement xattr logic
-	return 0, syscall.ENODATA
 }
 
 func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
