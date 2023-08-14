@@ -102,15 +102,18 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
-	// Check the cache if one is setup
+	// Length of the content to read
+	length := int64(len(dest))
+
+	// Check the cache if it exists
 	if n.filesystem.contentCache != nil {
-		n.filesystem.cacheMutex.RLock()
-		if nRead, err := n.filesystem.contentCache.Get("something", dest); err == nil {
-			n.log("Read content cache hit: %s", n.clipNode.Path)
-			n.filesystem.cacheMutex.RUnlock()
-			return fuse.ReadResultData(dest[:nRead]), fs.OK
+		content, err := n.filesystem.contentCache.Get(n.clipNode.ContentHash, off, length)
+		if err == nil { // Content found in cache
+			copy(dest, content)
+			return fuse.ReadResultData(dest[:len(content)]), fs.OK
 		}
-		n.filesystem.cacheMutex.RUnlock()
+
+		// If no cache hit - fall through to read from the underlying source
 	}
 
 	nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
@@ -118,8 +121,17 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		return nil, syscall.EIO
 	}
 
+	// Store contents in cache
 	if n.filesystem.contentCache != nil {
-		go n.filesystem.contentCache.Store("something", dest)
+		fileContent := make([]byte, n.clipNode.DataLen)
+		_, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, 0)
+		if err != nil {
+			return nil, syscall.EIO
+		}
+		_, err = n.filesystem.contentCache.Store(fileContent)
+		if err != nil {
+			return nil, syscall.EIO
+		}
 	}
 
 	return fuse.ReadResultData(dest[:nRead]), fs.OK

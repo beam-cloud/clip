@@ -3,8 +3,10 @@ package archive
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"hash/crc64"
 	"io"
@@ -99,6 +101,17 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				}
 			}
 
+			var contentHash = ""
+			if nodeType == common.FileNode {
+				fileContent, err := os.ReadFile(path)
+				if err != nil {
+					return fmt.Errorf("failed to read file contents for hashing: %w", err)
+				}
+
+				hash := sha256.Sum256(fileContent)
+				contentHash = hex.EncodeToString(hash[:])
+			}
+
 			mode := uint32(fi.Mode())
 			if fi.IsDir() {
 				mode |= syscall.S_IFDIR
@@ -123,7 +136,7 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 			}
 
 			pathWithPrefix := filepath.Join("/", strings.TrimPrefix(path, sourcePath))
-			index.Set(&common.ClipNode{Path: pathWithPrefix, NodeType: nodeType, Attr: attr, Target: target})
+			index.Set(&common.ClipNode{Path: pathWithPrefix, NodeType: nodeType, Attr: attr, Target: target, ContentHash: contentHash})
 
 			return nil
 		},
