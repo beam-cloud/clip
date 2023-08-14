@@ -123,20 +123,20 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	}
 
 	// Store contents in cache
-	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
-		fileContent := make([]byte, n.clipNode.DataLen)
-		_, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, 0)
-		if err != nil {
-			n.log("err reading file: %v", err)
-			return nil, syscall.EIO
-		}
+	go func() {
+		if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
+			fileContent := make([]byte, n.clipNode.DataLen)
+			_, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, 0)
+			if err != nil {
+				n.log("err reading file: %v", err)
+			}
 
-		_, err = n.filesystem.contentCache.StoreContent(fileContent)
-		if err != nil {
-			n.log("err storing file contents: %v", err)
-			return nil, syscall.EIO
+			_, err = n.filesystem.contentCache.StoreContent(fileContent)
+			if err != nil {
+				n.log("err storing file contents: %v", err)
+			}
 		}
-	}
+	}()
 
 	return fuse.ReadResultData(dest[:nRead]), fs.OK
 }
