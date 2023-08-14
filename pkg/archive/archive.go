@@ -503,12 +503,12 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 
 	// Push specific directories towards the front of the archive
 	priorityDirs := []string{
-		path.Join(sourcePath, "/rootfs/usr/lib"),
-		path.Join(sourcePath, "/rootfs/usr/bin"),
-		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.7/dist-packages"),
-		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.8/dist-packages"),
-		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.9/dist-packages"),
-		path.Join(sourcePath, "/rootfs/usr/local/lib/python3.10/dist-packages"),
+		// path.Join(sourcePath, "/rootfs/usr/lib"),
+		// path.Join(sourcePath, "/rootfs/usr/bin"),
+		// path.Join(sourcePath, "/rootfs/usr/local/lib/python3.7/dist-packages"),
+		// path.Join(sourcePath, "/rootfs/usr/local/lib/python3.8/dist-packages"),
+		// path.Join(sourcePath, "/rootfs/usr/local/lib/python3.9/dist-packages"),
+		// path.Join(sourcePath, "/rootfs/usr/local/lib/python3.10/dist-packages"),
 	}
 
 	// Create slices for priority nodes and other nodes
@@ -519,6 +519,7 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 	index.Ascend(index.Min(), func(a interface{}) bool {
 		node := a.(*common.ClipNode)
 		isPriority := false
+
 		nodeFullPath := path.Join(sourcePath, node.Path) // Adding sourcePath to the node path
 		for _, dir := range priorityDirs {
 			if strings.HasPrefix(nodeFullPath, dir) {
