@@ -127,8 +127,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 
 	for {
 		lastDownloadedByte := atomic.LoadInt64(&s3c.lastDownloadedByte)
-		nextByte = lastDownloadedByte + 1
-
+		nextByte = lastDownloadedByte
 		if nextByte > totalSize {
 			break
 		}
@@ -220,11 +219,7 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) 
 		return nil, err
 	}
 
-	// If the download is sequential, update the lastDownloadedByte
-	// This only happens during background download of an archive
-	// Random access should never update this value
-
-	// Write to local cache if localCachePath is set
+	// Write to local cache
 	n, err := s3c.localCacheFile.WriteAt(buf.Bytes(), start)
 	if err != nil {
 		return nil, err
