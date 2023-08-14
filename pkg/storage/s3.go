@@ -65,7 +65,7 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		secretKey:          secretKey,
 		metadata:           metadata,
 		localCachePath:     opts.CachePath,
-		lastDownloadedByte: 0,
+		lastDownloadedByte: int64(common.ClipHeaderLength),
 	}
 
 	if opts.CachePath != "" {
