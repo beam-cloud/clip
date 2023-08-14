@@ -105,15 +105,35 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	// Length of the content to read
 	length := int64(len(dest))
 
-	// Check the cache if it exists
 	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
 		content, err := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, length)
 		if err == nil { // Content found in cache
 			copy(dest, content)
 			return fuse.ReadResultData(dest[:len(content)]), fs.OK
-		}
+		} else { // Cache miss - read from the underlying source and store in cache
+			nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
+			if err != nil {
+				n.log("unable to read file contents: %v", err)
+				return nil, syscall.EIO
+			}
 
-		// If no cache hit - fall through to read from the underlying source
+			go func() {
+				if n.clipNode.DataLen > 0 {
+					fileContent := make([]byte, n.clipNode.DataLen)
+					_, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, 0)
+					if err != nil {
+						n.log("err reading file: %v", err)
+					}
+
+					_, err = n.filesystem.contentCache.StoreContent(fileContent)
+					if err != nil {
+						n.log("err storing file contents: %v", err)
+					}
+				}
+			}()
+
+			return fuse.ReadResultData(dest[:nRead]), fs.OK
+		}
 	}
 
 	nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
@@ -121,22 +141,6 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		n.log("unable to read file contents: %v", err)
 		return nil, syscall.EIO
 	}
-
-	// Store contents in cache
-	go func() {
-		if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
-			fileContent := make([]byte, n.clipNode.DataLen)
-			_, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, 0)
-			if err != nil {
-				n.log("err reading file: %v", err)
-			}
-
-			_, err = n.filesystem.contentCache.StoreContent(fileContent)
-			if err != nil {
-				n.log("err storing file contents: %v", err)
-			}
-		}
-	}()
 
 	return fuse.ReadResultData(dest[:nRead]), fs.OK
 }
