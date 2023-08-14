@@ -113,6 +113,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			copy(dest, content)
 			return fuse.ReadResultData(dest[:len(content)]), fs.OK
 		} else { // Cache miss - read from the underlying source and store in cache
+			log.Println("cache miss err: ", err)
 			nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 			if err != nil {
 				n.log("unable to read file contents from cache: %v", err)

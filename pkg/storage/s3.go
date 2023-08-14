@@ -164,7 +164,6 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 		}
 
 		copy(dest, data)
-
 		return len(data), nil
 	}
 
