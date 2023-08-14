@@ -227,20 +227,18 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential boo
 
 	var n int
 
-	// Write to local cache if localCachePath is set
-	if s3c.localCachePath != "" {
-		n, err = s3c.localCacheFile.WriteAt(buf.Bytes(), start)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		n = buf.Len()
-	}
+	n = buf.Len()
 
 	// If the download is sequential, update the lastDownloadedByte
 	// This only happens during background download of an archive
 	// Random access should never update this value
+
+	// Write to local cache if localCachePath is set
 	if isSequential {
+		n, err = s3c.localCacheFile.WriteAt(buf.Bytes(), start)
+		if err != nil {
+			return nil, err
+		}
 		atomic.StoreInt64(&s3c.lastDownloadedByte, end)
 	}
 
