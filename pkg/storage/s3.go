@@ -65,7 +65,7 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		secretKey:          secretKey,
 		metadata:           metadata,
 		localCachePath:     opts.CachePath,
-		lastDownloadedByte: int64(common.ClipHeaderLength),
+		lastDownloadedByte: 0,
 	}
 
 	if opts.CachePath != "" {
@@ -146,7 +146,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		}
 
 		// Update the last downloaded byte based on the actual number of bytes downloaded
-		atomic.StoreInt64(&s3c.lastDownloadedByte, nextByte+int64(n)-1)
+		atomic.StoreInt64(&s3c.lastDownloadedByte, nextByte+n)
 	}
 
 	log.Success("Archive successfully cached.")
