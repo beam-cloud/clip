@@ -30,8 +30,8 @@ type lookupCacheEntry struct {
 }
 
 type ContentCache interface {
-	Get(hash string, offset int64, length int64) ([]byte, error)
-	Store(content []byte) (string, error)
+	GetContent(hash string, offset int64, length int64) ([]byte, error)
+	StoreContent(content []byte) (string, error)
 }
 
 func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*ClipFileSystem, error) {

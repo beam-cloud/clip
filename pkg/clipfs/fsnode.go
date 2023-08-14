@@ -107,7 +107,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 	// Check the cache if it exists
 	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" {
-		content, err := n.filesystem.contentCache.Get(n.clipNode.ContentHash, off, length)
+		content, err := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, length)
 		if err == nil { // Content found in cache
 			copy(dest, content)
 			return fuse.ReadResultData(dest[:len(content)]), fs.OK
@@ -128,7 +128,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		if err != nil {
 			return nil, syscall.EIO
 		}
-		_, err = n.filesystem.contentCache.Store(fileContent)
+		_, err = n.filesystem.contentCache.StoreContent(fileContent)
 		if err != nil {
 			return nil, syscall.EIO
 		}
