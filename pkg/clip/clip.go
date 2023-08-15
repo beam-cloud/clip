@@ -165,7 +165,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, error) {
 		EnableSymlinkCaching: true,
 		SyncRead:             false,
 		RememberInodes:       true,
-		MaxReadAhead:         0,
+		MaxReadAhead:         1 << 17,
 	})
 
 	if err != nil {

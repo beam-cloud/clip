@@ -34,12 +34,6 @@ func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 
 	node := n.clipNode
 
-	// // Fetch the node attributes
-	// node := n.filesystem.s.Metadata().Get(n.clipNode.Path)
-	// if node == nil {
-	// 	return syscall.ENOENT
-	// }
-
 	// Fill in the AttrOut struct
 	out.Ino = node.Attr.Ino
 	out.Size = node.Attr.Size
