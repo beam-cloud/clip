@@ -26,6 +26,7 @@ type S3ClipStorage struct {
 	metadata           *common.ClipArchiveMetadata
 	lastDownloadedByte int64
 	localCachePath     string
+	cachedLocally      bool
 }
 
 type S3ClipStorageOpts struct {
@@ -65,6 +66,7 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		secretKey:      secretKey,
 		metadata:       metadata,
 		localCachePath: opts.CachePath,
+		cachedLocally:  false,
 	}
 
 	if opts.CachePath != "" {
@@ -124,6 +126,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		if cacheFileInfo.Size() == totalSize {
 			log.Printf("Cache file <%s> exists.\n", s3c.localCachePath)
 			atomic.StoreInt64(&s3c.lastDownloadedByte, totalSize)
+			s3c.cachedLocally = true
 			return
 		}
 	}
@@ -146,6 +149,11 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	}
 
 	log.Printf("Archive <%v> cached in %v", s3c.localCachePath, time.Since(startTime))
+	s3c.cachedLocally = true
+}
+
+func (s3c *S3ClipStorage) CachedLocally() bool {
+	return s3c.cachedLocally
 }
 
 func (s3c *S3ClipStorage) getFileSize() (int64, error) {

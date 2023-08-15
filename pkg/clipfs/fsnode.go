@@ -101,8 +101,15 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	// Length of the content to read
 	length := int64(len(dest))
 
+	// Don't even try to read 0 byte files
+	if n.clipNode.DataLen == 0 {
+		nRead := 0
+		return fuse.ReadResultData(dest[:nRead]), fs.OK
+	}
+
 	// If we have provided a contentCache, try and use it
-	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" && n.clipNode.DataLen > 0 {
+	// Switch back local filesystem if all content is cached on disk
+	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
 		content, err := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, length)
 
 		// Content found in cache
@@ -116,6 +123,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			}
 
 			// Store entire file in CAS
+			// TODO: make this stream file in chunks to avoid OOM
 			go func() {
 				if n.clipNode.DataLen > 0 {
 					fileContent := make([]byte, n.clipNode.DataLen)

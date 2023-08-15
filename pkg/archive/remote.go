@@ -3,11 +3,11 @@ package archive
 import (
 	"encoding/gob"
 	"errors"
+	"log"
 	"os"
 
 	common "github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
-	log "github.com/okteto/okteto/pkg/log"
 )
 
 func init() {
@@ -44,7 +44,7 @@ func (rca *RClipArchiver) Create(archivePath string, outputPath string) error {
 			return err
 		}
 
-		log.Information("Creating an RCLIP and storing original archive on S3")
+		log.Println("Creating an RCLIP and storing original archive on S3")
 		err = rca.ClipArchiver.CreateRemoteArchive(rca.StorageInfo, metadata, outputPath)
 		if err != nil {
 			return err

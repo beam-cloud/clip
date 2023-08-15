@@ -38,6 +38,10 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 	return n, nil
 }
 
+func (s *LocalClipStorage) CachedLocally() bool {
+	return true
+}
+
 func (s *LocalClipStorage) Metadata() *common.ClipArchiveMetadata {
 	return s.metadata
 }
