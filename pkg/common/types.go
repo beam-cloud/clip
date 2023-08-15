@@ -53,66 +53,45 @@ func (m *ClipArchiveMetadata) Get(path string) *ClipNode {
 	return item.(*ClipNode)
 }
 
-// func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
-// 	var entries []fuse.DirEntry
-
-// 	// Append '/' if not present at the end of the path
-// 	if !strings.HasSuffix(path, "/") {
-// 		path += "/"
-// 	}
-
-// 	// Append null character to the path -- if we don't do this we could miss some child nodes.
-// 	// It works because \x00 is lower lexographically than any other character
-// 	pivot := &ClipNode{Path: path + "\x00"}
-// 	m.Index.Ascend(pivot, func(a interface{}) bool {
-// 		node := a.(*ClipNode)
-
-// 		// Remove the prefix and check if there are any "/" left
-// 		relativePath := strings.TrimPrefix(node.Path, path)
-// 		if strings.Contains(relativePath, "/") {
-// 			// This node is not an immediate child, continue on
-// 			return true
-// 		}
-
-// 		// Node is an immediate child, so we append it to entries
-// 		if relativePath != "" {
-// 			entries = append(entries, fuse.DirEntry{
-// 				Mode: node.Attr.Mode,
-// 				Name: relativePath,
-// 			})
-// 		}
-
-// 		return true
-// 	})
-
-// 	return entries
-// }
-
 func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
-	pathLen := len(path)
+	var entries []fuse.DirEntry
 
-	// Check for suffix and add if needed
-	if path[pathLen-1] != '/' {
+	// Append '/' if not present at the end of the path
+	if !strings.HasSuffix(path, "/") {
 		path += "/"
-		pathLen++
 	}
 
+	// Append null character to the path -- if we don't do this we could miss some child nodes.
+	// It works because \x00 is lower lexographically than any other character
 	pivot := &ClipNode{Path: path + "\x00"}
-
-	var entries []fuse.DirEntry = make([]fuse.DirEntry, 0, 100)
+	pathLen := len(path)
 
 	m.Index.Ascend(pivot, func(a interface{}) bool {
 		node := a.(*ClipNode)
 		nodePath := node.Path
 
-		if len(nodePath) <= pathLen || nodePath[pathLen-1] != '/' || strings.IndexByte(nodePath[pathLen:], '/') >= 0 {
+		if !strings.HasPrefix(nodePath, path) {
 			return true
 		}
 
-		entries = append(entries, fuse.DirEntry{
-			Mode: node.Attr.Mode,
-			Name: nodePath[pathLen:],
-		})
+		// Check if there are any "/" left after removing the prefix
+		for i := pathLen; i < len(nodePath); i++ {
+			if nodePath[i] == '/' {
+				if i == pathLen || nodePath[i-1] != '/' {
+					// This node is not an immediate child, continue on
+					return true
+				}
+			}
+		}
+
+		// Node is an immediate child, so we append it to entries
+		relativePath := nodePath[pathLen:]
+		if relativePath != "" {
+			entries = append(entries, fuse.DirEntry{
+				Mode: node.Attr.Mode,
+				Name: relativePath,
+			})
+		}
 
 		return true
 	})
