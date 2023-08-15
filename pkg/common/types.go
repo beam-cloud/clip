@@ -70,7 +70,7 @@ func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
 		node := a.(*ClipNode)
 		nodePath := node.Path
 
-		if !strings.HasPrefix(nodePath, path) {
+		if len(nodePath) < pathLen || nodePath[:pathLen] != path {
 			return true
 		}
 
