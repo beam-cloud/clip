@@ -4,3 +4,4 @@ testfs/*
 *.gob
 *.clip
 *.rclip
+*.pprof
