@@ -122,6 +122,9 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 
 	cacheFileInfo, err := os.Stat(s3c.localCachePath)
 	if err == nil {
+		log.Printf("Existing clip size: %d\n", cacheFileInfo.Size())
+		log.Printf("Remote clip size: %d\n", totalSize)
+
 		if cacheFileInfo.Size() == totalSize {
 			log.Printf("Cache file <%s> exists.\n", s3c.localCachePath)
 			return
