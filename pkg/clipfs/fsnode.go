@@ -32,11 +32,13 @@ func (n *FSNode) OnAdd(ctx context.Context) {
 func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	n.log("Getattr called")
 
-	// Fetch the node attributes
-	node := n.filesystem.s.Metadata().Get(n.clipNode.Path)
-	if node == nil {
-		return syscall.ENOENT
-	}
+	node := n.clipNode
+
+	// // Fetch the node attributes
+	// node := n.filesystem.s.Metadata().Get(n.clipNode.Path)
+	// if node == nil {
+	// 	return syscall.ENOENT
+	// }
 
 	// Fill in the AttrOut struct
 	out.Ino = node.Attr.Ino
