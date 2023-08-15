@@ -125,7 +125,7 @@ func ExtractClipArchive(options ExtractOptions) error {
 
 // Mount a clip archive to a directory
 func MountArchive(options MountOptions) (func() error, <-chan error, error) {
-	log.Printf("Mounting archive %s to %s\n.", options.ArchivePath, options.MountPoint)
+	log.Printf("Mounting archive %s to %s\n", options.ArchivePath, options.MountPoint)
 
 	if _, err := os.Stat(options.MountPoint); os.IsNotExist(err) {
 		err = os.MkdirAll(options.MountPoint, 0755)

@@ -136,7 +136,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		atomic.StoreInt64(&s3c.lastDownloadedByte, nextByte+chunkSize-1)
 	}
 
-	log.Printf("archive <%v> cached in %v", s3c.localCachePath, time.Since(startTime))
+	log.Printf("Archive <%v> cached in %v", s3c.localCachePath, time.Since(startTime))
 }
 
 func (s3c *S3ClipStorage) getFileSize() (int64, error) {
