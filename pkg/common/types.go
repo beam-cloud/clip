@@ -53,34 +53,66 @@ func (m *ClipArchiveMetadata) Get(path string) *ClipNode {
 	return item.(*ClipNode)
 }
 
-func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
-	var entries []fuse.DirEntry
+// func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
+// 	var entries []fuse.DirEntry
 
-	// Append '/' if not present at the end of the path
-	if !strings.HasSuffix(path, "/") {
+// 	// Append '/' if not present at the end of the path
+// 	if !strings.HasSuffix(path, "/") {
+// 		path += "/"
+// 	}
+
+// 	// Append null character to the path -- if we don't do this we could miss some child nodes.
+// 	// It works because \x00 is lower lexographically than any other character
+// 	pivot := &ClipNode{Path: path + "\x00"}
+// 	m.Index.Ascend(pivot, func(a interface{}) bool {
+// 		node := a.(*ClipNode)
+
+// 		// Remove the prefix and check if there are any "/" left
+// 		relativePath := strings.TrimPrefix(node.Path, path)
+// 		if strings.Contains(relativePath, "/") {
+// 			// This node is not an immediate child, continue on
+// 			return true
+// 		}
+
+// 		// Node is an immediate child, so we append it to entries
+// 		if relativePath != "" {
+// 			entries = append(entries, fuse.DirEntry{
+// 				Mode: node.Attr.Mode,
+// 				Name: relativePath,
+// 			})
+// 		}
+
+// 		return true
+// 	})
+
+// 	return entries
+// }
+
+func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
+	pathLen := len(path)
+
+	// Check for suffix and add if needed
+	if path[pathLen-1] != '/' {
 		path += "/"
+		pathLen++
 	}
 
-	// Append null character to the path -- if we don't do this we could miss some child nodes.
-	// It works because \x00 is lower lexographically than any other character
 	pivot := &ClipNode{Path: path + "\x00"}
+
+	var entries []fuse.DirEntry = make([]fuse.DirEntry, 0, 100)
+
 	m.Index.Ascend(pivot, func(a interface{}) bool {
 		node := a.(*ClipNode)
+		nodePath := node.Path
 
-		// Remove the prefix and check if there are any "/" left
-		relativePath := strings.TrimPrefix(node.Path, path)
-		if strings.Contains(relativePath, "/") {
-			// This node is not an immediate child, continue on
+		if len(nodePath) <= pathLen || nodePath[pathLen-1] != '/' || strings.IndexByte(nodePath[pathLen:], '/') >= 0 {
 			return true
 		}
 
-		// Node is an immediate child, so we append it to entries
-		if relativePath != "" {
-			entries = append(entries, fuse.DirEntry{
-				Mode: node.Attr.Mode,
-				Name: relativePath,
-			})
-		}
+		entries = append(entries, fuse.DirEntry{
+			Mode: node.Attr.Mode,
+			Name: nodePath[pathLen:],
+		})
 
 		return true
 	})
