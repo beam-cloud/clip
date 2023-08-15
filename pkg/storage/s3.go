@@ -116,7 +116,16 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 
 	totalSize, err := s3c.getFileSize()
 	if err != nil {
-		log.Fatalf("Unable to get file size: %v", err)
+		log.Printf("Unable to get file size: %v", err)
+		return
+	}
+
+	cacheFileInfo, err := os.Stat(s3c.localCachePath)
+	if err == nil {
+		if cacheFileInfo.Size() == totalSize {
+			log.Printf("Cache file <%s> exists.\n", s3c.localCachePath)
+			return
+		}
 	}
 
 	startTime := time.Now()

@@ -70,6 +70,7 @@ func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
 		node := a.(*ClipNode)
 		nodePath := node.Path
 
+		// Check if this node path starts with 'path' (meaning it is a child --> continue)
 		if len(nodePath) < pathLen || nodePath[:pathLen] != path {
 			return true
 		}
