@@ -68,7 +68,7 @@ func CreateClipArchive(options CreateOptions) error {
 	return nil
 }
 
-func CreateAndUploadClipArchive(options CreateOptions, si common.ClipStorageInfo) error {
+func CreateAndUploadArchive(options CreateOptions, si common.ClipStorageInfo) error {
 	log.Printf("Archiving...")
 	log.Printf("Creating a new archive from directory: %s\n", options.InputPath)
 
@@ -152,7 +152,6 @@ func MountArchive(options MountOptions) (func() error, <-chan error, error) {
 	}
 
 	root, _ := clipfs.Root()
-
 	attrTimeout := time.Second * 60
 	entryTimeout := time.Second * 60
 	fsOptions := &fs.Options{
@@ -167,7 +166,6 @@ func MountArchive(options MountOptions) (func() error, <-chan error, error) {
 		RememberInodes:       true,
 		MaxReadAhead:         1 << 17,
 	})
-
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not create server: %v", err)
 	}
