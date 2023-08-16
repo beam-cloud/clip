@@ -50,7 +50,7 @@ type StoreS3Options struct {
 }
 
 // Create Archive
-func CreateClipArchive(options CreateOptions) error {
+func CreateArchive(options CreateOptions) error {
 	log.Println("Archiving...")
 	log.Printf("Creating a new archive from directory: %s\n", options.InputPath)
 
@@ -104,7 +104,7 @@ func CreateAndUploadArchive(options CreateOptions, si common.ClipStorageInfo) er
 }
 
 // Extract Archive
-func ExtractClipArchive(options ExtractOptions) error {
+func ExtractArchive(options ExtractOptions) error {
 	log.Println("Extracting...")
 	log.Printf("Extracting archive: %s\n", options.InputFile)
 
