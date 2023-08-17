@@ -21,5 +21,5 @@ func init() {
 }
 
 func runExtract(cmd *cobra.Command, args []string) error {
-	return clip.ExtractClipArchive(*extractOpts)
+	return clip.ExtractArchive(*extractOpts)
 }

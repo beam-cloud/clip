@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/beam-cloud/clip/pkg/common"
 )
@@ -97,13 +98,14 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 	}
 	defer f.Close()
 
-	input := &s3.PutObjectInput{
+	// Create an uploader with the S3 client and default options
+	uploader := manager.NewUploader(s3c.svc)
+
+	_, err = uploader.Upload(context.TODO(), &s3.PutObjectInput{
 		Bucket: aws.String(s3c.bucket),
 		Key:    aws.String(s3c.key),
 		Body:   f,
-	}
-
-	_, err = s3c.svc.PutObject(context.TODO(), input)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to upload archive: %v", err)
 	}

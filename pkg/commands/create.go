@@ -21,5 +21,5 @@ func init() {
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
-	return clip.CreateClipArchive(*createOpts)
+	return clip.CreateArchive(*createOpts)
 }
