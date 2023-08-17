@@ -123,17 +123,27 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			}
 
 			// Store entire file in CAS
-			// TODO: make this stream file in chunks to avoid OOM
 			go func() {
 				if n.clipNode.DataLen > 0 {
-					fileContent := make([]byte, n.clipNode.DataLen)
-					_, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, 0)
-					if err != nil {
-						n.log("err reading file: %v", err)
-					}
+					chunkSize := 1 << 26 // 64Mb
+					fileContent := make([]byte, chunkSize)
+					chunks := make(chan []byte)
 
-					_, err = n.filesystem.contentCache.StoreContent(fileContent)
-					if err != nil {
+					go func() {
+						defer close(chunks)
+
+						for offset := int64(0); offset < n.clipNode.DataLen; offset += int64(chunkSize) {
+							nRead, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, offset)
+							if err != nil {
+								n.log("err reading file: %v", err)
+								break
+							}
+							chunks <- fileContent[:nRead]
+						}
+					}()
+
+					hash, err := n.filesystem.contentCache.StoreContent(chunks)
+					if err != nil || hash != n.clipNode.ContentHash {
 						n.log("err storing file contents: %v", err)
 					}
 				}
