@@ -125,11 +125,11 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			// Store entire file in CAS
 			go func() {
 				if n.clipNode.DataLen > 0 {
-					chunkSize := 1 << 26 // 64Mb
-					fileContent := make([]byte, chunkSize)
 					chunks := make(chan []byte)
 
-					go func() {
+					go func(chunks chan []byte) {
+						chunkSize := 1 << 26 // 64Mb
+						fileContent := make([]byte, chunkSize)
 						defer close(chunks)
 
 						for offset := int64(0); offset < n.clipNode.DataLen; offset += int64(chunkSize) {
@@ -140,7 +140,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 							}
 							chunks <- fileContent[:nRead]
 						}
-					}()
+					}(chunks)
 
 					hash, err := n.filesystem.contentCache.StoreContent(chunks)
 					if err != nil || hash != n.clipNode.ContentHash {
