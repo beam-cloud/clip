@@ -105,7 +105,7 @@ func (cfs *ClipFileSystem) cacheContent() {
 			chunks := make(chan []byte, 1)
 
 			go func(chunks chan []byte) {
-				chunkSize := int64(1 << 21) // 2Mb
+				chunkSize := int64(1 << 25) // 32Mb
 
 				if chunkSize > clipNode.DataLen {
 					chunkSize = clipNode.DataLen
@@ -123,7 +123,6 @@ func (cfs *ClipFileSystem) cacheContent() {
 						break
 					}
 
-					cacheEvent.node.log("<%s> read %d bytes at offset %d\n", clipNode.Path, nRead, offset)
 					chunks <- fileContent[:nRead]
 					fileContent = nil
 				}
