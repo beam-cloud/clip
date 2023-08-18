@@ -16,12 +16,15 @@ type ClipFileSystemOpts struct {
 }
 
 type ClipFileSystem struct {
-	s            storage.ClipStorageInterface
-	root         *FSNode
-	lookupCache  map[string]*lookupCacheEntry
-	contentCache ContentCache
-	cacheMutex   sync.RWMutex
-	verbose      bool
+	s               storage.ClipStorageInterface
+	root            *FSNode
+	lookupCache     map[string]*lookupCacheEntry
+	contentCache    ContentCache
+	cacheMutex      sync.RWMutex
+	verbose         bool
+	cachingStatus   map[string]bool
+	cacheEventChan  chan cacheEvent
+	cachingStatusMu sync.Mutex
 }
 
 type lookupCacheEntry struct {
@@ -34,12 +37,18 @@ type ContentCache interface {
 	StoreContent(chan []byte) (string, error)
 }
 
+type cacheEvent struct {
+	node *FSNode
+}
+
 func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
-		s:            s,
-		verbose:      opts.Verbose,
-		lookupCache:  make(map[string]*lookupCacheEntry),
-		contentCache: opts.ContentCache,
+		s:              s,
+		verbose:        opts.Verbose,
+		lookupCache:    make(map[string]*lookupCacheEntry),
+		contentCache:   opts.ContentCache,
+		cacheEventChan: make(chan cacheEvent, 10000),
+		cachingStatus:  make(map[string]bool),
 	}
 
 	metadata := s.Metadata()
@@ -54,6 +63,8 @@ func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*Cl
 		clipNode:   rootNode,
 	}
 
+	go cfs.cacheContent()
+
 	return cfs, nil
 }
 
@@ -62,4 +73,69 @@ func (cfs *ClipFileSystem) Root() (fs.InodeEmbedder, error) {
 		return nil, fmt.Errorf("root not initialized")
 	}
 	return cfs.root, nil
+}
+
+func (cfs *ClipFileSystem) CacheFile(node *FSNode) {
+	hash := node.clipNode.ContentHash
+
+	// Check and update caching status
+	cfs.cachingStatusMu.Lock()
+	if cfs.cachingStatus[hash] {
+		cfs.cachingStatusMu.Unlock()
+		return // File is already being cached or has been cached
+	}
+	cfs.cachingStatus[hash] = true
+	cfs.cachingStatusMu.Unlock()
+
+	// Submit cache event
+	cfs.cacheEventChan <- cacheEvent{node: node}
+}
+
+func (cfs *ClipFileSystem) clearCachingStatus(hash string) {
+	cfs.cachingStatusMu.Lock()
+	delete(cfs.cachingStatus, hash)
+	cfs.cachingStatusMu.Unlock()
+}
+
+func (cfs *ClipFileSystem) cacheContent() {
+	for cacheEvent := range cfs.cacheEventChan {
+		clipNode := cacheEvent.node.clipNode
+
+		if clipNode.DataLen > 0 {
+			chunks := make(chan []byte, 1)
+
+			go func(chunks chan []byte) {
+				chunkSize := int64(1 << 21) // 2Mb
+
+				if chunkSize > clipNode.DataLen {
+					chunkSize = clipNode.DataLen
+				}
+
+				for offset := int64(0); offset < clipNode.DataLen; offset += int64(chunkSize) {
+					if (clipNode.DataLen - offset) < chunkSize {
+						chunkSize = clipNode.DataLen - offset
+					}
+
+					fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
+					nRead, err := cfs.s.ReadFile(clipNode, fileContent, offset)
+					if err != nil {
+						cacheEvent.node.log("err reading file: %v", err)
+						break
+					}
+
+					cacheEvent.node.log("<%s> read %d bytes at offset %d\n", clipNode.Path, nRead, offset)
+					chunks <- fileContent[:nRead]
+					fileContent = nil
+				}
+
+				close(chunks)
+			}(chunks)
+
+			hash, err := cfs.contentCache.StoreContent(chunks)
+			if err != nil || hash != clipNode.ContentHash {
+				cacheEvent.node.log("err storing file contents: %v", err)
+				cfs.clearCachingStatus(clipNode.ContentHash)
+			}
+		}
+	}
 }

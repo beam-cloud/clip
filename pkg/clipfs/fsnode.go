@@ -124,6 +124,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			n.log("Total memory usage: %f MB\n", float64(memStats.Alloc)/(1024*1024))
 
 			copy(dest, content)
+
 			return fuse.ReadResultData(dest[:len(content)]), fs.OK
 		} else { // Cache miss - read from the underlying source and store in cache
 			nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
@@ -133,41 +134,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 			// Store entire file in CAS
 			go func() {
-				if n.clipNode.DataLen > 0 {
-					chunks := make(chan []byte, 1)
-
-					go func(chunks chan []byte) {
-						chunkSize := int64(1 << 21) // 2Mb
-
-						if chunkSize > n.clipNode.DataLen {
-							chunkSize = n.clipNode.DataLen
-						}
-
-						for offset := int64(0); offset < n.clipNode.DataLen; offset += int64(chunkSize) {
-							if (n.clipNode.DataLen - offset) < chunkSize {
-								chunkSize = n.clipNode.DataLen - offset
-							}
-
-							fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
-							nRead, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, offset)
-							if err != nil {
-								n.log("err reading file: %v", err)
-								break
-							}
-
-							n.log("<%s> read %d bytes at offset %d\n", n.clipNode.Path, nRead, offset)
-							chunks <- fileContent[:nRead]
-							fileContent = nil
-						}
-
-						close(chunks)
-					}(chunks)
-
-					hash, err := n.filesystem.contentCache.StoreContent(chunks)
-					if err != nil || hash != n.clipNode.ContentHash {
-						n.log("err storing file contents: %v", err)
-					}
-				}
+				n.filesystem.CacheFile(n)
 			}()
 
 			return fuse.ReadResultData(dest[:nRead]), fs.OK
