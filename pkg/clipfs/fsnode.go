@@ -128,7 +128,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 					chunks := make(chan []byte, 1)
 
 					go func(chunks chan []byte) {
-						chunkSize := int64(1 << 26) // 64Mb
+						chunkSize := int64(1 << 21) // 2Mb
 
 						if chunkSize > n.clipNode.DataLen {
 							chunkSize = n.clipNode.DataLen
@@ -148,6 +148,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 							n.log("<%s> read %d bytes at offset %d\n", n.clipNode.Path, nRead, offset)
 							chunks <- fileContent[:nRead]
+							fileContent = nil
 						}
 
 						close(chunks)
