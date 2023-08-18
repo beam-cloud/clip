@@ -128,9 +128,17 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 					chunks := make(chan []byte, 1)
 
 					go func(chunks chan []byte) {
-						chunkSize := 1 << 26 // 64Mb
+						chunkSize := int64(1 << 26) // 64Mb
+
+						if chunkSize > n.clipNode.DataLen {
+							chunkSize = n.clipNode.DataLen
+						}
 
 						for offset := int64(0); offset < n.clipNode.DataLen; offset += int64(chunkSize) {
+							if (n.clipNode.DataLen - offset) < chunkSize {
+								chunkSize = n.clipNode.DataLen - offset
+							}
+
 							fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
 							nRead, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, offset)
 							if err != nil {
