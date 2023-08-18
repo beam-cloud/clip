@@ -30,7 +30,7 @@ type lookupCacheEntry struct {
 }
 
 type ContentCache interface {
-	GetContent(hash string, offset int64, length int64, dest []byte) (int64, error)
+	GetContent(hash string, offset int64, length int64) ([]byte, error)
 	StoreContent(chan []byte) (string, error)
 }
 
