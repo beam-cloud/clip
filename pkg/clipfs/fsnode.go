@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path"
+	"runtime"
 	"syscall"
 
 	"github.com/beam-cloud/clip/pkg/common"
@@ -114,6 +115,13 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 		// Content found in cache
 		if err == nil {
+			// Get the memory stats
+			var memStats runtime.MemStats
+			runtime.ReadMemStats(&memStats)
+
+			// Print total memory usage in megabytes
+			n.log("Total memory usage: %f MB\n", float64(memStats.Alloc)/(1024*1024))
+
 			copy(dest, content)
 			return fuse.ReadResultData(dest[:len(content)]), fs.OK
 		} else { // Cache miss - read from the underlying source and store in cache
