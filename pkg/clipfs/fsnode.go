@@ -120,6 +120,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			runtime.ReadMemStats(&memStats)
 
 			// Print total memory usage in megabytes
+			n.log("Read %f MB bytes from cache\n", float64(len(content))/(1024*1024))
 			n.log("Total memory usage: %f MB\n", float64(memStats.Alloc)/(1024*1024))
 
 			copy(dest, content)
