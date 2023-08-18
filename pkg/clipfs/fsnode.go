@@ -122,33 +122,35 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 				return nil, syscall.EIO
 			}
 
-			// // Store entire file in CAS
-			// go func() {
-			// 	if n.clipNode.DataLen > 0 {
-			// 		chunks := make(chan []byte, 1)
+			// Store entire file in CAS
+			go func() {
+				if n.clipNode.DataLen > 0 {
+					chunks := make(chan []byte, 1)
 
-			// 		go func(chunks chan []byte) {
-			// 			chunkSize := 1 << 26 // 64Mb
+					go func(chunks chan []byte) {
+						chunkSize := 1 << 26 // 64Mb
 
-			// 			for offset := int64(0); offset < n.clipNode.DataLen; offset += int64(chunkSize) {
-			// 				fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
-			// 				nRead, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, offset)
-			// 				if err != nil {
-			// 					n.log("err reading file: %v", err)
-			// 					break
-			// 				}
-			// 				chunks <- fileContent[:nRead]
-			// 			}
+						for offset := int64(0); offset < n.clipNode.DataLen; offset += int64(chunkSize) {
+							fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
+							nRead, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, offset)
+							if err != nil {
+								n.log("err reading file: %v", err)
+								break
+							}
 
-			// 			close(chunks)
-			// 		}(chunks)
+							n.log("<%s> read %d bytes at offset %d\n", n.clipNode.Path, nRead, offset)
+							chunks <- fileContent[:nRead]
+						}
 
-			// 		hash, err := n.filesystem.contentCache.StoreContent(chunks)
-			// 		if err != nil || hash != n.clipNode.ContentHash {
-			// 			n.log("err storing file contents: %v", err)
-			// 		}
-			// 	}
-			// }()
+						close(chunks)
+					}(chunks)
+
+					hash, err := n.filesystem.contentCache.StoreContent(chunks)
+					if err != nil || hash != n.clipNode.ContentHash {
+						n.log("err storing file contents: %v", err)
+					}
+				}
+			}()
 
 			return fuse.ReadResultData(dest[:nRead]), fs.OK
 		}
