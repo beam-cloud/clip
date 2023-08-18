@@ -129,10 +129,9 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 					go func(chunks chan []byte) {
 						chunkSize := 1 << 26 // 64Mb
-						fileContent := make([]byte, chunkSize)
-						defer close(chunks)
 
 						for offset := int64(0); offset < n.clipNode.DataLen; offset += int64(chunkSize) {
+							fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
 							nRead, err := n.filesystem.s.ReadFile(n.clipNode, fileContent, offset)
 							if err != nil {
 								n.log("err reading file: %v", err)
@@ -140,6 +139,8 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 							}
 							chunks <- fileContent[:nRead]
 						}
+
+						close(chunks)
 					}(chunks)
 
 					hash, err := n.filesystem.contentCache.StoreContent(chunks)
