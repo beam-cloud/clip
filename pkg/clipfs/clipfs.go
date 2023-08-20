@@ -63,7 +63,7 @@ func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*Cl
 		clipNode:   rootNode,
 	}
 
-	go cfs.cacheContent()
+	go cfs.processCacheEvents()
 
 	return cfs, nil
 }
@@ -97,7 +97,7 @@ func (cfs *ClipFileSystem) clearCachingStatus(hash string) {
 	cfs.cachingStatusMu.Unlock()
 }
 
-func (cfs *ClipFileSystem) cacheContent() {
+func (cfs *ClipFileSystem) processCacheEvents() {
 	for cacheEvent := range cfs.cacheEventChan {
 		clipNode := cacheEvent.node.clipNode
 

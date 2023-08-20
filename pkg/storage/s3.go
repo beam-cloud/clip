@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -19,15 +18,14 @@ import (
 )
 
 type S3ClipStorage struct {
-	svc                *s3.Client
-	bucket             string
-	key                string
-	accessKey          string
-	secretKey          string
-	metadata           *common.ClipArchiveMetadata
-	lastDownloadedByte int64
-	localCachePath     string
-	cachedLocally      bool
+	svc            *s3.Client
+	bucket         string
+	key            string
+	accessKey      string
+	secretKey      string
+	metadata       *common.ClipArchiveMetadata
+	localCachePath string
+	cachedLocally  bool
 }
 
 type S3ClipStorageOpts struct {
@@ -36,8 +34,6 @@ type S3ClipStorageOpts struct {
 	Region    string
 	CachePath string
 }
-
-const chunkSize int64 = int64(1024 * 1024 * 100) // 100 MB
 
 func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
@@ -114,9 +110,6 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 }
 
 func (s3c *S3ClipStorage) startBackgroundDownload() {
-	chunkSize := chunkSize
-	nextByte := int64(0)
-
 	totalSize, err := s3c.getFileSize()
 	if err != nil {
 		log.Printf("Unable to get file size: %v", err)
@@ -127,27 +120,28 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	if err == nil {
 		if cacheFileInfo.Size() == totalSize {
 			log.Printf("Cache file <%s> exists.\n", s3c.localCachePath)
-			atomic.StoreInt64(&s3c.lastDownloadedByte, totalSize)
 			s3c.cachedLocally = true
 			return
 		}
 	}
 
 	startTime := time.Now()
-	for {
-		lastDownloadedByte := atomic.LoadInt64(&s3c.lastDownloadedByte)
-		nextByte = lastDownloadedByte + 1
+	downloader := manager.NewDownloader(s3c.svc)
+	downloader.Concurrency = 10
 
-		if nextByte > totalSize {
-			break
-		}
+	f, err := os.Create(s3c.localCachePath)
+	if err != nil {
+		log.Printf("Failed to create file %q, %v", s3c.localCachePath, err)
+		return
+	}
 
-		_, err := s3c.downloadChunk(nextByte, nextByte+chunkSize-1, true)
-		if err != nil {
-			log.Fatalf("Failed to download chunk: %v", err)
-		}
-
-		atomic.StoreInt64(&s3c.lastDownloadedByte, nextByte+chunkSize-1)
+	_, err = downloader.Download(context.TODO(), f, &s3.GetObjectInput{
+		Bucket: aws.String(s3c.bucket),
+		Key:    aws.String(s3c.key),
+	})
+	if err != nil {
+		log.Printf("Failed to download object: %v", err)
+		return
 	}
 
 	log.Printf("Archive <%v> cached in %v", s3c.localCachePath, time.Since(startTime))
@@ -176,10 +170,8 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	start := node.DataPos + off
 	end := start + int64(len(dest)) - 1
 
-	lastDownloadedByte := atomic.LoadInt64(&s3c.lastDownloadedByte)
-
-	if end > lastDownloadedByte || s3c.localCachePath == "" {
-		data, err := s3c.downloadChunk(start, end, false)
+	if s3c.localCachePath == "" || !s3c.cachedLocally {
+		data, err := s3c.downloadChunk(start, end)
 		if err != nil {
 			return 0, err
 		}
@@ -198,7 +190,7 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	return f.ReadAt(dest, start)
 }
 
-func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential bool) ([]byte, error) {
+func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
@@ -235,13 +227,6 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64, isSequential boo
 		}
 	} else {
 		n = buf.Len()
-	}
-
-	// If the download is sequential, update the lastDownloadedByte
-	// This only happens during background download of an archive
-	// Random access should never update this value
-	if isSequential {
-		atomic.StoreInt64(&s3c.lastDownloadedByte, end)
 	}
 
 	return buf.Bytes()[:n], nil
