@@ -35,6 +35,8 @@ type S3ClipStorageOpts struct {
 	CachePath string
 }
 
+const backgroundDownloadStartupDelay = time.Second * 25
+
 func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
@@ -125,6 +127,10 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		}
 	}
 
+	// Wait a bit before kicking off the background download job
+	time.Sleep(backgroundDownloadStartupDelay)
+
+	log.Printf("Caching <%s>\n", s3c.localCachePath)
 	startTime := time.Now()
 	downloader := manager.NewDownloader(s3c.svc)
 	downloader.Concurrency = 10
