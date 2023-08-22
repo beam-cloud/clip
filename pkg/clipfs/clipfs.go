@@ -11,20 +11,22 @@ import (
 )
 
 type ClipFileSystemOpts struct {
-	Verbose      bool
-	ContentCache ContentCache
+	Verbose               bool
+	ContentCache          ContentCache
+	ContentCacheAvailable bool
 }
 
 type ClipFileSystem struct {
-	s               storage.ClipStorageInterface
-	root            *FSNode
-	lookupCache     map[string]*lookupCacheEntry
-	contentCache    ContentCache
-	cacheMutex      sync.RWMutex
-	verbose         bool
-	cachingStatus   map[string]bool
-	cacheEventChan  chan cacheEvent
-	cachingStatusMu sync.Mutex
+	s                     storage.ClipStorageInterface
+	root                  *FSNode
+	lookupCache           map[string]*lookupCacheEntry
+	contentCache          ContentCache
+	contentCacheAvailable bool
+	cacheMutex            sync.RWMutex
+	verbose               bool
+	cachingStatus         map[string]bool
+	cacheEventChan        chan cacheEvent
+	cachingStatusMu       sync.Mutex
 }
 
 type lookupCacheEntry struct {
@@ -43,12 +45,13 @@ type cacheEvent struct {
 
 func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
-		s:              s,
-		verbose:        opts.Verbose,
-		lookupCache:    make(map[string]*lookupCacheEntry),
-		contentCache:   opts.ContentCache,
-		cacheEventChan: make(chan cacheEvent, 10000),
-		cachingStatus:  make(map[string]bool),
+		s:                     s,
+		verbose:               opts.Verbose,
+		lookupCache:           make(map[string]*lookupCacheEntry),
+		contentCache:          opts.ContentCache,
+		cacheEventChan:        make(chan cacheEvent, 10000),
+		cachingStatus:         make(map[string]bool),
+		contentCacheAvailable: opts.ContentCacheAvailable,
 	}
 
 	metadata := s.Metadata()

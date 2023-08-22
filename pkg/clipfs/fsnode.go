@@ -109,7 +109,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 	// If we have provided a contentCache, try and use it
 	// Switch back local filesystem if all content is cached on disk
-	if n.filesystem.contentCache != nil && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
+	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
 		content, err := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, length)
 
 		// Content found in cache
