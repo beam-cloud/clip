@@ -38,8 +38,8 @@ type S3ClipStorageOpts struct {
 const backgroundDownloadStartupDelay = time.Second * 25
 
 func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
-	accessKey := os.Getenv("CLIP_AWS_ACCESS_KEY_ID")
-	secretKey := os.Getenv("CLIP_AWS_SECRET_ACCESS_KEY")
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
 
 	cfg, err := getAWSConfig(accessKey, secretKey, opts.Region)
 	if err != nil {
