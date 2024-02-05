@@ -169,7 +169,7 @@ func (s3c *S3ClipStorage) getFileSize() (int64, error) {
 		return 0, err
 	}
 
-	return resp.ContentLength, nil
+	return *resp.ContentLength, nil
 }
 
 func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
