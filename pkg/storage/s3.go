@@ -96,13 +96,21 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 	}
 	defer f.Close()
 
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	length := fi.Size()
+
 	// Create an uploader with the S3 client and default options
 	uploader := manager.NewUploader(s3c.svc)
 
 	_, err = uploader.Upload(context.TODO(), &s3.PutObjectInput{
-		Bucket: aws.String(s3c.bucket),
-		Key:    aws.String(s3c.key),
-		Body:   f,
+		Bucket:        aws.String(s3c.bucket),
+		Key:           aws.String(s3c.key),
+		Body:          f,
+		ContentLength: &length,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to upload archive: %v", err)
