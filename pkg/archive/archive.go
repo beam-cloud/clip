@@ -319,6 +319,8 @@ func (ca *ClipArchiver) CreateRemoteArchive(storageInfo common.ClipStorageInfo, 
 		return err
 	}
 
+	log.Println("created remote archive")
+
 	return nil
 }
 

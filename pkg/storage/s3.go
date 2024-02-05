@@ -106,6 +106,7 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 	// Create an uploader with the S3 client and default options
 	uploader := manager.NewUploader(s3c.svc)
 
+	log.Println("CLIP: uploading archive")
 	_, err = uploader.Upload(context.TODO(), &s3.PutObjectInput{
 		Bucket:        aws.String(s3c.bucket),
 		Key:           aws.String(s3c.key),
@@ -115,6 +116,7 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to upload archive: %v", err)
 	}
+	log.Println("CLIP: uploaded archive")
 
 	return nil
 }

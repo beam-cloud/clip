@@ -32,6 +32,8 @@ func (rca *RClipArchiver) Create(archivePath string, outputPath string) error {
 		return err
 	}
 
+	log.Printf("metadata: %+v\n", metadata)
+
 	switch rca.StorageInfo.Type() {
 	case "s3":
 		var storageInfo *common.S3StorageInfo = rca.StorageInfo.(*common.S3StorageInfo)
