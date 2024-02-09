@@ -40,6 +40,7 @@ type MountOptions struct {
 	CachePath             string
 	ContentCache          clipfs.ContentCache
 	ContentCacheAvailable bool
+	Credentials           storage.ClipStorageCredentials
 }
 
 type StoreS3Options struct {
@@ -142,7 +143,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, error) {
 		return nil, nil, fmt.Errorf("invalid archive: %v", err)
 	}
 
-	s, err := storage.NewClipStorage(options.ArchivePath, options.CachePath, metadata)
+	s, err := storage.NewClipStorage(options.ArchivePath, options.CachePath, metadata, options.Credentials)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}

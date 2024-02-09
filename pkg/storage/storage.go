@@ -12,10 +12,11 @@ type ClipStorageInterface interface {
 	CachedLocally() bool
 }
 
-type ClipStorageOpts interface {
+type ClipStorageCredentials struct {
+	S3 *S3ClipStorageCredentials
 }
 
-func NewClipStorage(archivePath string, cachePath string, metadata *common.ClipArchiveMetadata) (ClipStorageInterface, error) {
+func NewClipStorage(archivePath string, cachePath string, metadata *common.ClipArchiveMetadata, credentials ClipStorageCredentials) (ClipStorageInterface, error) {
 	var storage ClipStorageInterface = nil
 	var storageType string
 	var err error = nil
@@ -37,6 +38,8 @@ func NewClipStorage(archivePath string, cachePath string, metadata *common.ClipA
 			Region:    storageInfo.Region,
 			Key:       storageInfo.Key,
 			CachePath: cachePath,
+			AccessKey: credentials.S3.AccessKey,
+			SecretKey: credentials.S3.SecretKey,
 		}
 		storage, err = NewS3ClipStorage(metadata, opts)
 	case "local":

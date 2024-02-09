@@ -17,6 +17,11 @@ import (
 	"github.com/beam-cloud/clip/pkg/common"
 )
 
+type S3ClipStorageCredentials struct {
+	AccessKey string
+	SecretKey string
+}
+
 type S3ClipStorage struct {
 	svc            *s3.Client
 	bucket         string
@@ -33,6 +38,8 @@ type S3ClipStorageOpts struct {
 	Key       string
 	Region    string
 	CachePath string
+	AccessKey string
+	SecretKey string
 }
 
 const backgroundDownloadStartupDelay = time.Second * 25
@@ -40,6 +47,11 @@ const backgroundDownloadStartupDelay = time.Second * 25
 func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+
+	if opts.AccessKey != "" && opts.SecretKey != "" {
+		accessKey = opts.AccessKey
+		secretKey = opts.SecretKey
+	}
 
 	cfg, err := getAWSConfig(accessKey, secretKey, opts.Region)
 	if err != nil {
