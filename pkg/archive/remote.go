@@ -26,7 +26,7 @@ func NewRClipArchiver(si common.ClipStorageInfo) (*RClipArchiver, error) {
 	}, nil
 }
 
-func (rca *RClipArchiver) Create(archivePath string, outputPath string) error {
+func (rca *RClipArchiver) Create(archivePath string, outputPath string, credentials storage.ClipStorageCredentials) error {
 	metadata, err := rca.ClipArchiver.ExtractMetadata(archivePath)
 	if err != nil {
 		return err
@@ -36,9 +36,11 @@ func (rca *RClipArchiver) Create(archivePath string, outputPath string) error {
 	case "s3":
 		var storageInfo *common.S3StorageInfo = rca.StorageInfo.(*common.S3StorageInfo)
 		clipStorage, err := storage.NewS3ClipStorage(metadata, storage.S3ClipStorageOpts{
-			Region: storageInfo.Region,
-			Bucket: storageInfo.Bucket,
-			Key:    storageInfo.Key,
+			Region:    storageInfo.Region,
+			Bucket:    storageInfo.Bucket,
+			Key:       storageInfo.Key,
+			AccessKey: credentials.S3.AccessKey,
+			SecretKey: credentials.S3.SecretKey,
 		})
 		if err != nil {
 			return err
