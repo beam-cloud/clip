@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/google/uuid"
 )
 
 type S3ClipStorageCredentials struct {
@@ -42,7 +43,7 @@ type S3ClipStorageOpts struct {
 	SecretKey string
 }
 
-const backgroundDownloadStartupDelay = time.Second * 25
+const backgroundDownloadStartupDelay = time.Second * 30
 
 func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOpts) (*S3ClipStorage, error) {
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
@@ -150,12 +151,14 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	// Wait a bit before kicking off the background download job
 	time.Sleep(backgroundDownloadStartupDelay)
 
+	tmpCacheFile := fmt.Sprintf("%s.%s", s3c.localCachePath, uuid.New().String()[:6])
+
 	log.Printf("Caching <%s>\n", s3c.localCachePath)
 	startTime := time.Now()
 	downloader := manager.NewDownloader(s3c.svc)
 	downloader.Concurrency = 10
 
-	f, err := os.Create(s3c.localCachePath)
+	f, err := os.Create(tmpCacheFile)
 	if err != nil {
 		log.Printf("Failed to create file %q, %v", s3c.localCachePath, err)
 		return
@@ -167,6 +170,13 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	})
 	if err != nil {
 		log.Printf("Failed to download object: %v", err)
+		os.Remove(tmpCacheFile)
+		return
+	}
+
+	err = os.Rename(tmpCacheFile, s3c.localCachePath)
+	if err != nil {
+		log.Printf("Failed to move downloaded file to cache path %q, %v", s3c.localCachePath, err)
 		return
 	}
 
