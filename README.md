@@ -17,7 +17,7 @@ We welcome contributions! Just submit a PR.
 
 ## License
 
-CLIP filesystem is under the Apache license. See the [LICENSE](LICENSE.md) file for more details.
+CLIP filesystem is under the MIT license. See the [LICENSE](LICENSE.md) file for more details.
 
 ## Support
 
