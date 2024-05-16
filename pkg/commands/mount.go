@@ -35,7 +35,7 @@ func forceUnmount() {
 func runMount(cmd *cobra.Command, args []string) {
 	forceUnmount() // Force unmount the file system if it's already mounted
 
-	startServer, serverError, err := clip.MountArchive(*mountOptions)
+	startServer, serverError, _, err := clip.MountArchive(*mountOptions)
 	if err != nil {
 		log.Fatalf("Failed to mount archive: %v", err)
 	}

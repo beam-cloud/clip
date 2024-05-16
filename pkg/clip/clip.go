@@ -128,13 +128,13 @@ func ExtractArchive(options ExtractOptions) error {
 }
 
 // Mount a clip archive to a directory
-func MountArchive(options MountOptions) (func() error, <-chan error, error) {
+func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Server, error) {
 	log.Printf("Mounting archive %s to %s\n", options.ArchivePath, options.MountPoint)
 
 	if _, err := os.Stat(options.MountPoint); os.IsNotExist(err) {
 		err = os.MkdirAll(options.MountPoint, 0755)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create mount point directory: %v", err)
+			return nil, nil, nil, fmt.Errorf("failed to create mount point directory: %v", err)
 		}
 		log.Println("Mount point directory created.")
 	}
@@ -142,17 +142,17 @@ func MountArchive(options MountOptions) (func() error, <-chan error, error) {
 	ca := archive.NewClipArchiver()
 	metadata, err := ca.ExtractMetadata(options.ArchivePath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("invalid archive: %v", err)
+		return nil, nil, nil, fmt.Errorf("invalid archive: %v", err)
 	}
 
 	s, err := storage.NewClipStorage(options.ArchivePath, options.CachePath, metadata, options.Credentials)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not load storage: %v", err)
+		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
 	clipfs, err := clipfs.NewFileSystem(s, clipfs.ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not create filesystem: %v", err)
+		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
 
 	root, _ := clipfs.Root()
@@ -171,7 +171,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, error) {
 		MaxReadAhead:         1 << 17,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not create server: %v", err)
+		return nil, nil, nil, fmt.Errorf("could not create server: %v", err)
 	}
 
 	serverError := make(chan error, 1)
@@ -191,7 +191,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, error) {
 		return nil
 	}
 
-	return startServer, serverError, nil
+	return startServer, serverError, server, nil
 }
 
 // Store CLIP in remote storage
