@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.16.16
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.15.15
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.48.1
-	github.com/hanwen/go-fuse/v2 v2.3.0
+	github.com/hanwen/go-fuse/v2 v2.5.1
 	github.com/karrick/godirwalk v1.17.0
 	github.com/okteto/okteto v0.0.0-20230606010233-e087ad480f0a
 	github.com/spf13/cobra v1.7.0
