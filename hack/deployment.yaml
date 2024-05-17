@@ -14,6 +14,6 @@ spec:
     spec:
       containers:
       - name: beam-clip-container
-        image: okteto.dev/beam-clip:latest
+        image: localhost:5001/beam-clip:latest
         securityContext:
           privileged: true
