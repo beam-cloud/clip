@@ -56,7 +56,17 @@ func (ca *ClipArchiver) newIndex() *btree.BTree {
 	return btree.New(compare)
 }
 
-// populateIndex creates an representation of the filesystem/folder being archived
+// InodeGenerator generates unique inodes for each ClipNode
+type InodeGenerator struct {
+	current uint64
+}
+
+func (ig *InodeGenerator) Next() uint64 {
+	ig.current++
+	return ig.current
+}
+
+// populateIndex creates a representation of the filesystem/folder being archived
 func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) error {
 	root := &common.ClipNode{
 		Path:     "/",
@@ -67,6 +77,9 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 	}
 	index.Set(root)
 
+	inodeGen := &InodeGenerator{current: 0}
+	inodeMap := make(map[string]uint64)
+
 	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
 			var target string = ""
@@ -76,29 +89,24 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				nodeType = common.DirNode
 			} else if de.IsSymlink() {
 				_target, err := os.Readlink(path)
-
 				if err != nil {
 					return fmt.Errorf("error reading symlink target %s: %v", path, err)
 				}
-
 				target = _target
 				nodeType = common.SymLinkNode
 			} else {
 				nodeType = common.FileNode
 			}
 
-			var err error
 			var fi fs.FileInfo
+			var err error
 			if nodeType == common.SymLinkNode {
 				fi, err = os.Lstat(path)
-				if err != nil {
-					return err
-				}
 			} else {
 				fi, err = os.Stat(path)
-				if err != nil {
-					return err
-				}
+			}
+			if err != nil {
+				return err
 			}
 
 			var contentHash = ""
@@ -121,8 +129,17 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				mode |= syscall.S_IFREG
 			}
 
+			// Assign a unique inode
+			var inode uint64
+			if existingInode, exists := inodeMap[path]; exists {
+				inode = existingInode
+			} else {
+				inode = inodeGen.Next()
+				inodeMap[path] = inode
+			}
+
 			attr := fuse.Attr{
-				Ino:    fi.Sys().(*syscall.Stat_t).Ino,
+				Ino:    inode,
 				Size:   uint64(fi.Size()),
 				Blocks: uint64(fi.Sys().(*syscall.Stat_t).Blocks),
 				Atime:  uint64(fi.ModTime().Unix()),
