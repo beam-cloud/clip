@@ -17,12 +17,12 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	log "github.com/okteto/okteto/pkg/log"
 	"golang.org/x/sys/unix"
 
 	common "github.com/beam-cloud/clip/pkg/common"
 
-	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/karrick/godirwalk"
 	"github.com/tidwall/btree"
 )
@@ -122,19 +122,18 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 			}
 
 			// Determine the file mode and type
-			mode := uint32(stat.Mode & 0777) // Preserve permission bits only
-			switch {
-			case stat.Mode&unix.S_IFDIR != 0:
+			mode := uint32(stat.Mode & 0777) // preserve permission bits only
+			switch stat.Mode & unix.S_IFMT {
+			case unix.S_IFDIR:
 				mode |= syscall.S_IFDIR
-			case stat.Mode&unix.S_IFLNK != 0:
+			case unix.S_IFLNK:
 				mode |= syscall.S_IFLNK
-			case stat.Mode&unix.S_IFREG != 0:
+			case unix.S_IFREG:
 				mode |= syscall.S_IFREG
 			default:
 				// Handle other types if needed
 				mode |= syscall.S_IFREG
 			}
-
 			// Assign a unique inode
 			var inode uint64
 			if existingInode, exists := inodeMap[path]; exists {
@@ -145,13 +144,17 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 			}
 
 			attr := fuse.Attr{
-				Ino:    inode,
-				Size:   uint64(stat.Size),
-				Blocks: uint64(stat.Blocks),
-				Atime:  uint64(stat.Atim.Sec),
-				Mtime:  uint64(stat.Mtim.Sec),
-				Mode:   mode,
-				Nlink:  uint32(stat.Nlink),
+				Ino:       inode,
+				Size:      uint64(stat.Size),
+				Blocks:    uint64(stat.Blocks),
+				Atime:     uint64(stat.Atim.Sec),
+				Atimensec: uint32(stat.Atim.Nsec),
+				Mtime:     uint64(stat.Mtim.Sec),
+				Mtimensec: uint32(stat.Mtim.Nsec),
+				Ctime:     uint64(stat.Ctim.Sec),
+				Ctimensec: uint32(stat.Ctim.Nsec),
+				Mode:      mode,
+				Nlink:     uint32(stat.Nlink),
 				Owner: fuse.Owner{
 					Uid: stat.Uid,
 					Gid: stat.Gid,
