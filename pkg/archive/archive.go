@@ -110,15 +110,6 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				return err
 			}
 
-			mode := uint32(stat.Mode)
-			if stat.Mode&unix.S_IFDIR != 0 {
-				mode |= syscall.S_IFDIR
-			} else if stat.Mode&unix.S_IFLNK != 0 {
-				mode |= syscall.S_IFLNK
-			} else {
-				mode |= syscall.S_IFREG
-			}
-
 			var contentHash = ""
 			if nodeType == common.FileNode {
 				fileContent, err := os.ReadFile(path)
@@ -128,6 +119,15 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 
 				hash := sha256.Sum256(fileContent)
 				contentHash = hex.EncodeToString(hash[:])
+			}
+
+			mode := uint32(stat.Mode)
+			if stat.Mode&unix.S_IFDIR != 0 {
+				mode |= syscall.S_IFDIR
+			} else if stat.Mode&unix.S_IFLNK != 0 {
+				mode |= syscall.S_IFLNK
+			} else {
+				mode |= syscall.S_IFREG
 			}
 
 			// Assign a unique inode
