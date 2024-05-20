@@ -121,12 +121,17 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				contentHash = hex.EncodeToString(hash[:])
 			}
 
-			mode := uint32(stat.Mode)
-			if stat.Mode&unix.S_IFDIR != 0 {
+			// Determine the file mode and type
+			mode := uint32(stat.Mode & 0777) // Preserve permission bits only
+			switch {
+			case stat.Mode&unix.S_IFDIR != 0:
 				mode |= syscall.S_IFDIR
-			} else if stat.Mode&unix.S_IFLNK != 0 {
+			case stat.Mode&unix.S_IFLNK != 0:
 				mode |= syscall.S_IFLNK
-			} else {
+			case stat.Mode&unix.S_IFREG != 0:
+				mode |= syscall.S_IFREG
+			default:
+				// Handle other types if needed
 				mode |= syscall.S_IFREG
 			}
 
