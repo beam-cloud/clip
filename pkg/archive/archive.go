@@ -18,6 +18,7 @@ import (
 	"syscall"
 
 	log "github.com/okteto/okteto/pkg/log"
+	"golang.org/x/sys/unix"
 
 	common "github.com/beam-cloud/clip/pkg/common"
 
@@ -98,15 +99,24 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				nodeType = common.FileNode
 			}
 
-			var fi fs.FileInfo
+			var stat unix.Stat_t
 			var err error
 			if nodeType == common.SymLinkNode {
-				fi, err = os.Lstat(path)
+				err = unix.Lstat(path, &stat)
 			} else {
-				fi, err = os.Stat(path)
+				err = unix.Stat(path, &stat)
 			}
 			if err != nil {
 				return err
+			}
+
+			mode := uint32(stat.Mode)
+			if stat.Mode&unix.S_IFDIR != 0 {
+				mode |= syscall.S_IFDIR
+			} else if stat.Mode&unix.S_IFLNK != 0 {
+				mode |= syscall.S_IFLNK
+			} else {
+				mode |= syscall.S_IFREG
 			}
 
 			var contentHash = ""
@@ -120,15 +130,6 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				contentHash = hex.EncodeToString(hash[:])
 			}
 
-			mode := uint32(fi.Mode())
-			if fi.IsDir() {
-				mode |= syscall.S_IFDIR
-			} else if de.IsSymlink() {
-				mode |= syscall.S_IFLNK
-			} else {
-				mode |= syscall.S_IFREG
-			}
-
 			// Assign a unique inode
 			var inode uint64
 			if existingInode, exists := inodeMap[path]; exists {
@@ -140,15 +141,15 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 
 			attr := fuse.Attr{
 				Ino:    inode,
-				Size:   uint64(fi.Size()),
-				Blocks: uint64(fi.Sys().(*syscall.Stat_t).Blocks),
-				Atime:  uint64(fi.ModTime().Unix()),
-				Mtime:  uint64(fi.ModTime().Unix()),
+				Size:   uint64(stat.Size),
+				Blocks: uint64(stat.Blocks),
+				Atime:  uint64(stat.Atim.Sec),
+				Mtime:  uint64(stat.Mtim.Sec),
 				Mode:   mode,
-				Nlink:  uint32(fi.Sys().(*syscall.Stat_t).Nlink),
+				Nlink:  uint32(stat.Nlink),
 				Owner: fuse.Owner{
-					Uid: fi.Sys().(*syscall.Stat_t).Uid,
-					Gid: fi.Sys().(*syscall.Stat_t).Gid,
+					Uid: stat.Uid,
+					Gid: stat.Gid,
 				},
 			}
 
