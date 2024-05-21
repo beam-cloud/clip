@@ -37,6 +37,7 @@ func NewClipStorage(archivePath string, cachePath string, metadata *common.ClipA
 			Bucket:    storageInfo.Bucket,
 			Region:    storageInfo.Region,
 			Key:       storageInfo.Key,
+			Endpoint:  storageInfo.Endpoint,
 			CachePath: cachePath,
 			AccessKey: credentials.S3.AccessKey,
 			SecretKey: credentials.S3.SecretKey,

@@ -38,6 +38,7 @@ type S3ClipStorageOpts struct {
 	Bucket    string
 	Key       string
 	Region    string
+	Endpoint  string
 	CachePath string
 	AccessKey string
 	SecretKey string
@@ -54,7 +55,7 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		secretKey = opts.SecretKey
 	}
 
-	cfg, err := getAWSConfig(accessKey, secretKey, opts.Region)
+	cfg, err := getAWSConfig(accessKey, secretKey, opts.Region, opts.Endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -88,15 +89,33 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 	return c, nil
 }
 
-func getAWSConfig(accessKey string, secretKey string, region string) (aws.Config, error) {
+func getAWSConfig(accessKey string, secretKey string, region string, endpoint string) (aws.Config, error) {
 	var cfg aws.Config
 	var err error
+	var endpointResolver aws.EndpointResolverWithOptions
+
+	if endpoint != "" {
+		endpointResolver = aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+			return aws.Endpoint{
+				URL: endpoint,
+			}, nil
+		})
+	}
 
 	if accessKey == "" || secretKey == "" {
-		cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+		if endpointResolver != nil {
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithEndpointResolverWithOptions(endpointResolver))
+		} else {
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+		}
 	} else {
 		credentials := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
-		cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials))
+
+		if endpointResolver != nil {
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials), config.WithEndpointResolverWithOptions(endpointResolver))
+		} else {
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials))
+		}
 	}
 
 	return cfg, err

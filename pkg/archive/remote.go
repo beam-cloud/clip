@@ -39,6 +39,7 @@ func (rca *RClipArchiver) Create(archivePath string, outputPath string, credenti
 			Region:    storageInfo.Region,
 			Bucket:    storageInfo.Bucket,
 			Key:       storageInfo.Key,
+			Endpoint:  storageInfo.Endpoint,
 			AccessKey: credentials.S3.AccessKey,
 			SecretKey: credentials.S3.SecretKey,
 		})

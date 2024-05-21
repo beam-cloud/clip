@@ -51,9 +51,10 @@ type ClipStorageInfo interface {
 
 // Storage Info Implementations
 type S3StorageInfo struct {
-	Bucket string
-	Region string
-	Key    string
+	Bucket   string
+	Region   string
+	Key      string
+	Endpoint string
 }
 
 func (ssi S3StorageInfo) Type() string {
