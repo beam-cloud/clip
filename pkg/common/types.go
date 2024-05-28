@@ -53,62 +53,49 @@ func (m *ClipArchiveMetadata) Get(path string) *ClipNode {
 	return item.(*ClipNode)
 }
 
-type CacheEntry struct {
-	Path    string
-	Entries []fuse.DirEntry
-}
-
-var directoryCache = map[string]CacheEntry{}
-
 func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
-	// Append '/' if not present at the end of the pat
+	var entries []fuse.DirEntry
+
+	// Append '/' if not present at the end of the path
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
-	}
-
-	// Check dir cache first
-	if entry, found := directoryCache[path]; found {
-		return entry.Entries
 	}
 
 	// Append null character to the path -- if we don't do this we could miss some child nodes.
 	// It works because \x00 is lower lexographically than any other character
 	pivot := &ClipNode{Path: path + "\x00"}
 	pathLen := len(path)
-	var entries []fuse.DirEntry
 
 	m.Index.Ascend(pivot, func(a interface{}) bool {
 		node := a.(*ClipNode)
+		nodePath := node.Path
 
-		// Check if this node path starts with 'path' (meaning it is a child --> continue
-		if len(node.Path) < pathLen || node.Path[:pathLen] != path {
+		// Check if this node path starts with 'path' (meaning it is a child --> continue)
+		if len(nodePath) < pathLen || nodePath[:pathLen] != path {
 			return true
 		}
 
 		// Check if there are any "/" left after removing the prefix
-		for i := pathLen; i < len(node.Path); i++ {
-			if node.Path[i] == '/' {
-				if i == pathLen || node.Path[i-1] != '/' {
+		for i := pathLen; i < len(nodePath); i++ {
+			if nodePath[i] == '/' {
+				if i == pathLen || nodePath[i-1] != '/' {
 					// This node is not an immediate child, continue on
 					return true
 				}
 			}
 		}
 
-		relativePath := node.Path[pathLen:]
-
-		// Only add if there is a non-empty relative path without any further slashes
+		// Node is an immediate child, so we append it to entries
+		relativePath := nodePath[pathLen:]
 		if relativePath != "" {
 			entries = append(entries, fuse.DirEntry{
 				Mode: node.Attr.Mode,
 				Name: relativePath,
 			})
 		}
+
 		return true
 	})
-
-	// Update cache with the new list of entries
-	directoryCache[path] = CacheEntry{Path: path, Entries: entries}
 
 	return entries
 }
