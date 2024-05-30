@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"time"
 
@@ -89,10 +90,25 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 	return c, nil
 }
 
+func isIPv6Available() bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To16() != nil && ipnet.IP.To4() == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func getAWSConfig(accessKey string, secretKey string, region string, endpoint string) (aws.Config, error) {
 	var cfg aws.Config
 	var err error
 	var endpointResolver aws.EndpointResolverWithOptions
+	var useDualStack aws.DualStackEndpointState
 
 	if endpoint != "" {
 		endpointResolver = aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
@@ -102,19 +118,26 @@ func getAWSConfig(accessKey string, secretKey string, region string, endpoint st
 		})
 	}
 
+	if isIPv6Available() {
+		log.Println("[CLIP] Using dualstack mode.")
+		useDualStack = aws.DualStackEndpointStateEnabled
+	} else {
+		useDualStack = aws.DualStackEndpointStateDisabled
+	}
+
 	if accessKey == "" || secretKey == "" {
 		if endpointResolver != nil {
-			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithEndpointResolverWithOptions(endpointResolver))
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithEndpointResolverWithOptions(endpointResolver), config.WithUseDualStackEndpoint(useDualStack))
 		} else {
-			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithUseDualStackEndpoint(useDualStack))
 		}
 	} else {
 		credentials := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
 
 		if endpointResolver != nil {
-			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials), config.WithEndpointResolverWithOptions(endpointResolver))
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials), config.WithEndpointResolverWithOptions(endpointResolver), config.WithUseDualStackEndpoint(useDualStack))
 		} else {
-			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials))
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials), config.WithUseDualStackEndpoint(useDualStack))
 		}
 	}
 
