@@ -52,9 +52,11 @@ func (rca *RClipArchiver) Create(archivePath string, outputPath string, credenti
 		if err != nil {
 			return err
 		}
+		log.Println("Archive created, uploading...")
 
 		err = clipStorage.Upload(archivePath)
 		if err != nil {
+			log.Printf("Unable to upload archive: %+v\n", err)
 			os.Remove(outputPath)
 			return err
 		}

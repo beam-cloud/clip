@@ -135,8 +135,10 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 
 	length := fi.Size()
 
-	// Create an uploader with the S3 client and default options
-	uploader := manager.NewUploader(s3c.svc)
+	// Create an uploader with the S3 client
+	uploader := manager.NewUploader(s3c.svc, func(u *manager.Uploader) {
+		u.Concurrency = 16
+	})
 
 	_, err = uploader.Upload(context.TODO(), &s3.PutObjectInput{
 		Bucket:        aws.String(s3c.bucket),
