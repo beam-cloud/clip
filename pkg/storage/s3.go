@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -104,6 +105,11 @@ func isIPv6Available() bool {
 	return false
 }
 
+func dialContextIPv6(ctx context.Context, network, address string) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp6", address)
+}
+
 func getAWSConfig(accessKey string, secretKey string, region string, endpoint string) (aws.Config, error) {
 	var cfg aws.Config
 	var err error
@@ -118,26 +124,35 @@ func getAWSConfig(accessKey string, secretKey string, region string, endpoint st
 		})
 	}
 
+	httpClient := &http.Client{}
 	if isIPv6Available() {
-		log.Println("[CLIP] Using dualstack mode.")
 		useDualStack = aws.DualStackEndpointStateEnabled
+		ipv6Transport := &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           dialContextIPv6,
+			MaxIdleConns:          0,
+			IdleConnTimeout:       0,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 0,
+		}
+		httpClient.Transport = ipv6Transport
 	} else {
 		useDualStack = aws.DualStackEndpointStateDisabled
 	}
 
 	if accessKey == "" || secretKey == "" {
 		if endpointResolver != nil {
-			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithEndpointResolverWithOptions(endpointResolver), config.WithUseDualStackEndpoint(useDualStack))
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithEndpointResolverWithOptions(endpointResolver), config.WithUseDualStackEndpoint(useDualStack), config.WithHTTPClient(httpClient))
 		} else {
-			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithUseDualStackEndpoint(useDualStack))
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithUseDualStackEndpoint(useDualStack), config.WithHTTPClient(httpClient))
 		}
 	} else {
 		credentials := credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
 
 		if endpointResolver != nil {
-			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials), config.WithEndpointResolverWithOptions(endpointResolver), config.WithUseDualStackEndpoint(useDualStack))
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials), config.WithEndpointResolverWithOptions(endpointResolver), config.WithUseDualStackEndpoint(useDualStack), config.WithHTTPClient(httpClient))
 		} else {
-			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials), config.WithUseDualStackEndpoint(useDualStack))
+			cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion(region), config.WithCredentialsProvider(credentials), config.WithUseDualStackEndpoint(useDualStack), config.WithHTTPClient(httpClient))
 		}
 	}
 
