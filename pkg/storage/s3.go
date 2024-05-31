@@ -128,12 +128,9 @@ func getAWSConfig(accessKey string, secretKey string, region string, endpoint st
 	if isIPv6Available() {
 		useDualStack = aws.DualStackEndpointStateEnabled
 		ipv6Transport := &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           dialContextIPv6,
-			MaxIdleConns:          0,
-			IdleConnTimeout:       0,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 0,
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         dialContextIPv6,
+			TLSHandshakeTimeout: 10 * time.Second,
 		}
 		httpClient.Transport = ipv6Transport
 	} else {
