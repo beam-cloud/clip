@@ -26,7 +26,7 @@ func NewRClipArchiver(si common.ClipStorageInfo) (*RClipArchiver, error) {
 	}, nil
 }
 
-func (rca *RClipArchiver) Create(archivePath string, outputPath string, credentials storage.ClipStorageCredentials) error {
+func (rca *RClipArchiver) Create(archivePath string, outputPath string, credentials storage.ClipStorageCredentials, progressChan chan<- int) error {
 	metadata, err := rca.ClipArchiver.ExtractMetadata(archivePath)
 	if err != nil {
 		return err
@@ -54,7 +54,7 @@ func (rca *RClipArchiver) Create(archivePath string, outputPath string, credenti
 		}
 		log.Println("Archive created, uploading...")
 
-		err = clipStorage.Upload(archivePath)
+		err = clipStorage.Upload(archivePath, progressChan)
 		if err != nil {
 			log.Printf("Unable to upload archive: %+v\n", err)
 			os.Remove(outputPath)

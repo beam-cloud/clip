@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/gofrs/flock"
 	"github.com/google/uuid"
 )
 
@@ -91,25 +91,6 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 	return c, nil
 }
 
-func isIPv6Available() bool {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
-	}
-
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To16() != nil && ipnet.IP.To4() == nil {
-			return true
-		}
-	}
-	return false
-}
-
-func dialContextIPv6(ctx context.Context, network, address string) (net.Conn, error) {
-	var d net.Dialer
-	return d.DialContext(ctx, "tcp6", address)
-}
-
 func getAWSConfig(accessKey string, secretKey string, region string, endpoint string) (aws.Config, error) {
 	var cfg aws.Config
 	var err error
@@ -125,11 +106,11 @@ func getAWSConfig(accessKey string, secretKey string, region string, endpoint st
 	}
 
 	httpClient := &http.Client{}
-	if isIPv6Available() {
+	if common.IsIPv6Available() {
 		useDualStack = aws.DualStackEndpointStateEnabled
 		ipv6Transport := &http.Transport{
 			Proxy:               http.ProxyFromEnvironment,
-			DialContext:         dialContextIPv6,
+			DialContext:         common.DialContextIPv6,
 			TLSHandshakeTimeout: 10 * time.Second,
 		}
 		httpClient.Transport = ipv6Transport
@@ -156,7 +137,27 @@ func getAWSConfig(accessKey string, secretKey string, region string, endpoint st
 	return cfg, err
 }
 
-func (s3c *S3ClipStorage) Upload(archivePath string) error {
+type progressReader struct {
+	file *os.File
+	size int64
+	read int64
+	ch   chan<- int
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.file.Read(p)
+	if n > 0 {
+		pr.read += int64(n)
+		progress := int(float64(pr.read) / float64(pr.size) * 100)
+
+		if pr.ch != nil {
+			pr.ch <- progress
+		}
+	}
+	return n, err
+}
+
+func (s3c *S3ClipStorage) Upload(archivePath string, progressChan chan<- int) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("failed to open archive <%s>: %v", archivePath, err)
@@ -170,6 +171,12 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 
 	length := fi.Size()
 
+	pr := &progressReader{
+		file: f,
+		size: length,
+		ch:   progressChan,
+	}
+
 	// Create an uploader with the S3 client
 	uploader := manager.NewUploader(s3c.svc, func(u *manager.Uploader) {
 		u.Concurrency = 16
@@ -178,13 +185,14 @@ func (s3c *S3ClipStorage) Upload(archivePath string) error {
 	_, err = uploader.Upload(context.TODO(), &s3.PutObjectInput{
 		Bucket:        aws.String(s3c.bucket),
 		Key:           aws.String(s3c.key),
-		Body:          f,
+		Body:          pr,
 		ContentLength: &length,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to upload archive: %v", err)
 	}
 
+	close(progressChan)
 	return nil
 }
 
@@ -208,6 +216,24 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	time.Sleep(backgroundDownloadStartupDelay)
 
 	tmpCacheFile := fmt.Sprintf("%s.%s", s3c.localCachePath, uuid.New().String()[:6])
+	lockFilePath := fmt.Sprintf("%s.lock", s3c.localCachePath)
+
+	fileLock := flock.New(lockFilePath)
+
+	// Attempt to acquire the lock
+	locked, err := fileLock.TryLock()
+	if err != nil {
+		log.Printf("Error while trying to acquire file lock: %v", err)
+		return
+	}
+
+	if !locked {
+		log.Printf("Another process is already caching %s. Skipping download.\n", s3c.localCachePath)
+		return
+	}
+
+	defer fileLock.Unlock()
+	defer os.Remove(lockFilePath)
 
 	log.Printf("Caching <%s>\n", s3c.localCachePath)
 	startTime := time.Now()

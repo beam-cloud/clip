@@ -33,6 +33,7 @@ require (
 	github.com/aws/smithy-go v1.19.0 // indirect
 	github.com/briandowns/spinner v1.23.0 // indirect
 	github.com/fatih/color v1.13.0 // indirect
+	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect

@@ -16,10 +16,11 @@ import (
 )
 
 type CreateOptions struct {
-	InputPath   string
-	OutputPath  string
-	Verbose     bool
-	Credentials storage.ClipStorageCredentials
+	InputPath    string
+	OutputPath   string
+	Verbose      bool
+	Credentials  storage.ClipStorageCredentials
+	ProgressChan chan<- int
 }
 
 type CreateRemoteOptions struct {
@@ -45,12 +46,13 @@ type MountOptions struct {
 }
 
 type StoreS3Options struct {
-	ArchivePath string
-	OutputFile  string
-	Bucket      string
-	Key         string
-	CachePath   string
-	Credentials storage.ClipStorageCredentials
+	ArchivePath  string
+	OutputFile   string
+	Bucket       string
+	Key          string
+	CachePath    string
+	Credentials  storage.ClipStorageCredentials
+	ProgressChan chan<- int
 }
 
 // Create Archive
@@ -98,7 +100,7 @@ func CreateAndUploadArchive(options CreateOptions, si common.ClipStorageInfo) er
 		return err
 	}
 
-	err = remoteArchiver.Create(tempFile.Name(), options.OutputPath, options.Credentials)
+	err = remoteArchiver.Create(tempFile.Name(), options.OutputPath, options.Credentials, options.ProgressChan)
 	if err != nil {
 		return err
 	}
@@ -210,7 +212,7 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 		return err
 	}
 
-	err = a.Create(storeS3Opts.ArchivePath, storeS3Opts.OutputFile, storeS3Opts.Credentials)
+	err = a.Create(storeS3Opts.ArchivePath, storeS3Opts.OutputFile, storeS3Opts.Credentials, storeS3Opts.ProgressChan)
 	if err != nil {
 		return err
 	}
