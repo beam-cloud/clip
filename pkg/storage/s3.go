@@ -192,7 +192,6 @@ func (s3c *S3ClipStorage) Upload(archivePath string, progressChan chan<- int) er
 		return fmt.Errorf("failed to upload archive: %v", err)
 	}
 
-	close(progressChan)
 	return nil
 }
 
