@@ -237,7 +237,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	log.Printf("Caching <%s>\n", s3c.localCachePath)
 	startTime := time.Now()
 	downloader := manager.NewDownloader(s3c.svc)
-	downloader.Concurrency = 10
+	downloader.Concurrency = 32
 
 	f, err := os.Create(tmpCacheFile)
 	if err != nil {
