@@ -179,7 +179,7 @@ func (s3c *S3ClipStorage) Upload(archivePath string, progressChan chan<- int) er
 
 	// Create an uploader with the S3 client
 	uploader := manager.NewUploader(s3c.svc, func(u *manager.Uploader) {
-		u.Concurrency = 16
+		u.Concurrency = 32
 	})
 
 	_, err = uploader.Upload(context.TODO(), &s3.PutObjectInput{
