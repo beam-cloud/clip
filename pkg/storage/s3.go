@@ -179,7 +179,7 @@ func (s3c *S3ClipStorage) Upload(archivePath string, progressChan chan<- int) er
 
 	// Create an uploader with the S3 client
 	uploader := manager.NewUploader(s3c.svc, func(u *manager.Uploader) {
-		u.Concurrency = 32
+		u.Concurrency = 128
 	})
 
 	_, err = uploader.Upload(context.TODO(), &s3.PutObjectInput{
@@ -237,7 +237,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	log.Printf("Caching <%s>\n", s3c.localCachePath)
 	startTime := time.Now()
 	downloader := manager.NewDownloader(s3c.svc)
-	downloader.Concurrency = 32
+	downloader.Concurrency = 128
 
 	f, err := os.Create(tmpCacheFile)
 	if err != nil {
