@@ -34,6 +34,7 @@ type S3ClipStorage struct {
 	metadata       *common.ClipArchiveMetadata
 	localCachePath string
 	cachedLocally  bool
+	cacheFile      *os.File
 }
 
 type S3ClipStorageOpts struct {
@@ -85,6 +86,11 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 	}
 
 	if opts.CachePath != "" {
+		cacheFile, err := os.OpenFile(opts.CachePath, os.O_RDWR|os.O_CREATE, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open cache file <%s>: %v", opts.CachePath, err)
+		}
+		c.cacheFile = cacheFile
 		go c.startBackgroundDownload()
 	}
 
@@ -202,7 +208,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		return
 	}
 
-	cacheFileInfo, err := os.Stat(s3c.localCachePath)
+	cacheFileInfo, err := s3c.cacheFile.Stat()
 	if err == nil {
 		if cacheFileInfo.Size() == totalSize {
 			log.Printf("Cache file <%s> exists.\n", s3c.localCachePath)
@@ -244,6 +250,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		log.Printf("Failed to create file %q, %v", s3c.localCachePath, err)
 		return
 	}
+	defer f.Close()
 
 	_, err = downloader.Download(context.TODO(), f, &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
@@ -298,13 +305,7 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	}
 
 	// Read from local cache
-	f, err := os.Open(s3c.localCachePath)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	return f.ReadAt(dest, start)
+	return s3c.cacheFile.ReadAt(dest, start)
 }
 
 func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) {
@@ -332,13 +333,7 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) 
 
 	// Write to local cache if localCachePath is set
 	if s3c.localCachePath != "" {
-		f, err := os.OpenFile(s3c.localCachePath, os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return nil, err
-		}
-		defer f.Close()
-
-		n, err = f.WriteAt(buf.Bytes(), start)
+		n, err = s3c.cacheFile.WriteAt(buf.Bytes(), start)
 		if err != nil {
 			return nil, err
 		}
