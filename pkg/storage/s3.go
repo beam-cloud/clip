@@ -309,6 +309,8 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 }
 
 func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) {
+	log.Println("DOWNLOADING CHUNK")
+
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
