@@ -343,9 +343,7 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) 
 		return nil, err
 	}
 
-	var n int
-
-	return buf.Bytes()[:n], nil
+	return buf.Bytes()[:buf.Len()], nil
 }
 
 func (s3c *S3ClipStorage) Metadata() *common.ClipArchiveMetadata {
