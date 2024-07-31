@@ -10,6 +10,7 @@ type ClipStorageInterface interface {
 	ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error)
 	Metadata() *common.ClipArchiveMetadata
 	CachedLocally() bool
+	Cleanup() error
 }
 
 type ClipStorageCredentials struct {

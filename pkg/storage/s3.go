@@ -83,6 +83,7 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		metadata:       metadata,
 		localCachePath: opts.CachePath,
 		cachedLocally:  false,
+		cacheFile:      nil,
 	}
 
 	if opts.CachePath != "" {
@@ -346,4 +347,12 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) 
 
 func (s3c *S3ClipStorage) Metadata() *common.ClipArchiveMetadata {
 	return s3c.metadata
+}
+
+func (s3c *S3ClipStorage) Cleanup() error {
+	if s3c.cacheFile != nil {
+		s3c.cacheFile.Close()
+	}
+
+	return nil
 }

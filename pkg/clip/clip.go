@@ -187,6 +187,9 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 			}
 
 			server.Wait()
+
+			s.Cleanup()
+
 			close(serverError)
 		}()
 
