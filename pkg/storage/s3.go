@@ -244,7 +244,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	log.Printf("Caching <%s>\n", s3c.localCachePath)
 	startTime := time.Now()
 	downloader := manager.NewDownloader(s3c.svc)
-	downloader.Concurrency = 128
+	downloader.Concurrency = 32
 
 	f, err := os.Create(tmpCacheFile)
 	if err != nil {
@@ -306,7 +306,7 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	start := node.DataPos + off
 	end := start + int64(len(dest)) - 1
 
-	if s3c.localCachePath == "" || !s3c.cachedLocally {
+	if !s3c.cachedLocally {
 		data, err := s3c.downloadChunk(start, end)
 		if err != nil {
 			return 0, err
