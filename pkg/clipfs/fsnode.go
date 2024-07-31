@@ -110,16 +110,13 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	// If we have provided a contentCache, try and use it
 	// Switch back local filesystem if all content is cached on disk
 	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
-		log.Println("trying to read from content cache")
 		content, err := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, length)
-		log.Println("err: ", err)
+
 		// Content found in cache
 		if err == nil {
-			log.Println("did read the content from content cache")
 			copy(dest, content)
 			return fuse.ReadResultData(dest[:len(content)]), fs.OK
 		} else { // Cache miss - read from the underlying source and store in cache
-			log.Println("cache miss, reading file from s3")
 			nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 			if err != nil {
 				return nil, syscall.EIO
