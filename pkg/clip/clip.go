@@ -187,6 +187,8 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 			}
 
 			server.Wait()
+
+			log.Println("print after unmount: ", options.ArchivePath)
 			close(serverError)
 		}()
 
