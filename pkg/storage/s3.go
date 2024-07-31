@@ -269,7 +269,18 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		return
 	}
 
+	// Close open file handle after rename
+	s3c.cacheFile.Close()
+
+	// Re-open cached file
+	cacheFile, err := os.OpenFile(s3c.localCachePath, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return
+	}
+
 	log.Printf("Archive <%v> cached in %v", s3c.localCachePath, time.Since(startTime))
+
+	s3c.cacheFile = cacheFile
 	s3c.cachedLocally = true
 }
 
@@ -331,16 +342,6 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) 
 	}
 
 	var n int
-
-	// Write to local cache if localCachePath is set
-	if s3c.localCachePath != "" {
-		n, err = s3c.cacheFile.WriteAt(buf.Bytes(), start)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		n = buf.Len()
-	}
 
 	return buf.Bytes()[:n], nil
 }
