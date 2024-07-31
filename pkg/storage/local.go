@@ -45,3 +45,7 @@ func (s *LocalClipStorage) CachedLocally() bool {
 func (s *LocalClipStorage) Metadata() *common.ClipArchiveMetadata {
 	return s.metadata
 }
+
+func (s *LocalClipStorage) Cleanup() error {
+	return nil
+}
