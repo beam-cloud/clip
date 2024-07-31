@@ -307,8 +307,10 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	end := start + int64(len(dest)) - 1
 
 	if !s3c.cachedLocally {
+		log.Println("not cached locally, reading chunk")
 		data, err := s3c.downloadChunk(start, end)
 		if err != nil {
+			log.Println("err reading chunk: ", err)
 			return 0, err
 		}
 
