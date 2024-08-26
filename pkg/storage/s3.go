@@ -324,6 +324,8 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	// Read from local cache
 	n, err := s3c.cacheFile.ReadAt(dest, start)
 	if err != nil {
+		log.Printf("Failed to read from cache file<%s>, falling back to remote source: %v", s3c.localCachePath, err)
+
 		// Fall back to remote source if local cache file fails for some reason
 		return s3c.getContentFromSource(dest, start, end)
 	}
