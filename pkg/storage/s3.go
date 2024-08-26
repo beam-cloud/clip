@@ -302,22 +302,35 @@ func (s3c *S3ClipStorage) getFileSize() (int64, error) {
 	return *resp.ContentLength, nil
 }
 
+func (s3c *S3ClipStorage) getContentFromSource(dest []byte, start, end int64) (int, error) {
+	data, err := s3c.downloadChunk(start, end)
+	if err != nil {
+		return 0, err
+	}
+
+	copy(dest, data)
+	return len(data), nil
+
+}
+
 func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
 	start := node.DataPos + off
 	end := start + int64(len(dest)) - 1
 
 	if !s3c.cachedLocally {
-		data, err := s3c.downloadChunk(start, end)
-		if err != nil {
-			return 0, err
-		}
-
-		copy(dest, data)
-		return len(data), nil
+		return s3c.getContentFromSource(dest, start, end)
 	}
 
 	// Read from local cache
-	return s3c.cacheFile.ReadAt(dest, start)
+	n, err := s3c.cacheFile.ReadAt(dest, start)
+	if err != nil {
+		log.Printf("Failed to read from cache file<%s>, falling back to remote source: %v", s3c.localCachePath, err)
+
+		// Fall back to remote source if local cache file fails for some reason
+		return s3c.getContentFromSource(dest, start, end)
+	}
+
+	return n, nil
 }
 
 func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) {
