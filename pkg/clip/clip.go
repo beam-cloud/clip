@@ -1,6 +1,7 @@
 package clip
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -74,7 +75,7 @@ func CreateArchive(options CreateOptions) error {
 	return nil
 }
 
-func CreateAndUploadArchive(options CreateOptions, si common.ClipStorageInfo) error {
+func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si common.ClipStorageInfo) error {
 	log.Printf("Archiving...")
 	log.Printf("Creating a new archive from directory: %s\n", options.InputPath)
 
@@ -100,7 +101,7 @@ func CreateAndUploadArchive(options CreateOptions, si common.ClipStorageInfo) er
 		return err
 	}
 
-	err = remoteArchiver.Create(tempFile.Name(), options.OutputPath, options.Credentials, options.ProgressChan)
+	err = remoteArchiver.Create(ctx, tempFile.Name(), options.OutputPath, options.Credentials, options.ProgressChan)
 	if err != nil {
 		return err
 	}
@@ -215,7 +216,7 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 		return err
 	}
 
-	err = a.Create(storeS3Opts.ArchivePath, storeS3Opts.OutputFile, storeS3Opts.Credentials, storeS3Opts.ProgressChan)
+	err = a.Create(context.TODO(), storeS3Opts.ArchivePath, storeS3Opts.OutputFile, storeS3Opts.Credentials, storeS3Opts.ProgressChan)
 	if err != nil {
 		return err
 	}

@@ -164,7 +164,7 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (s3c *S3ClipStorage) Upload(archivePath string, progressChan chan<- int) error {
+func (s3c *S3ClipStorage) Upload(ctx context.Context, archivePath string, progressChan chan<- int) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("failed to open archive <%s>: %v", archivePath, err)
@@ -189,7 +189,7 @@ func (s3c *S3ClipStorage) Upload(archivePath string, progressChan chan<- int) er
 		u.Concurrency = 128
 	})
 
-	_, err = uploader.Upload(context.TODO(), &s3.PutObjectInput{
+	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s3c.bucket),
 		Key:           aws.String(s3c.key),
 		Body:          pr,
