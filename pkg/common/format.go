@@ -51,10 +51,11 @@ type ClipStorageInfo interface {
 
 // Storage Info Implementations
 type S3StorageInfo struct {
-	Bucket   string
-	Region   string
-	Key      string
-	Endpoint string
+	Bucket         string
+	Region         string
+	Key            string
+	Endpoint       string
+	ForcePathStyle bool
 }
 
 func (ssi S3StorageInfo) Type() string {

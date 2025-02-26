@@ -35,13 +35,14 @@ func NewClipStorage(archivePath string, cachePath string, metadata *common.ClipA
 	case "s3":
 		storageInfo := metadata.StorageInfo.(common.S3StorageInfo)
 		opts := S3ClipStorageOpts{
-			Bucket:    storageInfo.Bucket,
-			Region:    storageInfo.Region,
-			Key:       storageInfo.Key,
-			Endpoint:  storageInfo.Endpoint,
-			CachePath: cachePath,
-			AccessKey: credentials.S3.AccessKey,
-			SecretKey: credentials.S3.SecretKey,
+			Bucket:         storageInfo.Bucket,
+			Region:         storageInfo.Region,
+			Key:            storageInfo.Key,
+			Endpoint:       storageInfo.Endpoint,
+			ForcePathStyle: storageInfo.ForcePathStyle,
+			CachePath:      cachePath,
+			AccessKey:      credentials.S3.AccessKey,
+			SecretKey:      credentials.S3.SecretKey,
 		}
 		storage, err = NewS3ClipStorage(metadata, opts)
 	case "local":
