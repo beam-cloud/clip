@@ -38,13 +38,14 @@ type S3ClipStorage struct {
 }
 
 type S3ClipStorageOpts struct {
-	Bucket    string
-	Key       string
-	Region    string
-	Endpoint  string
-	CachePath string
-	AccessKey string
-	SecretKey string
+	Bucket         string
+	Key            string
+	Region         string
+	Endpoint       string
+	CachePath      string
+	AccessKey      string
+	SecretKey      string
+	ForcePathStyle bool
 }
 
 const backgroundDownloadStartupDelay = time.Second * 30
@@ -63,7 +64,11 @@ func NewS3ClipStorage(metadata *common.ClipArchiveMetadata, opts S3ClipStorageOp
 		return nil, err
 	}
 
-	svc := s3.NewFromConfig(cfg)
+	svc := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		if opts.ForcePathStyle {
+			o.UsePathStyle = true
+		}
+	})
 
 	// Check to see if we have access to the bucket
 	_, err = svc.HeadBucket(context.TODO(), &s3.HeadBucketInput{

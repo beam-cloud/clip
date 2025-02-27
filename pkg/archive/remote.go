@@ -37,12 +37,13 @@ func (rca *RClipArchiver) Create(ctx context.Context, archivePath string, output
 	case "s3":
 		var storageInfo *common.S3StorageInfo = rca.StorageInfo.(*common.S3StorageInfo)
 		clipStorage, err := storage.NewS3ClipStorage(metadata, storage.S3ClipStorageOpts{
-			Region:    storageInfo.Region,
-			Bucket:    storageInfo.Bucket,
-			Key:       storageInfo.Key,
-			Endpoint:  storageInfo.Endpoint,
-			AccessKey: credentials.S3.AccessKey,
-			SecretKey: credentials.S3.SecretKey,
+			Region:         storageInfo.Region,
+			Bucket:         storageInfo.Bucket,
+			Key:            storageInfo.Key,
+			Endpoint:       storageInfo.Endpoint,
+			ForcePathStyle: storageInfo.ForcePathStyle,
+			AccessKey:      credentials.S3.AccessKey,
+			SecretKey:      credentials.S3.SecretKey,
 		})
 		if err != nil {
 			return err
