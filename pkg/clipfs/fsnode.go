@@ -132,7 +132,6 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			}()
 		}
 	} else {
-		// Read from local storage
 		nRead, err = n.filesystem.s.ReadFile(n.clipNode, dest[:readLen], off)
 		if err != nil {
 			return nil, syscall.EIO
