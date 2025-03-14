@@ -94,51 +94,56 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 	n.log("Open called with flags: %v", flags)
 	return nil, 0, fs.OK
 }
-
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
-	// Check for offset beyond EOF
+	// Handle requests entirely beyond EOF
 	if off >= n.clipNode.DataLen {
-		return fuse.ReadResultData(nil), fs.OK
+		for i := range dest {
+			dest[i] = 0
+		}
+		return fuse.ReadResultData(dest), fs.OK
 	}
 
-	// Adjust length to prevent reading beyond EOF
+	// Determine readable length within file bounds
 	maxReadable := n.clipNode.DataLen - off
-	if int64(len(dest)) > maxReadable {
-		dest = dest[:maxReadable]
-	}
-
-	// Handle empty file immediately
-	if len(dest) == 0 {
-		return fuse.ReadResultData(nil), fs.OK
+	readLen := int64(len(dest))
+	if readLen > maxReadable {
+		readLen = maxReadable
 	}
 
 	// Attempt to read from content cache first
+	var nRead int
+	var err error
 	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
-		content, err := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, int64(len(dest)))
-		if err == nil {
-			copy(dest, content)
-			return fuse.ReadResultData(dest[:len(content)]), fs.OK
+		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen)
+		if cacheErr == nil {
+			nRead = copy(dest, content)
+		} else {
+			// Cache miss - proceed to local storage read
+			nRead, err = n.filesystem.s.ReadFile(n.clipNode, dest[:readLen], off)
+			if err != nil {
+				return nil, syscall.EIO
+			}
+			// Cache asynchronously if needed
+			go func() {
+				n.filesystem.CacheFile(n)
+			}()
 		}
-
-		// Cache miss - proceed to local storage read
+	} else {
+		// Read from local storage
+		nRead, err = n.filesystem.s.ReadFile(n.clipNode, dest[:readLen], off)
+		if err != nil {
+			return nil, syscall.EIO
+		}
 	}
 
-	// Read from local storage
-	nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
-	if err != nil {
-		return nil, syscall.EIO
+	// Zero-fill remaining bytes beyond EOF if needed
+	for i := nRead; i < len(dest); i++ {
+		dest[i] = 0
 	}
 
-	// Cache asynchronously if needed
-	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
-		go func() {
-			n.filesystem.CacheFile(n)
-		}()
-	}
-
-	return fuse.ReadResultData(dest[:nRead]), fs.OK
+	return fuse.ReadResultData(dest), fs.OK
 }
 
 func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
