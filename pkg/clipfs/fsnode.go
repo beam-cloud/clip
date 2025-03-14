@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path"
 	"syscall"
 
@@ -29,21 +30,22 @@ func (n *FSNode) OnAdd(ctx context.Context) {
 	n.log("OnAdd called")
 }
 
+var pageSize int64 = int64(os.Getpagesize())
+
 func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	n.log("Getattr called")
 
-	node := n.clipNode
+	pageAlignedSize := ((n.clipNode.DataLen + pageSize - 1) / pageSize) * pageSize // Align size to the system page size
 
-	// Fill in the AttrOut struct
-	out.Ino = node.Attr.Ino
-	out.Size = node.Attr.Size
-	out.Blocks = node.Attr.Blocks
-	out.Atime = node.Attr.Atime
-	out.Mtime = node.Attr.Mtime
-	out.Ctime = node.Attr.Ctime
-	out.Mode = node.Attr.Mode
-	out.Nlink = node.Attr.Nlink
-	out.Owner = node.Attr.Owner
+	out.Ino = n.clipNode.Attr.Ino
+	out.Size = uint64(pageAlignedSize)
+	out.Blocks = n.clipNode.Attr.Blocks
+	out.Atime = n.clipNode.Attr.Atime
+	out.Mtime = n.clipNode.Attr.Mtime
+	out.Ctime = n.clipNode.Attr.Ctime
+	out.Mode = n.clipNode.Attr.Mode
+	out.Nlink = n.clipNode.Attr.Nlink
+	out.Owner = n.clipNode.Attr.Owner
 
 	return fs.OK
 }
