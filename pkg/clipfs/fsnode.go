@@ -98,12 +98,12 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
-	// Read entirely beyond EOF
-	if off >= n.clipNode.DataLen {
-		return fuse.ReadResultData(make([]byte, len(dest))), fs.OK
+	// Immediately return empty buffer for reads beyond EOF or empty file
+	if off >= n.clipNode.DataLen || n.clipNode.DataLen == 0 {
+		return fuse.ReadResultData(nil), fs.OK
 	}
 
-	// Calculate actual readable length
+	// Determine readable length
 	maxReadable := n.clipNode.DataLen - off
 	readLen := int64(len(dest))
 	if readLen > maxReadable {
@@ -113,7 +113,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	// Read from cache if available
+	// Attempt to read from cache first
 	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
 		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen)
 		if cacheErr == nil {
@@ -123,7 +123,6 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			if err != nil {
 				return nil, syscall.EIO
 			}
-
 			go func() {
 				n.filesystem.CacheFile(n)
 			}()
@@ -135,7 +134,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		}
 	}
 
-	// Null-terminate one byte after read data if there's room
+	// Null-terminate immediately after last read byte if buffer is not fully filled
 	if nRead < len(dest) {
 		dest[nRead] = 0
 		nRead++
