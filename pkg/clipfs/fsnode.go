@@ -98,32 +98,44 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
-	length := int64(len(dest))
-
-	// If the requested offset goes beyond the stored data,
-	// then for simplicity, return a read result with zeros.
-	if off >= int64(n.clipNode.Attr.Size) {
-		// All bytes requested are beyond the physical file,
-		// so they're just padding (e.g. the extra null terminator)
-		zeroData := make([]byte, len(dest))
-		return fuse.ReadResultData(zeroData), fs.OK
+	// Check for offset beyond EOF
+	if off >= n.clipNode.DataLen {
+		return fuse.ReadResultData(nil), fs.OK
 	}
 
-	// Otherwise, read up to the stored (physical) file data.
+	// Adjust length to prevent reading beyond EOF
+	maxReadable := n.clipNode.DataLen - off
+	if int64(len(dest)) > maxReadable {
+		dest = dest[:maxReadable]
+	}
+
+	// Handle empty file immediately
+	if len(dest) == 0 {
+		return fuse.ReadResultData(nil), fs.OK
+	}
+
+	// Attempt to read from content cache first
+	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
+		content, err := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, int64(len(dest)))
+		if err == nil {
+			copy(dest, content)
+			return fuse.ReadResultData(dest[:len(content)]), fs.OK
+		}
+
+		// Cache miss - proceed to local storage read
+	}
+
+	// Read from local storage
 	nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 	if err != nil {
 		return nil, syscall.EIO
 	}
 
-	// If part of the requested range extends past the stored data,
-	// fill the extra bytes with zero.
-	if off+length > int64(n.clipNode.Attr.Size) {
-		// Calculate how many bytes are missing.
-		missing := (off + length) - int64(n.clipNode.Attr.Size)
-		// Fill those bytes with zero. They are already zero if you allocate a new slice,
-		// but you might need to copy nRead bytes first.
-		extra := make([]byte, missing)
-		dest = append(dest[:nRead], extra...)
+	// Cache asynchronously if needed
+	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
+		go func() {
+			n.filesystem.CacheFile(n)
+		}()
 	}
 
 	return fuse.ReadResultData(dest[:nRead]), fs.OK
