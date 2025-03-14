@@ -139,7 +139,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		}
 	}
 
-	// Explicitly zero-fill bytes beyond EOF (crucial for mmap compatibility)
+	// Explicitly zero-fill bytes beyond EOF
 	for i := nRead; i < len(dest); i++ {
 		dest[i] = 0
 	}
