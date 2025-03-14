@@ -20,9 +20,9 @@ type FSNode struct {
 }
 
 func (n *FSNode) log(format string, v ...interface{}) {
-	// if n.filesystem.verbose {
-	log.Printf(fmt.Sprintf("[CLIPFS] (%s) %s", n.clipNode.Path, format), v...)
-	// }
+	if n.filesystem.verbose {
+		log.Printf(fmt.Sprintf("[CLIPFS] (%s) %s", n.clipNode.Path, format), v...)
+	}
 }
 
 func (n *FSNode) OnAdd(ctx context.Context) {
