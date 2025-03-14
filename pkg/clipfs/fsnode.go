@@ -103,8 +103,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 	// Don't even try to read 0 byte files
 	if n.clipNode.DataLen == 0 {
-		nRead := 0
-		return fuse.ReadResultData(dest[:nRead]), fs.OK
+		return fuse.ReadResultData(dest), fs.OK
 	}
 
 	// If we have provided a contentCache, try and use it
@@ -117,7 +116,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			copy(dest, content)
 			return fuse.ReadResultData(dest[:len(content)]), fs.OK
 		} else { // Cache miss - read from the underlying source and store in cache
-			nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
+			_, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 			if err != nil {
 				return nil, syscall.EIO
 			}
@@ -127,16 +126,16 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 				n.filesystem.CacheFile(n)
 			}()
 
-			return fuse.ReadResultData(dest[:nRead]), fs.OK
+			return fuse.ReadResultData(dest), fs.OK
 		}
 	}
 
-	nRead, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
+	_, err := n.filesystem.s.ReadFile(n.clipNode, dest, off)
 	if err != nil {
 		return nil, syscall.EIO
 	}
 
-	return fuse.ReadResultData(dest[:nRead]), fs.OK
+	return fuse.ReadResultData(dest), fs.OK
 }
 
 func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
