@@ -98,9 +98,9 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
-	// Immediately return empty buffer for reads beyond EOF or empty file
+	// Immediately return zeroed buffer if read is completely beyond EOF or file is empty
 	if off >= n.clipNode.DataLen || n.clipNode.DataLen == 0 {
-		return fuse.ReadResultData(nil), fs.OK
+		return fuse.ReadResultData(dest[:0]), fs.OK
 	}
 
 	// Determine readable length
@@ -123,6 +123,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			if err != nil {
 				return nil, syscall.EIO
 			}
+
 			go func() {
 				n.filesystem.CacheFile(n)
 			}()
