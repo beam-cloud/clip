@@ -123,7 +123,10 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			if err != nil {
 				return nil, syscall.EIO
 			}
-			go func() { n.filesystem.CacheFile(n) }()
+
+			go func() {
+				n.filesystem.CacheFile(n)
+			}()
 		}
 	} else {
 		nRead, err = n.filesystem.s.ReadFile(n.clipNode, dest[:readLen], off)
