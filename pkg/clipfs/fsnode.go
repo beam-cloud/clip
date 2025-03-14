@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"path"
 	"syscall"
 
@@ -30,22 +29,21 @@ func (n *FSNode) OnAdd(ctx context.Context) {
 	n.log("OnAdd called")
 }
 
-var pageSize int64 = int64(os.Getpagesize())
-
 func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	n.log("Getattr called")
 
-	pageAlignedSize := ((n.clipNode.DataLen + pageSize - 1) / pageSize) * pageSize // Align size to the system page size
+	node := n.clipNode
 
-	out.Ino = n.clipNode.Attr.Ino
-	out.Size = uint64(pageAlignedSize)
-	out.Blocks = n.clipNode.Attr.Blocks
-	out.Atime = n.clipNode.Attr.Atime
-	out.Mtime = n.clipNode.Attr.Mtime
-	out.Ctime = n.clipNode.Attr.Ctime
-	out.Mode = n.clipNode.Attr.Mode
-	out.Nlink = n.clipNode.Attr.Nlink
-	out.Owner = n.clipNode.Attr.Owner
+	// Fill in the AttrOut struct
+	out.Ino = node.Attr.Ino
+	out.Size = node.Attr.Size
+	out.Blocks = node.Attr.Blocks
+	out.Atime = node.Attr.Atime
+	out.Mtime = node.Attr.Mtime
+	out.Ctime = node.Attr.Ctime
+	out.Mode = node.Attr.Mode
+	out.Nlink = node.Attr.Nlink
+	out.Owner = node.Attr.Owner
 
 	return fs.OK
 }
@@ -100,7 +98,7 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
-	// Handle requests entirely beyond EOF
+	// Handle reads completely beyond EOF by zero-filling
 	if off >= n.clipNode.DataLen {
 		for i := range dest {
 			dest[i] = 0
@@ -108,27 +106,27 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		return fuse.ReadResultData(dest), fs.OK
 	}
 
-	// Determine readable length within file bounds
+	// Determine the number of bytes to read within file bounds
 	maxReadable := n.clipNode.DataLen - off
 	readLen := int64(len(dest))
 	if readLen > maxReadable {
 		readLen = maxReadable
 	}
 
-	// Attempt to read from content cache first
 	var nRead int
 	var err error
+
+	// Try reading from cache first
 	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
 		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen)
 		if cacheErr == nil {
 			nRead = copy(dest, content)
 		} else {
-			// Cache miss - proceed to local storage read
 			nRead, err = n.filesystem.s.ReadFile(n.clipNode, dest[:readLen], off)
 			if err != nil {
 				return nil, syscall.EIO
 			}
-			// Cache asynchronously if needed
+
 			go func() {
 				n.filesystem.CacheFile(n)
 			}()
@@ -141,7 +139,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		}
 	}
 
-	// Zero-fill remaining bytes beyond EOF if needed
+	// Explicitly zero-fill bytes beyond EOF (crucial for mmap compatibility)
 	for i := nRead; i < len(dest); i++ {
 		dest[i] = 0
 	}
