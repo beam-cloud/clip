@@ -1,0 +1,13 @@
+[project]
+name = "bin"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.37.9",
+    "pygob",
+]
+
+[tool.uv.sources]
+pygob = { git = "https://github.com/mgeisler/pygob" }
