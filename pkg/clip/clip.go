@@ -11,6 +11,7 @@ import (
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/rs/zerolog/log"
 )
 
 type CreateOptions struct {
@@ -19,20 +20,18 @@ type CreateOptions struct {
 	Verbose      bool
 	Credentials  storage.ClipStorageCredentials
 	ProgressChan chan<- int
-	LogFunc      func(string, ...interface{})
 }
 
 type CreateRemoteOptions struct {
 	InputPath  string
 	OutputPath string
 	Verbose    bool
-	LogFunc    func(format string, v ...interface{})
 }
+
 type ExtractOptions struct {
 	InputFile  string
 	OutputPath string
 	Verbose    bool
-	LogFunc    func(format string, v ...interface{})
 }
 
 type MountOptions struct {
@@ -43,7 +42,6 @@ type MountOptions struct {
 	ContentCache          ContentCache
 	ContentCacheAvailable bool
 	Credentials           storage.ClipStorageCredentials
-	LogFunc               func(format string, v ...interface{})
 }
 
 type StoreS3Options struct {
@@ -54,14 +52,11 @@ type StoreS3Options struct {
 	CachePath    string
 	Credentials  storage.ClipStorageCredentials
 	ProgressChan chan<- int
-	LogFunc      func(format string, v ...interface{})
 }
 
 // Create Archive
 func CreateArchive(options CreateOptions) error {
-	if options.LogFunc != nil {
-		options.LogFunc("creating a new archive from directory: %s", options.InputPath)
-	}
+	log.Info().Msgf("creating archive from %s to %s", options.InputPath, options.OutputPath)
 
 	a := NewClipArchiver()
 	err := a.Create(ClipArchiverOptions{
@@ -73,17 +68,12 @@ func CreateArchive(options CreateOptions) error {
 		return err
 	}
 
-	if options.LogFunc != nil {
-		options.LogFunc("archive created successfully")
-	}
-
+	log.Info().Msg("archive created successfully")
 	return nil
 }
 
 func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si common.ClipStorageInfo) error {
-	if options.LogFunc != nil {
-		options.LogFunc("creating a new archive from directory: %s", options.InputPath)
-	}
+	log.Info().Msgf("creating archive from %s to %s", options.InputPath, options.OutputPath)
 
 	// Create a temporary file for storing the clip
 	tempFile, err := os.CreateTemp("", "temp-clip-*.clip")
@@ -112,18 +102,13 @@ func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si commo
 		return err
 	}
 
-	if options.LogFunc != nil {
-		options.LogFunc("archive created successfully")
-	}
-
+	log.Info().Msg("archive created successfully")
 	return nil
 }
 
 // Extract Archive
 func ExtractArchive(options ExtractOptions) error {
-	if options.LogFunc != nil {
-		options.LogFunc("extracting archive: %s", options.InputFile)
-	}
+	log.Info().Msgf("extracting archive: %s", options.InputFile)
 
 	a := NewClipArchiver()
 	err := a.Extract(ClipArchiverOptions{
@@ -136,26 +121,18 @@ func ExtractArchive(options ExtractOptions) error {
 		return err
 	}
 
-	if options.LogFunc != nil {
-		options.LogFunc("archive extracted successfully")
-	}
+	log.Info().Msg("archive extracted successfully")
 	return nil
 }
 
 // Mount a clip archive to a directory
 func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Server, error) {
-	if options.LogFunc != nil {
-		options.LogFunc("mounting archive %s to %s", options.ArchivePath, options.MountPoint)
-	}
+	log.Info().Msgf("mounting archive %s to %s", options.ArchivePath, options.MountPoint)
 
 	if _, err := os.Stat(options.MountPoint); os.IsNotExist(err) {
 		err = os.MkdirAll(options.MountPoint, 0755)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to create mount point directory: %v", err)
-		}
-
-		if options.LogFunc != nil {
-			options.LogFunc("mount point directory created")
 		}
 	}
 
@@ -218,9 +195,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 
 // Store CLIP in remote storage
 func StoreS3(storeS3Opts StoreS3Options) error {
-	if storeS3Opts.LogFunc != nil {
-		storeS3Opts.LogFunc("uploading archive")
-	}
+	log.Info().Msg("uploading archive")
 
 	region := os.Getenv("AWS_REGION")
 
@@ -240,8 +215,6 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 		return err
 	}
 
-	if storeS3Opts.LogFunc != nil {
-		storeS3Opts.LogFunc("done uploading archive")
-	}
+	log.Info().Msg("done uploading archive")
 	return nil
 }
