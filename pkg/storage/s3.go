@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"time"
@@ -18,6 +17,7 @@ import (
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/gofrs/flock"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 )
 
 type S3ClipStorageCredentials struct {
@@ -210,14 +210,14 @@ func (s3c *S3ClipStorage) Upload(ctx context.Context, archivePath string, progre
 func (s3c *S3ClipStorage) startBackgroundDownload() {
 	totalSize, err := s3c.getFileSize()
 	if err != nil {
-		log.Printf("Unable to get file size: %v", err)
+		log.Error().Msgf("Unable to get file size: %v", err)
 		return
 	}
 
 	cacheFileInfo, err := s3c.cacheFile.Stat()
 	if err == nil {
 		if cacheFileInfo.Size() == totalSize {
-			log.Printf("Cache file <%s> exists.\n", s3c.localCachePath)
+			log.Info().Msgf("Cache file <%s> exists.\n", s3c.localCachePath)
 			s3c.cachedLocally = true
 			return
 		}
@@ -234,26 +234,26 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 	// Attempt to acquire the lock
 	locked, err := fileLock.TryLock()
 	if err != nil {
-		log.Printf("Error while trying to acquire file lock: %v", err)
+		log.Error().Msgf("Error while trying to acquire file lock: %v", err)
 		return
 	}
 
 	if !locked {
-		log.Printf("Another process is already caching %s. Skipping download.\n", s3c.localCachePath)
+		log.Error().Msgf("Another process is already caching %s. Skipping download.\n", s3c.localCachePath)
 		return
 	}
 
 	defer fileLock.Unlock()
 	defer os.Remove(lockFilePath)
 
-	log.Printf("Caching <%s>\n", s3c.localCachePath)
+	log.Info().Msgf("Caching <%s>\n", s3c.localCachePath)
 	startTime := time.Now()
 	downloader := manager.NewDownloader(s3c.svc)
 	downloader.Concurrency = 32
 
 	f, err := os.Create(tmpCacheFile)
 	if err != nil {
-		log.Printf("Failed to create file %q, %v", s3c.localCachePath, err)
+		log.Error().Msgf("Failed to create file %q, %v", s3c.localCachePath, err)
 		return
 	}
 	defer f.Close()
@@ -263,14 +263,14 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		Key:    aws.String(s3c.key),
 	})
 	if err != nil {
-		log.Printf("Failed to download object: %v", err)
+		log.Error().Msgf("Failed to download object: %v", err)
 		os.Remove(tmpCacheFile)
 		return
 	}
 
 	err = os.Rename(tmpCacheFile, s3c.localCachePath)
 	if err != nil {
-		log.Printf("Failed to move downloaded file to cache path %q, %v", s3c.localCachePath, err)
+		log.Error().Msgf("Failed to move downloaded file to cache path %q, %v", s3c.localCachePath, err)
 		return
 	}
 
@@ -283,7 +283,7 @@ func (s3c *S3ClipStorage) startBackgroundDownload() {
 		return
 	}
 
-	log.Printf("Archive <%v> cached in %v", s3c.localCachePath, time.Since(startTime))
+	log.Info().Msgf("Archive <%v> cached in %v", s3c.localCachePath, time.Since(startTime))
 
 	s3c.cacheFile = cacheFile
 	s3c.cachedLocally = true

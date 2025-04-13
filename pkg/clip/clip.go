@@ -3,17 +3,15 @@ package clip
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/beam-cloud/clip/pkg/archive"
-	"github.com/beam-cloud/clip/pkg/clipfs"
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/rs/zerolog/log"
 )
 
 type CreateOptions struct {
@@ -41,7 +39,7 @@ type MountOptions struct {
 	MountPoint            string
 	Verbose               bool
 	CachePath             string
-	ContentCache          clipfs.ContentCache
+	ContentCache          ContentCache
 	ContentCacheAvailable bool
 	Credentials           storage.ClipStorageCredentials
 }
@@ -58,11 +56,10 @@ type StoreS3Options struct {
 
 // Create Archive
 func CreateArchive(options CreateOptions) error {
-	log.Println("Archiving...")
-	log.Printf("Creating a new archive from directory: %s\n", options.InputPath)
+	log.Info().Msgf("creating archive from %s to %s", options.InputPath, options.OutputPath)
 
-	a := archive.NewClipArchiver()
-	err := a.Create(archive.ClipArchiverOptions{
+	a := NewClipArchiver()
+	err := a.Create(ClipArchiverOptions{
 		SourcePath: options.InputPath,
 		OutputFile: options.OutputPath,
 		Verbose:    options.Verbose,
@@ -71,13 +68,12 @@ func CreateArchive(options CreateOptions) error {
 		return err
 	}
 
-	log.Println("Archive created successfully.")
+	log.Info().Msg("archive created successfully")
 	return nil
 }
 
 func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si common.ClipStorageInfo) error {
-	log.Printf("Archiving...")
-	log.Printf("Creating a new archive from directory: %s\n", options.InputPath)
+	log.Info().Msgf("creating archive from %s to %s", options.InputPath, options.OutputPath)
 
 	// Create a temporary file for storing the clip
 	tempFile, err := os.CreateTemp("", "temp-clip-*.clip")
@@ -86,8 +82,8 @@ func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si commo
 	}
 	defer os.Remove(tempFile.Name()) // Cleanup the temporary clip (after upload it is stored remotely)
 
-	localArchiver := archive.NewClipArchiver()
-	err = localArchiver.Create(archive.ClipArchiverOptions{
+	localArchiver := NewClipArchiver()
+	err = localArchiver.Create(ClipArchiverOptions{
 		SourcePath: options.InputPath,
 		OutputFile: tempFile.Name(),
 		Verbose:    options.Verbose,
@@ -96,7 +92,7 @@ func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si commo
 		return err
 	}
 
-	remoteArchiver, err := archive.NewRClipArchiver(si)
+	remoteArchiver, err := NewRClipArchiver(si)
 	if err != nil {
 		return err
 	}
@@ -106,17 +102,16 @@ func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si commo
 		return err
 	}
 
-	log.Printf("Archive created successfully.")
+	log.Info().Msg("archive created successfully")
 	return nil
 }
 
 // Extract Archive
 func ExtractArchive(options ExtractOptions) error {
-	log.Println("Extracting...")
-	log.Printf("Extracting archive: %s\n", options.InputFile)
+	log.Info().Msgf("extracting archive: %s", options.InputFile)
 
-	a := archive.NewClipArchiver()
-	err := a.Extract(archive.ClipArchiverOptions{
+	a := NewClipArchiver()
+	err := a.Extract(ClipArchiverOptions{
 		ArchivePath: options.InputFile,
 		OutputPath:  options.OutputPath,
 		Verbose:     options.Verbose,
@@ -126,23 +121,22 @@ func ExtractArchive(options ExtractOptions) error {
 		return err
 	}
 
-	log.Println("Archive extracted successfully.")
+	log.Info().Msg("archive extracted successfully")
 	return nil
 }
 
 // Mount a clip archive to a directory
 func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Server, error) {
-	log.Printf("Mounting archive %s to %s\n", options.ArchivePath, options.MountPoint)
+	log.Info().Msgf("mounting archive %s to %s", options.ArchivePath, options.MountPoint)
 
 	if _, err := os.Stat(options.MountPoint); os.IsNotExist(err) {
 		err = os.MkdirAll(options.MountPoint, 0755)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to create mount point directory: %v", err)
 		}
-		log.Println("Mount point directory created.")
 	}
 
-	ca := archive.NewClipArchiver()
+	ca := NewClipArchiver()
 	metadata, err := ca.ExtractMetadata(options.ArchivePath)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("invalid archive: %v", err)
@@ -153,7 +147,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := clipfs.NewFileSystem(s, clipfs.ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
+	clipfs, err := NewFileSystem(s, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
@@ -190,7 +184,6 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 			server.Wait()
 
 			s.Cleanup()
-
 			close(serverError)
 		}()
 
@@ -202,7 +195,8 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 
 // Store CLIP in remote storage
 func StoreS3(storeS3Opts StoreS3Options) error {
-	log.Println("Uploading...")
+	log.Info().Msg("uploading archive")
+
 	region := os.Getenv("AWS_REGION")
 
 	// If no key is provided, use the base name of the input archive as key
@@ -211,16 +205,16 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 	}
 
 	storageInfo := &common.S3StorageInfo{Bucket: storeS3Opts.Bucket, Key: storeS3Opts.Key, Region: region}
-	a, err := archive.NewRClipArchiver(storageInfo)
+	a, err := NewRClipArchiver(storageInfo)
 	if err != nil {
 		return err
 	}
 
-	err = a.Create(context.TODO(), storeS3Opts.ArchivePath, storeS3Opts.OutputFile, storeS3Opts.Credentials, storeS3Opts.ProgressChan)
+	err = a.Create(context.Background(), storeS3Opts.ArchivePath, storeS3Opts.OutputFile, storeS3Opts.Credentials, storeS3Opts.ProgressChan)
 	if err != nil {
 		return err
 	}
 
-	log.Println("Done uploading.")
+	log.Info().Msg("done uploading archive")
 	return nil
 }
