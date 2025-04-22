@@ -35,8 +35,8 @@ type lookupCacheEntry struct {
 }
 
 type ContentCache interface {
-	GetContent(hash string, offset int64, length int64) ([]byte, error)
-	StoreContent(chunks chan []byte, hash string) (string, error)
+	GetContent(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]byte, error)
+	StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error)
 }
 
 type cacheEvent struct {
@@ -133,7 +133,7 @@ func (cfs *ClipFileSystem) processCacheEvents() {
 				close(chunks)
 			}(chunks)
 
-			hash, err := cfs.contentCache.StoreContent(chunks, clipNode.ContentHash)
+			hash, err := cfs.contentCache.StoreContent(chunks, clipNode.ContentHash, struct{ RoutingKey string }{RoutingKey: clipNode.ContentHash})
 			if err != nil || hash != clipNode.ContentHash {
 				cacheEvent.node.log("err storing file contents: %v", err)
 				cfs.clearCachingStatus(clipNode.ContentHash)
