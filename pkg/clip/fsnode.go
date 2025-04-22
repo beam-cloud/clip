@@ -115,7 +115,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 	// Attempt to read from cache first
 	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
-		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen)
+		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
 		if cacheErr == nil {
 			nRead = copy(dest, content)
 		} else {
