@@ -360,37 +360,6 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) 
 	return buf.Bytes()[:buf.Len()], nil
 }
 
-func (s3c *S3ClipStorage) downloadChunkHTTP(start int64, end int64) ([]byte, error) {
-	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
-	url := fmt.Sprintf("https://%s.s3.amazonaws.com/%s", s3c.bucket, s3c.key)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Range", rangeHeader)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("failed to download chunk: %s", resp.Status)
-	}
-
-	buf := new(bytes.Buffer)
-	_, err = io.Copy(buf, resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes()[:buf.Len()], nil
-}
-
 func (s3c *S3ClipStorage) Metadata() *common.ClipArchiveMetadata {
 	return s3c.metadata
 }
