@@ -1,8 +1,6 @@
 module github.com/beam-cloud/clip
 
-go 1.23.0
-
-toolchain go1.23.4
+go 1.22.10
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.24.1
@@ -11,13 +9,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.15.15
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.48.1
 	github.com/gofrs/flock v0.8.1
-	github.com/google/go-containerregistry v0.20.3
+	github.com/google/go-containerregistry v0.19.1
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.5.1
 	github.com/karrick/godirwalk v1.17.0
 	github.com/rs/zerolog v1.34.0
 	github.com/tidwall/btree v1.6.0
-	golang.org/x/sys v0.31.0
+	golang.org/x/sys v0.25.0
 )
 
 require (
@@ -54,7 +52,6 @@ require (
 	github.com/stretchr/testify v1.10.0 // indirect
 	github.com/vbatts/tar-split v0.11.6 // indirect
 	golang.org/x/sync v0.10.0 // indirect
-	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gotest.tools/v3 v3.5.1 // indirect
 )
