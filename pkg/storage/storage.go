@@ -17,14 +17,6 @@ type ClipStorageCredentials struct {
 	S3 *S3ClipStorageCredentials
 }
 
-type ShadowCopyBucketOpts struct {
-	Bucket         string
-	Region         string
-	Key            string
-	Endpoint       string
-	ForcePathStyle bool
-}
-
 type ClipStorageOpts struct {
 	ArchivePath string
 	CachePath   string
