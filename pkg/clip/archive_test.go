@@ -8,6 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"archive/tar"
+
+	"github.com/google/go-containerregistry/pkg/crane"
 )
 
 func generateRandomContent(size int) []byte {
@@ -172,5 +177,82 @@ func TestCreateArchive(t *testing.T) {
 		if info.Mode().Perm() != 0755 {
 			t.Errorf("Incorrect permissions for directory %s: got %v, want 0755", dir, info.Mode().Perm())
 		}
+	}
+}
+
+func BenchmarkCreateArchiveFromOCIImage(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		tmpDir, err := os.MkdirTemp("", "oci-rootfs-*")
+		if err != nil {
+			b.Fatalf("Failed to create temporary directory for rootfs: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		image := "nginx:latest"
+		img, err := crane.Pull(image)
+		if err != nil {
+			b.Fatalf("Failed to pull OCI image: %v", err)
+		}
+
+		f, err := os.Create(filepath.Join(tmpDir, "image.tar"))
+		if err != nil {
+			b.Fatalf("Failed to create image tar file: %v", err)
+		}
+
+		if err := crane.Export(img, f); err != nil {
+			b.Fatalf("Failed to export OCI image: %v", err)
+		}
+
+		f.Seek(0, io.SeekStart)
+		tarReader := tar.NewReader(f)
+		for {
+			header, err := tarReader.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				b.Fatalf("Failed to read tar header: %v", err)
+			}
+
+			targetPath := filepath.Join(tmpDir, header.Name)
+			switch header.Typeflag {
+			case tar.TypeDir:
+				if err := os.MkdirAll(targetPath, os.FileMode(header.Mode)); err != nil {
+					b.Fatalf("Failed to create directory: %v", err)
+				}
+			case tar.TypeReg:
+				outFile, err := os.Create(targetPath)
+				if err != nil {
+					b.Fatalf("Failed to create file: %v", err)
+				}
+				if _, err := io.Copy(outFile, tarReader); err != nil {
+					outFile.Close()
+					b.Fatalf("Failed to write file: %v", err)
+				}
+				outFile.Close()
+			}
+		}
+
+		archiveFile, err := os.CreateTemp("", "test-archive-*.clip")
+		if err != nil {
+			b.Fatalf("Failed to create temporary archive file: %v", err)
+		}
+		archiveFile.Close()
+		defer os.Remove(archiveFile.Name())
+
+		options := CreateOptions{
+			InputPath:  tmpDir,
+			OutputPath: archiveFile.Name(),
+			Verbose:    false,
+		}
+
+		start := time.Now()
+		err = CreateArchive(options)
+		if err != nil {
+			b.Fatalf("Failed to create archive: %v", err)
+		}
+
+		duration := time.Since(start)
+		b.Logf("Archive creation took %s", duration)
 	}
 }

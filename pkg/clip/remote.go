@@ -34,7 +34,7 @@ func (rca *RClipArchiver) Create(ctx context.Context, archivePath string, output
 	}
 
 	switch rca.StorageInfo.Type() {
-	case "s3":
+	case string(common.StorageModeS3):
 		var storageInfo *common.S3StorageInfo = rca.StorageInfo.(*common.S3StorageInfo)
 		clipStorage, err := storage.NewS3ClipStorage(metadata, storage.S3ClipStorageOpts{
 			Region:         storageInfo.Region,
