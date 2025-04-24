@@ -243,7 +243,7 @@ func BenchmarkCreateArchiveFromOCIImage(b *testing.B) {
 		options := CreateOptions{
 			InputPath:  tmpDir,
 			OutputPath: archiveFile.Name(),
-			Verbose:    true,
+			Verbose:    false,
 		}
 
 		start := time.Now()
@@ -251,6 +251,7 @@ func BenchmarkCreateArchiveFromOCIImage(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Failed to create archive: %v", err)
 		}
+
 		duration := time.Since(start)
 		b.Logf("Archive creation took %s", duration)
 	}
