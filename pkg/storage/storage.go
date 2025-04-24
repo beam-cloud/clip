@@ -40,6 +40,9 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 		storageType = common.StorageModeLocal
 	}
 
+	// If StorageInfo is passed in, we can use that to override the configuration
+	// stored in the metadata. This way you can use a different bucket for the
+	// archive than the one used when the archive was created.
 	storageInfo := opts.Metadata.StorageInfo.(common.S3StorageInfo)
 	if opts.StorageInfo != nil {
 		storageInfo = *opts.StorageInfo
