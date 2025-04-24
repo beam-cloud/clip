@@ -17,7 +17,7 @@ type ClipFileSystemOpts struct {
 }
 
 type ClipFileSystem struct {
-	s                     storage.ClipStorageInterface
+	storage               storage.ClipStorageInterface
 	root                  *FSNode
 	lookupCache           map[string]*lookupCacheEntry
 	contentCache          ContentCache
@@ -45,7 +45,7 @@ type cacheEvent struct {
 
 func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
-		s:                     s,
+		storage:               s,
 		verbose:               opts.Verbose,
 		lookupCache:           make(map[string]*lookupCacheEntry),
 		contentCache:          opts.ContentCache,
@@ -120,7 +120,7 @@ func (cfs *ClipFileSystem) processCacheEvents() {
 					}
 
 					fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
-					nRead, err := cfs.s.ReadFile(clipNode, fileContent, offset)
+					nRead, err := cfs.storage.ReadFile(clipNode, fileContent, offset)
 					if err != nil {
 						cacheEvent.node.log("err reading file: %v", err)
 						break
