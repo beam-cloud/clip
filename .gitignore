@@ -1,4 +1,5 @@
 bin/clip
+bin/e2e
 tmp/*
 testfs/*
 *.gob

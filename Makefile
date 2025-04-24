@@ -1,5 +1,7 @@
 imageVersion := latest
 
+.PHONY: e2e
+
 build:
 	okteto build --build-arg BUILD_ENV=okteto -f ./Dockerfile -t localhost:5001/beam-clip:$(imageVersion)
 
@@ -8,3 +10,7 @@ start:
 
 stop:
 	cd hack; okteto down --file okteto.yml
+
+e2e:
+	go build -o ./bin/e2e ./e2e/main.go
+
