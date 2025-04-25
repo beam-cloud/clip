@@ -65,7 +65,7 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	}
 
 	// Lookup the child node
-	child := n.filesystem.s.Metadata().Get(childPath)
+	child := n.filesystem.storage.Metadata().Get(childPath)
 	if child == nil {
 		// No child with the requested name exists
 		return nil, syscall.ENOENT
@@ -114,12 +114,12 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var err error
 
 	// Attempt to read from cache first
-	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.s.CachedLocally() {
+	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
 		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
 		if cacheErr == nil {
 			nRead = copy(dest, content)
 		} else {
-			nRead, err = n.filesystem.s.ReadFile(n.clipNode, dest[:readLen], off)
+			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 			if err != nil {
 				return nil, syscall.EIO
 			}
@@ -129,7 +129,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			}()
 		}
 	} else {
-		nRead, err = n.filesystem.s.ReadFile(n.clipNode, dest[:readLen], off)
+		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 		if err != nil {
 			return nil, syscall.EIO
 		}
@@ -162,7 +162,7 @@ func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 func (n *FSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	n.log("Readdir called")
 
-	dirEntries := n.filesystem.s.Metadata().ListDirectory(n.clipNode.Path)
+	dirEntries := n.filesystem.storage.Metadata().ListDirectory(n.clipNode.Path)
 	return fs.NewListDirStream(dirEntries), fs.OK
 }
 

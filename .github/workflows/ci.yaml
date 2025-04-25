@@ -1,0 +1,25 @@
+name: Test
+
+on: [push]
+
+jobs:
+  test:
+    defaults:
+      run:
+        working-directory: pkg/clip
+
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 4
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: "1.22"
+      - name: Install dependencies
+        run: go mod download
+      - name: Run tests
+        run: go test -v ./...

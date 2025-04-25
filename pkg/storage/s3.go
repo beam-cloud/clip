@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -308,14 +307,11 @@ func (s3c *S3ClipStorage) getFileSize() (int64, error) {
 }
 
 func (s3c *S3ClipStorage) getContentFromSource(dest []byte, start, end int64) (int, error) {
-	data, err := s3c.downloadChunk(start, end)
+	n, err := s3c.downloadChunk(dest, start, end)
 	if err != nil {
 		return 0, err
 	}
-
-	copy(dest, data)
-	return len(data), nil
-
+	return n, nil
 }
 
 func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
@@ -336,7 +332,7 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	return n, nil
 }
 
-func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) {
+func (s3c *S3ClipStorage) downloadChunk(dest []byte, start int64, end int64) (int, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
 	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(s3c.bucket),
@@ -347,17 +343,15 @@ func (s3c *S3ClipStorage) downloadChunk(start int64, end int64) ([]byte, error) 
 	// Attempt to download chunk from S3
 	resp, err := s3c.svc.GetObject(context.Background(), getObjectInput)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer resp.Body.Close()
 
-	buf := new(bytes.Buffer)
-	_, err = io.Copy(buf, resp.Body)
-	if err != nil {
-		return nil, err
+	n, err := io.ReadFull(resp.Body, dest)
+	if err == io.ErrUnexpectedEOF {
+		return n, nil
 	}
-
-	return buf.Bytes()[:buf.Len()], nil
+	return n, err
 }
 
 func (s3c *S3ClipStorage) Metadata() *common.ClipArchiveMetadata {
