@@ -15,6 +15,13 @@ const (
 	SymLinkNode ClipNodeType = "symlink"
 )
 
+type StorageMode string
+
+const (
+	StorageModeLocal StorageMode = "local"
+	StorageModeS3    StorageMode = "s3"
+)
+
 type ClipNode struct {
 	NodeType    ClipNodeType
 	Path        string

@@ -418,7 +418,7 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 		}
 
 		switch wrapper.Type {
-		case "s3":
+		case string(common.StorageModeS3):
 			var s3Info common.S3StorageInfo
 			if err := gob.NewDecoder(bytes.NewReader(wrapper.Data)).Decode(&s3Info); err != nil {
 				return nil, fmt.Errorf("error decoding s3 storage info: %v", err)

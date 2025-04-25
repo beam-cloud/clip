@@ -41,6 +41,7 @@ type MountOptions struct {
 	CachePath             string
 	ContentCache          ContentCache
 	ContentCacheAvailable bool
+	StorageInfo           *common.S3StorageInfo
 	Credentials           storage.ClipStorageCredentials
 }
 
@@ -142,12 +143,18 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		return nil, nil, nil, fmt.Errorf("invalid archive: %v", err)
 	}
 
-	s, err := storage.NewClipStorage(options.ArchivePath, options.CachePath, metadata, options.Credentials)
+	storage, err := storage.NewClipStorage(storage.ClipStorageOpts{
+		ArchivePath: options.ArchivePath,
+		CachePath:   options.CachePath,
+		Metadata:    metadata,
+		Credentials: options.Credentials,
+		StorageInfo: options.StorageInfo,
+	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := NewFileSystem(s, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
+	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
@@ -165,7 +172,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		EnableSymlinkCaching: true,
 		SyncRead:             false,
 		RememberInodes:       true,
-		MaxReadAhead:         1 << 17,
+		MaxReadAhead:         1024 * 128, // 128KB
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create server: %v", err)
@@ -182,8 +189,8 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 			}
 
 			server.Wait()
+			storage.Cleanup()
 
-			s.Cleanup()
 			close(serverError)
 		}()
 

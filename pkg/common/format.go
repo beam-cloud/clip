@@ -60,7 +60,7 @@ type S3StorageInfo struct {
 }
 
 func (ssi S3StorageInfo) Type() string {
-	return "s3"
+	return string(StorageModeS3)
 }
 
 func (ssi S3StorageInfo) Encode() ([]byte, error) {
