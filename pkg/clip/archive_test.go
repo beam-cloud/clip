@@ -232,6 +232,15 @@ func BenchmarkCreateArchiveFromOCIImage(b *testing.B) {
 				outFile.Close()
 			}
 		}
+		f.Close()
+
+		// Add a large junk file
+		junkFileSize := 1000 * 1024 * 1024 // 1000MB
+		junkFilePath := filepath.Join(tmpDir, "large_junk_file.bin")
+		junkContent := generateRandomContent(junkFileSize)
+		if err := os.WriteFile(junkFilePath, junkContent, 0644); err != nil {
+			b.Fatalf("Failed to create large junk file: %v", err)
+		}
 
 		archiveFile, err := os.CreateTemp("", "test-archive-*.clip")
 		if err != nil {

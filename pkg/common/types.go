@@ -44,7 +44,7 @@ func (n *ClipNode) IsSymlink() bool {
 
 type ClipArchiveMetadata struct {
 	Header      ClipArchiveHeader
-	Index       *btree.BTree
+	Index       *btree.BTreeG[*ClipNode]
 	StorageInfo ClipStorageInfo
 }
 
@@ -53,11 +53,11 @@ func (m *ClipArchiveMetadata) Insert(node *ClipNode) {
 }
 
 func (m *ClipArchiveMetadata) Get(path string) *ClipNode {
-	item := m.Index.Get(&ClipNode{Path: path})
-	if item == nil {
+	item, ok := m.Index.Get(&ClipNode{Path: path})
+	if !ok {
 		return nil
 	}
-	return item.(*ClipNode)
+	return item
 }
 
 func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
@@ -73,8 +73,8 @@ func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
 	pivot := &ClipNode{Path: path + "\x00"}
 	pathLen := len(path)
 
-	m.Index.Ascend(pivot, func(a interface{}) bool {
-		node := a.(*ClipNode)
+	m.Index.Ascend(pivot, func(a *ClipNode) bool {
+		node := a
 		nodePath := node.Path
 
 		// Check if this node path starts with 'path' (meaning it is a child --> continue)

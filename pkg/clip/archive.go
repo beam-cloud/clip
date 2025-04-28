@@ -23,7 +23,6 @@ import (
 
 	common "github.com/beam-cloud/clip/pkg/common"
 
-	"github.com/karrick/godirwalk"
 	"github.com/tidwall/btree"
 )
 
@@ -49,11 +48,11 @@ func NewClipArchiver() *ClipArchiver {
 	return &ClipArchiver{}
 }
 
-func (ca *ClipArchiver) newIndex() *btree.BTree {
-	compare := func(a, b interface{}) bool {
-		return a.(*common.ClipNode).Path < b.(*common.ClipNode).Path
+func (ca *ClipArchiver) newIndex() *btree.BTreeG[*common.ClipNode] {
+	compare := func(a, b *common.ClipNode) bool {
+		return a.Path < b.Path
 	}
-	return btree.New(compare)
+	return btree.NewBTreeGOptions(compare, btree.Options{NoLocks: false})
 }
 
 // InodeGenerator generates unique inodes for each ClipNode
@@ -67,7 +66,7 @@ func (ig *InodeGenerator) Next() uint64 {
 }
 
 // populateIndex creates a representation of the filesystem/folder being archived
-func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) error {
+func (ca *ClipArchiver) populateIndex(index *btree.BTreeG[*common.ClipNode], sourcePath string) error {
 	root := &common.ClipNode{
 		Path:     "/",
 		NodeType: common.DirNode,
@@ -80,69 +79,83 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 	inodeGen := &InodeGenerator{current: 0}
 	inodeMap := make(map[string]uint64)
 
-	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
-		Callback: func(path string, de *godirwalk.Dirent) error {
-			var target string = ""
-			var nodeType common.ClipNodeType
+	err := filepath.WalkDir(sourcePath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			log.Warn().Err(err).Msgf("Error accessing path %s, skipping", path)
+			return err
+		}
 
-			if de.IsDir() {
-				nodeType = common.DirNode
-			} else if de.IsSymlink() {
-				_target, err := os.Readlink(path)
-				if err != nil {
-					return fmt.Errorf("error reading symlink target %s: %v", path, err)
-				}
-				target = _target
-				nodeType = common.SymLinkNode
-			} else {
-				nodeType = common.FileNode
-			}
+		// Skip the root sourcePath itself if it's the first entry
+		if path == sourcePath {
+			return nil
+		}
 
-			var stat unix.Stat_t
-			var err error
-			if nodeType == common.SymLinkNode {
-				err = unix.Lstat(path, &stat)
-			} else {
-				err = unix.Stat(path, &stat)
-			}
+		var target string = ""
+		var nodeType common.ClipNodeType
+		info, err := d.Info()
+		if err != nil {
+			return fmt.Errorf("error getting info for %s: %w", path, err)
+		}
+
+		fileMode := info.Mode()
+		if fileMode.IsDir() {
+			nodeType = common.DirNode
+		} else if fileMode&fs.ModeSymlink != 0 {
+			_target, err := os.Readlink(path)
 			if err != nil {
-				return err
+				return fmt.Errorf("error reading symlink target %s: %v", path, err)
 			}
+			target = _target
+			nodeType = common.SymLinkNode
+		} else {
+			nodeType = common.FileNode
+		}
 
-			var contentHash = ""
-			if nodeType == common.FileNode {
-				fileContent, err := os.ReadFile(path)
-				if err != nil {
-					return fmt.Errorf("failed to read file contents for hashing: %w", err)
-				}
+		var stat unix.Stat_t
+		if nodeType == common.SymLinkNode {
+			err = unix.Lstat(path, &stat)
+		} else {
+			err = unix.Stat(path, &stat)
+		}
+		if err != nil {
+			return err
+		}
 
-				hash := sha256.Sum256(fileContent)
-				contentHash = hex.EncodeToString(hash[:])
+		var contentHash = ""
+		if nodeType == common.FileNode {
+			contentHash, err = hashFile(path)
+			if err != nil {
+				return fmt.Errorf("failed to read file contents for hashing %s: %w", path, err)
 			}
+		}
 
-			// Determine the file mode and type
-			mode := uint32(stat.Mode & 0777) // preserve permission bits only
-			switch stat.Mode & unix.S_IFMT {
-			case unix.S_IFDIR:
-				mode |= syscall.S_IFDIR
-			case unix.S_IFLNK:
-				mode |= syscall.S_IFLNK
-			case unix.S_IFREG:
-				mode |= syscall.S_IFREG
-			default:
-				// Handle other types if needed
-				mode |= syscall.S_IFREG
-			}
-			// Assign a unique inode
-			var inode uint64
-			if existingInode, exists := inodeMap[path]; exists {
-				inode = existingInode
-			} else {
-				inode = inodeGen.Next()
-				inodeMap[path] = inode
-			}
+		// Determine the file mode and type
+		mode := uint32(stat.Mode & 0777) // preserve permission bits only
+		switch stat.Mode & unix.S_IFMT {
+		case unix.S_IFDIR:
+			mode |= syscall.S_IFDIR
+		case unix.S_IFLNK:
+			mode |= syscall.S_IFLNK
+		case unix.S_IFREG:
+			mode |= syscall.S_IFREG
+		default:
+			// Handle other types if needed
+			mode |= syscall.S_IFREG
+		}
+		// Assign a unique inode
+		var inode uint64
+		if existingInode, exists := inodeMap[path]; exists {
+			inode = existingInode
+		} else {
+			inode = inodeGen.Next()
+			inodeMap[path] = inode
+		}
 
-			attr := fuse.Attr{
+		pathWithPrefix := filepath.Join("/", strings.TrimPrefix(path, sourcePath))
+		index.Set(&common.ClipNode{
+			Path:     pathWithPrefix,
+			NodeType: nodeType,
+			Attr: fuse.Attr{
 				Ino:       inode,
 				Size:      uint64(stat.Size),
 				Blocks:    uint64(stat.Blocks),
@@ -158,14 +171,12 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 					Uid: stat.Uid,
 					Gid: stat.Gid,
 				},
-			}
+			},
+			Target:      target,
+			ContentHash: contentHash,
+		})
 
-			pathWithPrefix := filepath.Join("/", strings.TrimPrefix(path, sourcePath))
-			index.Set(&common.ClipNode{Path: pathWithPrefix, NodeType: nodeType, Attr: attr, Target: target, ContentHash: contentHash})
-
-			return nil
-		},
-		Unsorted: false,
+		return nil
 	})
 
 	return err
@@ -487,8 +498,9 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	}
 
 	// Iterate over the index and extract every node
-	index.Ascend(index.Min(), func(a interface{}) bool {
-		node := a.(*common.ClipNode)
+	minNode, _ := index.Min()
+	index.Ascend(minNode, func(a *common.ClipNode) bool {
+		node := a
 
 		if opts.Verbose {
 			log.Info().Msgf("Extracting... %s", node.Path)
@@ -529,7 +541,7 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	return nil
 }
 
-func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFile *os.File, offset int64, opts ClipArchiverOptions) error {
+func (ca *ClipArchiver) writeBlocks(index *btree.BTreeG[*common.ClipNode], sourcePath string, outFile *os.File, offset int64, opts ClipArchiverOptions) error {
 	writer := bufio.NewWriterSize(outFile, 512*1024)
 	defer writer.Flush() // Ensure all data gets written when we're done
 
@@ -550,8 +562,9 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 	var otherNodes []*common.ClipNode
 
 	// Separate nodes into priority and other
-	index.Ascend(index.Min(), func(a interface{}) bool {
-		node := a.(*common.ClipNode)
+	minNode, _ := index.Min()
+	index.Ascend(minNode, func(a *common.ClipNode) bool {
+		node := a
 		isPriority := false
 
 		nodeFullPath := path.Join(sourcePath, node.Path) // Adding sourcePath to the node path
@@ -668,10 +681,11 @@ func (ca *ClipArchiver) DecodeHeader(headerBytes []byte) (*common.ClipArchiveHea
 	return header, nil
 }
 
-func (ca *ClipArchiver) EncodeIndex(index *btree.BTree) ([]byte, error) {
+func (ca *ClipArchiver) EncodeIndex(index *btree.BTreeG[*common.ClipNode]) ([]byte, error) {
 	var nodes []*common.ClipNode
-	index.Ascend(index.Min(), func(a interface{}) bool {
-		nodes = append(nodes, a.(*common.ClipNode))
+	minNode, _ := index.Min()
+	index.Ascend(minNode, func(a *common.ClipNode) bool {
+		nodes = append(nodes, a)
 		return true
 	})
 
@@ -682,4 +696,19 @@ func (ca *ClipArchiver) EncodeIndex(index *btree.BTree) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

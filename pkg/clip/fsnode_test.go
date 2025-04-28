@@ -243,12 +243,10 @@ func Test_FSNodeLookupAndRead(t *testing.T) {
 	}
 
 	// Create the BTree index for metadata
-	clipNodeLess := func(a, b interface{}) bool {
-		aNode := a.(*common.ClipNode)
-		bNode := b.(*common.ClipNode)
-		return aNode.Path < bNode.Path
+	clipNodeLess := func(a, b *common.ClipNode) bool {
+		return a.Path < b.Path
 	}
-	index := btree.NewOptions(clipNodeLess, btree.Options{
+	index := btree.NewBTreeGOptions(clipNodeLess, btree.Options{
 		NoLocks: true,
 	})
 	index.Set(rootNode)
