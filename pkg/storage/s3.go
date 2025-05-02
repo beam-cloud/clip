@@ -354,7 +354,7 @@ func (s3c *S3ClipStorage) downloadChunk(dest []byte, start int64, end int64) (in
 	return n, err
 }
 
-func (s3c *S3ClipStorage) Metadata() *common.ClipArchiveMetadata {
+func (s3c *S3ClipStorage) Metadata() ClipStorageMetadata {
 	return s3c.metadata
 }
 

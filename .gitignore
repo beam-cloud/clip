@@ -6,3 +6,4 @@ testfs/*
 *.clip
 *.rclip
 *.pprof
+test

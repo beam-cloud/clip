@@ -13,6 +13,8 @@ const (
 	DirNode     ClipNodeType = "dir"
 	FileNode    ClipNodeType = "file"
 	SymLinkNode ClipNodeType = "symlink"
+	// RefNode is used for large files that are dynamically added to the archive index (model weights, etc)
+	RefNode ClipNodeType = "ref"
 )
 
 type StorageMode string
