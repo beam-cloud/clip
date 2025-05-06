@@ -13,20 +13,16 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 )
 
-type S3ClipStorageCredentials struct {
-	AccessKey string
-	SecretKey string
-}
-
-type S3IndexWriter struct {
+type S3ChunkWriter struct {
 	ctx      context.Context
 	uploader *manager.Uploader
 	bucket   string
 	key      string
-	buffer   *bytes.Buffer
+
+	buffer *bytes.Buffer
 }
 
-func newS3IndexWriter(ctx context.Context, opts ClipV2ArchiverOptions) (io.WriteCloser, error) {
+func newS3ChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, overrideKey string) (io.WriteCloser, error) {
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(opts.S3Config.Region),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
@@ -48,24 +44,29 @@ func newS3IndexWriter(ctx context.Context, opts ClipV2ArchiverOptions) (io.Write
 
 	uploader := manager.NewUploader(s3Client)
 
-	return &S3IndexWriter{
+	key := opts.S3Config.Key
+	if overrideKey != "" {
+		key = overrideKey
+	}
+
+	return &S3ChunkWriter{
 		ctx:      ctx,
 		uploader: uploader,
 		bucket:   opts.S3Config.Bucket,
-		key:      opts.S3Config.Key,
+		key:      key,
 		buffer:   new(bytes.Buffer),
 	}, nil
 }
 
-func (s *S3IndexWriter) Write(p []byte) (n int, err error) {
-	n, err = s.buffer.Write(p)
+func (s *S3ChunkWriter) Write(p []byte) (int, error) {
+	n, err := s.buffer.Write(p)
 	if err != nil {
-		return n, fmt.Errorf("failed to write to internal buffer for index: %w", err)
+		return n, fmt.Errorf("failed to write to internal buffer: %w", err)
 	}
 	return n, nil
 }
 
-func (s *S3IndexWriter) Close() error {
+func (s *S3ChunkWriter) Close() error {
 	_, err := s.uploader.Upload(s.ctx, &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(s.key),
@@ -73,7 +74,8 @@ func (s *S3IndexWriter) Close() error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to upload S3 index object %s/%s using manager.Uploader: %w", s.bucket, s.key, err)
+		return fmt.Errorf("failed to upload S3 object %s/%s using manager.Uploader: %w", s.bucket, s.key, err)
 	}
+
 	return nil
 }

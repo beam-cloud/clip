@@ -49,11 +49,11 @@ const (
 type ClipV2ArchiverOptions struct {
 	Verbose      bool
 	Compress     bool
-	IndexPath    string
 	SourcePath   string
-	ChunkDir     string
+	LocalPath    string
 	OutputPath   string
 	MaxChunkSize int64
+	IndexID      string
 	Destination  DestinationType
 	S3Config     common.S3StorageInfo
 }
@@ -211,10 +211,10 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 		ctx              = context.Background()
 	)
 
-	chunkPrefix := filepath.Base(opts.ChunkDir)
 	chunkNum := 0
-	chunkName := fmt.Sprintf("%s-%d", chunkPrefix, chunkNum)
-	chunkWriter, err := newChunkWriter(ctx, opts, chunkName, chunkPrefix)
+	chunkName := fmt.Sprintf("%d%s", chunkNum, ChunkSuffix)
+	chunkKey := fmt.Sprintf("%s/chunks/%s", opts.IndexID, chunkName)
+	chunkWriter, err := newChunkWriter(ctx, opts, chunkKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create chunk writer: %w", err)
 	}
@@ -264,8 +264,9 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 
 				// Start a new chunk
 				chunkNum++
-				chunkName = fmt.Sprintf("%s-%d", chunkPrefix, chunkNum)
-				chunkWriter, err = newChunkWriter(ctx, opts, chunkName, chunkPrefix)
+				chunkName = fmt.Sprintf("%d%s", chunkNum, ChunkSuffix)
+				chunkKey = fmt.Sprintf("%s/chunks/%s", opts.IndexID, chunkName)
+				chunkWriter, err = newChunkWriter(ctx, opts, chunkKey)
 				if err != nil {
 					f.Close()
 					return nil, fmt.Errorf("failed to create chunk writer: %w", err)
@@ -333,12 +334,14 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 // Create creates a new ClipV2 archive from the source path.
 func (ca *ClipV2Archiver) Create(opts ClipV2ArchiverOptions) error {
 	ctx := context.Background()
-	if opts.SourcePath == "" || opts.ChunkDir == "" || opts.IndexPath == "" {
-		return fmt.Errorf("SourcePath, BlockDir, and IndexPath must be specified")
+	if opts.SourcePath == "" {
+		return fmt.Errorf("SourcePath must be specified")
 	}
 
-	if err := os.MkdirAll(opts.ChunkDir, 0755); err != nil {
-		return fmt.Errorf("failed to create block directory %s: %w", opts.ChunkDir, err)
+	if opts.Destination == DestinationTypeLocal {
+		if err := os.MkdirAll(opts.LocalPath, 0755); err != nil {
+			return fmt.Errorf("failed to create archive local directory %s: %w", opts.LocalPath, err)
+		}
 	}
 
 	ca.SetChunkSize(opts.MaxChunkSize)
@@ -408,7 +411,7 @@ func (ca *ClipV2Archiver) Create(opts ClipV2ArchiverOptions) error {
 	}
 
 	log.Info().Msgf("Successfully created index %s (%d nodes, %d blocks) and data blocks in %s",
-		opts.IndexPath, index.Len(), len(chunkNames), opts.ChunkDir)
+		opts.IndexID, index.Len(), len(chunkNames), opts.LocalPath)
 	return nil
 }
 
@@ -515,19 +518,19 @@ func (ca *ClipV2Archiver) extractIndex(header *ClipV2ArchiveHeader, file io.Read
 
 // ExpandArchive expands the archive into the given output path.
 func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2ArchiverOptions) error {
-	if opts.IndexPath == "" || opts.ChunkDir == "" || opts.OutputPath == "" {
-		return fmt.Errorf("IndexPath, BlockDir, and OutputPath must be specified for extraction")
+	if opts.LocalPath == "" || opts.OutputPath == "" {
+		return fmt.Errorf("LocalPath and OutputPath must be specified for extraction")
 	}
 
-	file, err := os.Open(opts.IndexPath)
+	file, err := os.Open(filepath.Join(opts.LocalPath, "index.clip"))
 	if err != nil {
-		return fmt.Errorf("failed to open index file %s: %w", opts.IndexPath, err)
+		return fmt.Errorf("failed to open index file %s: %w", filepath.Join(opts.LocalPath, "index.clip"), err)
 	}
 	defer file.Close()
 
 	archive, err := ca.ExtractArchive(ctx, opts)
 	if err != nil {
-		return fmt.Errorf("failed to extract archive from %s: %w", opts.IndexPath, err)
+		return fmt.Errorf("failed to extract archive from %s: %w", filepath.Join(opts.LocalPath, "index.clip"), err)
 	}
 	header := &archive.Header
 	chunkHashes := archive.Chunks
@@ -639,7 +642,7 @@ func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2Archiver
 			var reconstructErr error
 			for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
 				chunkFilename := fmt.Sprintf("%s%s", chunkHashes[chunkIdx], ChunkSuffix)
-				chunkPath := filepath.Join(opts.ChunkDir, chunkFilename)
+				chunkPath := filepath.Join(opts.LocalPath, chunkFilename)
 
 				chunkFile, err := os.Open(chunkPath)
 				if err != nil {
@@ -809,23 +812,29 @@ func (ca *ClipV2Archiver) EncodeChunkList(chunkList ClipV2ArchiveChunkList) ([]b
 	return buf.Bytes(), nil
 }
 
-func newChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, chunkName string, chunkPrefix string) (io.WriteCloser, error) {
+func newChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, chunkKey string) (io.WriteCloser, error) {
 	if opts.Destination == DestinationTypeS3 {
-		chunkWriter, err := newS3ChunkWriter(ctx, opts, chunkName, chunkPrefix)
+		chunkWriter, err := newS3ChunkWriter(ctx, opts, chunkKey)
 		return chunkWriter, err
 	}
-	chunkWriter, err := os.Create(filepath.Join(opts.ChunkDir, chunkName))
+	dir := filepath.Dir(chunkKey)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+	chunkWriter, err := os.Create(filepath.Join(opts.LocalPath, chunkKey))
 	return chunkWriter, err
 }
 
 func newIndexWriter(ctx context.Context, opts ClipV2ArchiverOptions) (io.WriteCloser, error) {
 	if opts.Destination == DestinationTypeS3 {
-		return newS3IndexWriter(ctx, opts)
+		indexKey := fmt.Sprintf("%s/index.clip", opts.IndexID)
+		return newS3ChunkWriter(ctx, opts, indexKey)
 	}
 
-	indexFile, err := os.Create(opts.IndexPath)
+	indexFilePath := filepath.Join(opts.LocalPath, "index.clip")
+	indexFile, err := os.Create(indexFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create index file %s: %w", opts.IndexPath, err)
+		return nil, fmt.Errorf("failed to create index file %s: %w", indexFilePath, err)
 	}
 
 	return indexFile, nil
@@ -846,9 +855,9 @@ func newIndexReader(ctx context.Context, opts ClipV2ArchiverOptions) (io.ReadClo
 
 	switch opts.Destination {
 	case DestinationTypeLocal:
-		archiveReader, err = os.Open(opts.IndexPath)
+		archiveReader, err = os.Open(filepath.Join(opts.LocalPath, "index.clip"))
 		if err != nil {
-			return nil, fmt.Errorf("failed to open index file %s: %w", opts.IndexPath, err)
+			return nil, fmt.Errorf("failed to open index file %s: %w", filepath.Join(opts.LocalPath, "index.clip"), err)
 		}
 	case DestinationTypeS3:
 		// Get file from S3
@@ -871,9 +880,10 @@ func newIndexReader(ctx context.Context, opts ClipV2ArchiverOptions) (io.ReadClo
 			o.BaseEndpoint = aws.String(opts.S3Config.Endpoint)
 		})
 
+		indexKey := fmt.Sprintf("%s/index.clip", opts.IndexID)
 		obj, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(opts.S3Config.Bucket),
-			Key:    aws.String(opts.S3Config.Key),
+			Key:    aws.String(indexKey),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to get object from S3: %w", err)

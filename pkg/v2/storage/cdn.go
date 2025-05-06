@@ -20,14 +20,14 @@ type CDNClipStorage struct {
 }
 
 func NewCDNClipStorage(cdnURL, imageID string, metadata *clipv2.ClipV2Archive) *CDNClipStorage {
-	chunkURL := fmt.Sprintf("%s-chunks", imageID)
-	clipURL := fmt.Sprintf("%s.clip", imageID)
+	chunkPath := fmt.Sprintf("%s/chunks", imageID)
+	clipPath := fmt.Sprintf("%s/index.clip", imageID)
 
 	return &CDNClipStorage{
 		imageID:    imageID,
 		cdnBaseURL: cdnURL,
-		chunkPath:  chunkURL,
-		clipPath:   clipURL,
+		chunkPath:  chunkPath,
+		clipPath:   clipPath,
 		metadata:   metadata,
 		client:     &http.Client{},
 	}
@@ -54,9 +54,10 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		totalBytesRead = 0
 	)
 
-	for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
-		chunk := chunks[chunkIdx]
-		chunkURL := fmt.Sprintf("%s/%s/%s%s", s.cdnBaseURL, s.chunkPath, chunk, clipv2.ChunkSuffix)
+	requiredChunks := chunks[startChunk : endChunk+1]
+
+	for chunkIdx, chunk := range requiredChunks {
+		chunkURL := fmt.Sprintf("%s/%s/%s", s.cdnBaseURL, s.chunkPath, chunk)
 
 		// Make a range request to the CDN to get the portion of the required chunk
 		// [ . . . h h ] [ h h h h h ] [ h h . . . ]
@@ -66,10 +67,11 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		startRange := int64(0)
 		endRange := chunkSize - 1
 
-		if chunkIdx == startChunk {
+		if chunkIdx == 0 {
 			startRange = startOffset % chunkSize
 		}
-		if chunkIdx == endChunk {
+
+		if chunkIdx == len(requiredChunks)-1 {
 			endRange = endOffset % chunkSize
 		}
 
@@ -90,12 +92,12 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		}
 
 		destOffset := int64(0)
-		if chunkIdx > startChunk {
+		if chunkIdx > 0 {
 			// Calculate where in the destination buffer this result belongs
 			// by multiplying the chunk index by the chunk size and subtracting
 			// the start offset modulo the chunk size because the start offset
 			// may not be aligned with the chunk boundary
-			destOffset = (int64(chunkIdx-startChunk) * chunkSize) - (startOffset % chunkSize)
+			destOffset = (int64(chunkIdx) * chunkSize) - (startOffset % chunkSize)
 		}
 
 		bytesToRead := endRange - startRange + 1

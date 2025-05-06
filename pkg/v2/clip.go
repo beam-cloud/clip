@@ -12,8 +12,7 @@ type ClipV2 struct {
 
 type CreateOptions struct {
 	InputPath    string
-	ChunkDir     string
-	IndexPath    string
+	LocalPath    string
 	Verbose      bool
 	Credentials  storage.ClipStorageCredentials
 	ProgressChan chan<- int
@@ -21,13 +20,12 @@ type CreateOptions struct {
 
 // Create Archive
 func CreateArchive(options CreateOptions) error {
-	log.Info().Msgf("creating archive from %s to %s", options.InputPath, options.ChunkDir)
+	log.Info().Msgf("creating archive from %s to %s", options.InputPath, options.LocalPath)
 
 	a := NewClipV2Archiver()
 	err := a.Create(ClipV2ArchiverOptions{
 		SourcePath: options.InputPath,
-		ChunkDir:   options.ChunkDir,
-		IndexPath:  options.IndexPath,
+		LocalPath:  options.LocalPath,
 		Verbose:    options.Verbose,
 	})
 	if err != nil {
