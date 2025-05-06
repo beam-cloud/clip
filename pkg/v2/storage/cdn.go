@@ -1,0 +1,124 @@
+package storage
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+
+	common "github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/clip/pkg/storage"
+	clipv2 "github.com/beam-cloud/clip/pkg/v2"
+)
+
+type CDNClipStorage struct {
+	cdnBaseURL string
+	imageID    string
+	chunkPath  string
+	clipPath   string
+	metadata   *clipv2.ClipV2Archive
+	client     *http.Client
+}
+
+func NewCDNClipStorage(cdnURL, imageID string, metadata *clipv2.ClipV2Archive) *CDNClipStorage {
+	chunkURL := fmt.Sprintf("%s-chunks", imageID)
+	clipURL := fmt.Sprintf("%s.clip", imageID)
+
+	return &CDNClipStorage{
+		imageID:    imageID,
+		cdnBaseURL: cdnURL,
+		chunkPath:  chunkURL,
+		clipPath:   clipURL,
+		metadata:   metadata,
+		client:     &http.Client{},
+	}
+}
+
+func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
+	if node.NodeType != common.FileNode {
+		return 0, fmt.Errorf("cannot ReadFile on non-file node type: %s", node.NodeType)
+	}
+	if off < 0 {
+		return 0, fmt.Errorf("negative offset %d is invalid", off)
+	}
+	if len(dest) == 0 {
+		return 0, nil
+	}
+
+	var (
+		chunkSize      = s.metadata.Header.ChunkSize
+		chunks         = s.metadata.Chunks
+		startOffset    = node.DataPos
+		endOffset      = startOffset + node.DataLen
+		startChunk     = startOffset / chunkSize
+		endChunk       = endOffset / chunkSize
+		totalBytesRead = 0
+	)
+
+	for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
+		chunk := chunks[chunkIdx]
+		chunkURL := fmt.Sprintf("%s/%s/%s%s", s.cdnBaseURL, s.chunkPath, chunk, clipv2.ChunkSuffix)
+
+		// Make a range request to the CDN to get the portion of the required chunk
+		// [ . . . h h ] [ h h h h h ] [ h h . . . ]
+		// The range of the requested chunk will always include at least one boundary
+		// (start, end, or both)
+
+		startRange := int64(0)
+		endRange := chunkSize - 1
+
+		if chunkIdx == startChunk {
+			startRange = startOffset % chunkSize
+		}
+		if chunkIdx == endChunk {
+			endRange = endOffset % chunkSize
+		}
+
+		req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
+		if err != nil {
+			return 0, err
+		}
+		req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d", startRange, endRange))
+
+		resp, err := s.client.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+			return 0, fmt.Errorf("unexpected status code %d", resp.StatusCode)
+		}
+
+		destOffset := int64(0)
+		if chunkIdx > startChunk {
+			// Calculate where in the destination buffer this result belongs
+			// by multiplying the chunk index by the chunk size and subtracting
+			// the start offset modulo the chunk size because the start offset
+			// may not be aligned with the chunk boundary
+			destOffset = (int64(chunkIdx-startChunk) * chunkSize) - (startOffset % chunkSize)
+		}
+
+		bytesToRead := endRange - startRange + 1
+
+		n, err := io.ReadFull(resp.Body, dest[destOffset:destOffset+bytesToRead])
+		if err != nil {
+			return 0, err
+		}
+
+		totalBytesRead += n
+	}
+
+	return totalBytesRead, nil
+}
+
+func (s *CDNClipStorage) CachedLocally() bool {
+	return false
+}
+
+func (s *CDNClipStorage) Metadata() storage.ClipStorageMetadata {
+	return s.metadata
+}
+
+func (s *CDNClipStorage) Cleanup() error {
+	return nil
+}

@@ -2,12 +2,10 @@ package clipv2
 
 import (
 	"bytes"
-	"crypto/sha256"
+	"context"
 	"encoding/binary"
 	"encoding/gob"
-	"encoding/hex"
 	"fmt"
-	"hash"
 	"io"
 	"io/fs"
 	"os"
@@ -16,6 +14,10 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	log "github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
@@ -27,15 +29,22 @@ import (
 
 // Define chunking constants
 const (
-	DefaultChunkSize = 128 * 1024 * 1024 // 128MB
-	ChunkSuffix      = ".cblock"
-	HeaderLenSize    = 8
+	DefaultMaxChunkSize = 32 * 1024 * 1024 // 64MB
+	ChunkSuffix         = ".cblock"
+	HeaderLenSize       = 8
 )
 
 func init() {
 	gob.Register(&common.ClipNode{})
 	gob.Register(common.ClipArchiveHeader{})
 }
+
+type DestinationType string
+
+const (
+	DestinationTypeLocal DestinationType = "local"
+	DestinationTypeS3    DestinationType = "s3"
+)
 
 type ClipV2ArchiverOptions struct {
 	Verbose      bool
@@ -45,6 +54,8 @@ type ClipV2ArchiverOptions struct {
 	ChunkDir     string
 	OutputPath   string
 	MaxChunkSize int64
+	Destination  DestinationType
+	S3Config     common.S3StorageInfo
 }
 
 type ClipV2Archiver struct {
@@ -53,7 +64,7 @@ type ClipV2Archiver struct {
 
 func NewClipV2Archiver() *ClipV2Archiver {
 	return &ClipV2Archiver{
-		chunkSize: DefaultChunkSize,
+		chunkSize: DefaultMaxChunkSize,
 	}
 }
 
@@ -61,16 +72,9 @@ func (ca *ClipV2Archiver) SetChunkSize(size int64) {
 	if size > 0 {
 		ca.chunkSize = size
 	} else {
-		ca.chunkSize = DefaultChunkSize
+		ca.chunkSize = DefaultMaxChunkSize
 		log.Warn().Msgf("Invalid chunk size %d provided, using default %d", size, ca.chunkSize)
 	}
-}
-
-func (ca *ClipV2Archiver) newIndex() *btree.BTreeG[*common.ClipNode] {
-	compare := func(a, b *common.ClipNode) bool {
-		return a.Path < b.Path
-	}
-	return btree.NewBTreeGOptions(compare, btree.Options{NoLocks: false})
 }
 
 type InodeGenerator struct {
@@ -202,12 +206,18 @@ func (ca *ClipV2Archiver) populateIndex(index *btree.BTreeG[*common.ClipNode], s
 // It then hashes the chunk and writes it to the chunk directory. Files can be split across multiple chunks.
 func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode], opts ClipV2ArchiverOptions) ([]string, error) {
 	var (
-		chunkHashes     []string
-		offset          int64 = 0
-		currChunkBuffer bytes.Buffer
-		currChunkHasher = sha256.New()
-		currChunkWriter = io.MultiWriter(&currChunkBuffer, currChunkHasher)
+		chunkNames []string
+		offset     int64 = 0
+		ctx              = context.Background()
 	)
+
+	chunkPrefix := filepath.Base(opts.ChunkDir)
+	chunkNum := 0
+	chunkName := fmt.Sprintf("%s-%d", chunkPrefix, chunkNum)
+	chunkWriter, err := newChunkWriter(ctx, opts, chunkName, chunkPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create chunk writer: %w", err)
+	}
 
 	var filesToProcess []*common.ClipNode
 	minNode, _ := index.Min()
@@ -218,6 +228,7 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 		return true
 	})
 
+	spaceInBlock := ca.chunkSize
 	fileReadBuffer := make([]byte, 64*1024)
 	for _, node := range filesToProcess {
 		if node.Attr.Size == 0 {
@@ -246,16 +257,20 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 
 		fileBytesProcessed := int64(0)
 		for fileBytesProcessed < int64(node.Attr.Size) {
-			spaceInBlock := ca.chunkSize - int64(currChunkBuffer.Len())
 			if spaceInBlock <= 0 {
-				chunkHash, err := finalizeChunk(&currChunkBuffer, currChunkHasher, opts.ChunkDir)
+				// Finalize the current chunk
+				chunkWriter.Close()
+				chunkNames = append(chunkNames, chunkName)
+
+				// Start a new chunk
+				chunkNum++
+				chunkName = fmt.Sprintf("%s-%d", chunkPrefix, chunkNum)
+				chunkWriter, err = newChunkWriter(ctx, opts, chunkName, chunkPrefix)
 				if err != nil {
 					f.Close()
-					return nil, fmt.Errorf("error finalizing block for %s: %w", node.Path, err)
+					return nil, fmt.Errorf("failed to create chunk writer: %w", err)
 				}
-				chunkHashes = append(chunkHashes, chunkHash)
 				spaceInBlock = ca.chunkSize
-				currChunkWriter = io.MultiWriter(&currChunkBuffer, currChunkHasher)
 			}
 
 			// bytesToRead must be set to the minimum of
@@ -270,7 +285,7 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 			n, readErr := io.ReadFull(f, fileReadBuffer[:bytesToRead])
 
 			if n > 0 {
-				written, writeErr := currChunkWriter.Write(fileReadBuffer[:n])
+				written, writeErr := chunkWriter.Write(fileReadBuffer[:n])
 				if writeErr != nil {
 					f.Close()
 					return nil, fmt.Errorf("failed writing %d bytes for %s to block: %w", n, node.Path, writeErr)
@@ -282,6 +297,7 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 
 				offset += int64(written)
 				fileBytesProcessed += int64(written)
+				spaceInBlock -= int64(written)
 			}
 
 			if readErr != nil {
@@ -305,42 +321,18 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 		}
 	}
 
-	chunkHash, err := finalizeChunk(&currChunkBuffer, currChunkHasher, opts.ChunkDir)
-	if err != nil {
-		return nil, fmt.Errorf("error finalizing last block: %w", err)
+	if err := chunkWriter.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close chunk writer: %w", err)
 	}
-	if chunkHash != "" {
-		chunkHashes = append(chunkHashes, chunkHash)
-	}
+	chunkNames = append(chunkNames, chunkName)
 
-	log.Info().Msgf("Finished packing. Total chunks created: %d", len(chunkHashes))
-	return chunkHashes, nil
-}
-
-// finalizeChunk writes a chunk to the chunk directory and returns the chunk hash
-func finalizeChunk(chunk *bytes.Buffer, hasher hash.Hash, chunkDir string) (string, error) {
-	if chunk.Len() == 0 {
-		return "", nil
-	}
-
-	chunkData := chunk.Bytes()
-	chunkHash := hex.EncodeToString(hasher.Sum(nil))
-	chunkFilename := fmt.Sprintf("%s%s", chunkHash, ChunkSuffix)
-	chunkPath := filepath.Join(chunkDir, chunkFilename)
-
-	if err := os.WriteFile(chunkPath, chunkData, 0644); err != nil {
-		return "", fmt.Errorf("failed to write chunk file %s: %w", chunkPath, err)
-	}
-	log.Debug().Msgf("Wrote chunk (%s) with size %d", chunkHash, len(chunkData))
-
-	chunk.Reset()
-	hasher.Reset()
-
-	return chunkHash, nil
+	log.Info().Msgf("Finished packing. Total chunks created: %d", len(chunkNames))
+	return chunkNames, nil
 }
 
 // Create creates a new ClipV2 archive from the source path.
 func (ca *ClipV2Archiver) Create(opts ClipV2ArchiverOptions) error {
+	ctx := context.Background()
 	if opts.SourcePath == "" || opts.ChunkDir == "" || opts.IndexPath == "" {
 		return fmt.Errorf("SourcePath, BlockDir, and IndexPath must be specified")
 	}
@@ -351,30 +343,30 @@ func (ca *ClipV2Archiver) Create(opts ClipV2ArchiverOptions) error {
 
 	ca.SetChunkSize(opts.MaxChunkSize)
 
-	index := ca.newIndex()
+	index := newIndex()
 	if err := ca.populateIndex(index, opts.SourcePath); err != nil {
 		return fmt.Errorf("failed to populate index: %w", err)
 	}
 	log.Info().Msgf("Index populated with %d items", index.Len())
 
-	var chunkHashes ClipV2ArchiveChunkList
-	chunkHashes, err := ca.writePackedChunks(index, opts)
+	var chunkNames ClipV2ArchiveChunkList
+	chunkNames, err := ca.writePackedChunks(index, opts)
 	if err != nil {
 		return fmt.Errorf("failed to write packed chunks: %w", err)
 	}
 
-	indexFile, err := os.Create(opts.IndexPath)
+	indexWriter, err := newIndexWriter(ctx, opts)
 	if err != nil {
-		return fmt.Errorf("failed to create index file %s: %w", opts.IndexPath, err)
+		return err
 	}
-	defer indexFile.Close()
+	defer indexWriter.Close()
 
 	indexBytes, err := ca.EncodeIndex(index)
 	if err != nil {
 		return fmt.Errorf("failed to encode index: %w", err)
 	}
 
-	chunkListBytes, err := ca.EncodeChunkList(chunkHashes)
+	chunkListBytes, err := ca.EncodeChunkList(chunkNames)
 	if err != nil {
 		return fmt.Errorf("failed to encode chunk list: %w", err)
 	}
@@ -403,62 +395,54 @@ func (ca *ClipV2Archiver) Create(opts ClipV2ArchiverOptions) error {
 		return fmt.Errorf("failed to encode header: %w", err)
 	}
 
-	if _, err := indexFile.Write(encodedHeaderBytes); err != nil {
+	if _, err := indexWriter.Write(encodedHeaderBytes); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
 
-	if _, err := indexFile.Write(chunkListBytes); err != nil {
+	if _, err := indexWriter.Write(chunkListBytes); err != nil {
 		return fmt.Errorf("failed to write chunk list: %w", err)
 	}
 
-	if _, err := indexFile.Write(indexBytes); err != nil {
+	if _, err := indexWriter.Write(indexBytes); err != nil {
 		return fmt.Errorf("failed to write index data: %w", err)
 	}
 
-	currentPos, _ := indexFile.Seek(0, io.SeekCurrent)
-	expectedEndPos := int64(len(encodedHeaderBytes) + len(chunkListBytes) + len(indexBytes))
-
-	if currentPos != expectedEndPos {
-		log.Warn().Msgf("File position mismatch after writing index: current %d, expected end %d", currentPos, expectedEndPos)
-	}
-
 	log.Info().Msgf("Successfully created index %s (%d nodes, %d blocks) and data blocks in %s",
-		opts.IndexPath, index.Len(), len(chunkHashes), opts.ChunkDir)
+		opts.IndexPath, index.Len(), len(chunkNames), opts.ChunkDir)
 	return nil
 }
 
 // ExtractArchive extracts the archive from the given path into a new ClipV2Archive object.
-func (ca *ClipV2Archiver) ExtractArchive(archivePath string) (*ClipV2Archive, error) {
-	file, err := os.Open(archivePath)
+func (ca *ClipV2Archiver) ExtractArchive(ctx context.Context, opts ClipV2ArchiverOptions) (*ClipV2Archive, error) {
+	archiveReader, err := newIndexReader(ctx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open index file %s: %w", archivePath, err)
-	}
-	defer file.Close()
-
-	header, err := ca.extractHeader(file)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract header from %s: %w", archivePath, err)
+		return nil, fmt.Errorf("failed to create S3 index reader: %w", err)
 	}
 
-	chunkHashes, err := ca.extractChunkList(file, header.ChunkListLength)
+	header, err := ca.extractHeader(archiveReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract chunk list from %s: %w", archivePath, err)
+		return nil, fmt.Errorf("failed to extract header from archive: %w", err)
 	}
 
-	index, err := ca.extractIndex(header, file)
+	chunkHashes, err := ca.extractChunkList(archiveReader, header.ChunkListLength)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract index from %s: %w", archivePath, err)
+		return nil, fmt.Errorf("failed to extract chunk list from archive: %w", err)
+	}
+
+	index, err := ca.extractIndex(header, archiveReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract index from archive: %w", err)
 	}
 
 	return &ClipV2Archive{
-		Header:      *header,
-		Index:       index,
-		ChunkHashes: chunkHashes,
+		Header: *header,
+		Index:  index,
+		Chunks: chunkHashes,
 	}, nil
 }
 
 // extractHeader extracts the header from the given file.
-func (ca *ClipV2Archiver) extractHeader(file *os.File) (*ClipV2ArchiveHeader, error) {
+func (ca *ClipV2Archiver) extractHeader(file io.Reader) (*ClipV2ArchiveHeader, error) {
 	header, err := ca.DecodeHeader(file)
 	if err != nil {
 		if err == io.EOF {
@@ -475,7 +459,7 @@ func (ca *ClipV2Archiver) extractHeader(file *os.File) (*ClipV2ArchiveHeader, er
 }
 
 // extractChunkList extracts the chunk list from the given file.
-func (ca *ClipV2Archiver) extractChunkList(file *os.File, chunkListLength int64) (ClipV2ArchiveChunkList, error) {
+func (ca *ClipV2Archiver) extractChunkList(file io.Reader, chunkListLength int64) (ClipV2ArchiveChunkList, error) {
 	if chunkListLength < 0 {
 		return nil, fmt.Errorf("invalid negative chunk list length in header: %d", chunkListLength)
 	}
@@ -496,7 +480,7 @@ func (ca *ClipV2Archiver) extractChunkList(file *os.File, chunkListLength int64)
 }
 
 // extractIndex extracts the index from the given file.
-func (ca *ClipV2Archiver) extractIndex(header *ClipV2ArchiveHeader, file *os.File) (*btree.BTreeG[*common.ClipNode], error) {
+func (ca *ClipV2Archiver) extractIndex(header *ClipV2ArchiveHeader, file io.Reader) (*btree.BTreeG[*common.ClipNode], error) {
 	indexBytes := make([]byte, header.IndexLength)
 	if header.IndexLength < 0 {
 		return nil, fmt.Errorf("invalid negative index length in header: %d", header.IndexLength)
@@ -521,7 +505,7 @@ func (ca *ClipV2Archiver) extractIndex(header *ClipV2ArchiveHeader, file *os.Fil
 		nodes = make([]*common.ClipNode, 0)
 	}
 
-	index := ca.newIndex()
+	index := newIndex()
 	for _, node := range nodes {
 		index.Set(node)
 	}
@@ -530,7 +514,7 @@ func (ca *ClipV2Archiver) extractIndex(header *ClipV2ArchiveHeader, file *os.Fil
 }
 
 // ExpandArchive expands the archive into the given output path.
-func (ca *ClipV2Archiver) ExpandArchive(opts ClipV2ArchiverOptions) error {
+func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2ArchiverOptions) error {
 	if opts.IndexPath == "" || opts.ChunkDir == "" || opts.OutputPath == "" {
 		return fmt.Errorf("IndexPath, BlockDir, and OutputPath must be specified for extraction")
 	}
@@ -541,12 +525,12 @@ func (ca *ClipV2Archiver) ExpandArchive(opts ClipV2ArchiverOptions) error {
 	}
 	defer file.Close()
 
-	archive, err := ca.ExtractArchive(opts.IndexPath)
+	archive, err := ca.ExtractArchive(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to extract archive from %s: %w", opts.IndexPath, err)
 	}
 	header := &archive.Header
-	chunkHashes := archive.ChunkHashes
+	chunkHashes := archive.Chunks
 	index := archive.Index
 
 	chunkSize := header.ChunkSize
@@ -823,4 +807,80 @@ func (ca *ClipV2Archiver) EncodeChunkList(chunkList ClipV2ArchiveChunkList) ([]b
 	}
 
 	return buf.Bytes(), nil
+}
+
+func newChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, chunkName string, chunkPrefix string) (io.WriteCloser, error) {
+	if opts.Destination == DestinationTypeS3 {
+		chunkWriter, err := newS3ChunkWriter(ctx, opts, chunkName, chunkPrefix)
+		return chunkWriter, err
+	}
+	chunkWriter, err := os.Create(filepath.Join(opts.ChunkDir, chunkName))
+	return chunkWriter, err
+}
+
+func newIndexWriter(ctx context.Context, opts ClipV2ArchiverOptions) (io.WriteCloser, error) {
+	if opts.Destination == DestinationTypeS3 {
+		return newS3IndexWriter(ctx, opts)
+	}
+
+	indexFile, err := os.Create(opts.IndexPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create index file %s: %w", opts.IndexPath, err)
+	}
+
+	return indexFile, nil
+}
+
+func newIndex() *btree.BTreeG[*common.ClipNode] {
+	compare := func(a, b *common.ClipNode) bool {
+		return a.Path < b.Path
+	}
+	return btree.NewBTreeGOptions(compare, btree.Options{NoLocks: false})
+}
+
+func newIndexReader(ctx context.Context, opts ClipV2ArchiverOptions) (io.ReadCloser, error) {
+	var (
+		archiveReader io.ReadCloser
+		err           error
+	)
+
+	switch opts.Destination {
+	case DestinationTypeLocal:
+		archiveReader, err = os.Open(opts.IndexPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open index file %s: %w", opts.IndexPath, err)
+		}
+	case DestinationTypeS3:
+		// Get file from S3
+		cfg, err := config.LoadDefaultConfig(ctx,
+			config.WithRegion(opts.S3Config.Region),
+			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+				opts.S3Config.AccessKey,
+				opts.S3Config.SecretAccessKey,
+				"",
+			)),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		}
+
+		s3Client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+			if opts.S3Config.ForcePathStyle {
+				o.UsePathStyle = true
+			}
+			o.BaseEndpoint = aws.String(opts.S3Config.Endpoint)
+		})
+
+		obj, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(opts.S3Config.Bucket),
+			Key:    aws.String(opts.S3Config.Key),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to get object from S3: %w", err)
+		}
+
+		archiveReader = obj.Body
+	}
+
+	return archiveReader, nil
 }

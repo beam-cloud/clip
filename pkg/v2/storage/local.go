@@ -50,15 +50,13 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 
 	var (
 		chunkSize            = s.metadata.Header.ChunkSize
-		chunkHashes          = s.metadata.ChunkHashes
+		chunkHashes          = s.metadata.Chunks
 		startOffset          = node.DataPos
 		endOffset            = startOffset + node.DataLen
 		startChunk           = startOffset / chunkSize
 		endChunk             = endOffset / chunkSize
 		bytesReadTotal int64 = 0
 	)
-
-	log.Info().Msgf("chunk dir: %s", s.chunkDir)
 
 	for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
 		chunkHash := chunkHashes[chunkIdx]
