@@ -115,7 +115,7 @@ func TestCreateAndExpandArchive_LargeFiles(t *testing.T) {
 	}
 
 	// Calculate the checksums of original files and check those against the index.clip file
-	archive, err := GetMetadata(ExtractOptions{
+	archive, err := ExtractMetadata(ExtractOptions{
 		IndexID:    "1234567890",
 		LocalPath:  archiveDir,
 		OutputPath: extractDir,

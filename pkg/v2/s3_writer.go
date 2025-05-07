@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go/aws"
+	common "github.com/beam-cloud/clip/pkg/common"
 )
 
 type S3ChunkWriter struct {
@@ -22,12 +23,12 @@ type S3ChunkWriter struct {
 	buffer *bytes.Buffer
 }
 
-func newS3ChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, overrideKey string) (io.WriteCloser, error) {
+func newS3ChunkWriter(ctx context.Context, s3Config common.S3StorageInfo, overrideKey string) (io.WriteCloser, error) {
 	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(opts.S3Config.Region),
+		config.WithRegion(s3Config.Region),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			opts.S3Config.AccessKey,
-			opts.S3Config.SecretKey,
+			s3Config.AccessKey,
+			s3Config.SecretKey,
 			"",
 		)),
 	)
@@ -36,15 +37,15 @@ func newS3ChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, overrideK
 	}
 
 	s3Client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		if opts.S3Config.ForcePathStyle {
+		if s3Config.ForcePathStyle {
 			o.UsePathStyle = true
 		}
-		o.BaseEndpoint = aws.String(opts.S3Config.Endpoint)
+		o.BaseEndpoint = aws.String(s3Config.Endpoint)
 	})
 
 	uploader := manager.NewUploader(s3Client)
 
-	key := opts.S3Config.Key
+	key := s3Config.Key
 	if overrideKey != "" {
 		key = overrideKey
 	}
@@ -52,7 +53,7 @@ func newS3ChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, overrideK
 	return &S3ChunkWriter{
 		ctx:      ctx,
 		uploader: uploader,
-		bucket:   opts.S3Config.Bucket,
+		bucket:   s3Config.Bucket,
 		key:      key,
 		buffer:   new(bytes.Buffer),
 	}, nil

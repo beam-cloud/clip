@@ -1,9 +1,6 @@
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,6 +11,7 @@ import (
 	"github.com/beam-cloud/clip/pkg/v2/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
@@ -22,7 +20,6 @@ func main() {
 }
 
 func s3() {
-	clipArchiver := clipv2.NewClipV2Archiver()
 	// Get access key, secret key, bucket, region, endpoint from env vars
 	accessKey := os.Getenv("WS_ACCESS_KEY")
 	secretKey := os.Getenv("WS_SECRET_KEY")
@@ -30,10 +27,12 @@ func s3() {
 	region := os.Getenv("WS_REGION")
 	endpoint := os.Getenv("WS_ENDPOINT")
 
-	opts := clipv2.ClipV2ArchiverOptions{
-		SourcePath: "../test",
-		LocalPath:  "/tmp/clip-archives",
+	log.Info().Str("accessKey", accessKey).Str("secretKey", secretKey).Str("bucket", bucket).Str("region", region).Str("endpoint", endpoint).Msg("S3 credentials")
+
+	createOptions := clipv2.CreateOptions{
 		IndexID:    "1234567890",
+		SourcePath: "../test",
+		LocalPath:  "",
 		S3Config: common.S3StorageInfo{
 			Bucket:    bucket,
 			Region:    region,
@@ -42,36 +41,51 @@ func s3() {
 			Endpoint:  endpoint,
 		},
 		Verbose:      false,
-		Compress:     false,
-		OutputPath:   "",
 		MaxChunkSize: 0,
 		StorageMode:  clipv2.StorageModeS3,
 	}
 
+	extractOptions := clipv2.ExtractOptions{
+		IndexID:     "1234567890",
+		LocalPath:   "",
+		StorageMode: clipv2.StorageModeS3,
+		Verbose:     false,
+		S3Config: common.S3StorageInfo{
+			Bucket:    bucket,
+			Region:    region,
+			AccessKey: accessKey,
+			SecretKey: secretKey,
+			Endpoint:  endpoint,
+		},
+	}
+
 	startTime := time.Now()
-	err := clipArchiver.Create(opts)
+	err := clipv2.CreateArchive(createOptions)
 	if err != nil {
-		log.Fatalf("Failed to create archive: %v", err)
+		log.Error().Err(err).Msg("Failed to create archive")
+		os.Exit(1)
 	}
 	duration := time.Since(startTime)
-	fmt.Printf("Time taken to create archive: %v\n", duration)
+	log.Info().Msgf("Time taken to create archive: %v", duration)
 
-	metadata, err := clipArchiver.ExtractArchive(context.Background(), opts)
+	metadata, err := clipv2.ExtractMetadata(extractOptions)
 	if err != nil {
-		log.Fatalf("Failed to extract metadata: %v", err)
+		log.Error().Err(err).Msg("Failed to get metadata")
+		os.Exit(1)
 	}
 
 	header := metadata.Header
 	index := metadata.Index
 	chunks := metadata.Chunks
 
-	fmt.Printf("Metadata: %+v\n", header)
-	fmt.Printf("Tree: %+v\n", index)
-	fmt.Printf("ChunkHashes: %+v\n", chunks)
+	log.Info().Msgf("Metadata: %+v\n", header)
+	log.Info().Msgf("Tree: %+v\n", index)
+	log.Info().Msgf("ChunkHashes: %+v\n", chunks)
 
 	cdnStorage := storage.NewCDNClipStorage("https://beam-cdn.com", "1234567890", metadata)
 	if err != nil {
-		log.Fatalf("Failed to create CDN clip storage: %v", err)
+		log.Error().Err(err).Msg("Failed to create CDN clip storage")
+		os.Exit(1)
 	}
 
 	fsOpts := clip.ClipFileSystemOpts{
@@ -82,7 +96,8 @@ func s3() {
 
 	clipFileSystem, err := clip.NewFileSystem(cdnStorage, fsOpts)
 	if err != nil {
-		log.Fatalf("Failed to create clip file system: %v", err)
+		log.Error().Err(err).Msg("Failed to create clip file system")
+		os.Exit(1)
 	}
 
 	root, _ := clipFileSystem.Root()
@@ -101,44 +116,52 @@ func s3() {
 		MaxReadAhead:         1024 * 128, // 128KB
 	})
 	if err != nil {
-		log.Fatalf("could not create server: %v", err)
+		log.Error().Err(err).Msg("Failed to create fuse server")
+		os.Exit(1)
 	}
 	server.Serve()
 }
 
 func local() {
-	clipArchiver := clipv2.NewClipV2Archiver()
-
-	opts := clipv2.ClipV2ArchiverOptions{
-		SourcePath: "../test",
-		LocalPath:  "/tmp/clip-archives",
-	}
-	cwd, _ := os.Getwd()
-	fmt.Println("cwd", cwd)
-
-	err := clipArchiver.Create(opts)
-	if err != nil {
-		log.Fatalf("Failed to create archive: %v", err)
+	createOptions := clipv2.CreateOptions{
+		SourcePath:  "../test",
+		LocalPath:   "/tmp/clip-archives",
+		IndexID:     "1234567890",
+		StorageMode: clipv2.StorageModeLocal,
 	}
 
-	metadata, err := clipArchiver.ExtractArchive(context.Background(), opts)
+	extractOptions := clipv2.ExtractOptions{
+		IndexID:     "1234567890",
+		LocalPath:   "/tmp/clip-archives",
+		StorageMode: clipv2.StorageModeLocal,
+	}
+
+	err := clipv2.CreateArchive(createOptions)
 	if err != nil {
-		log.Fatalf("Failed to extract metadata: %v", err)
+		log.Error().Err(err).Msg("Failed to create archive")
+		os.Exit(1)
+	}
+
+	metadata, err := clipv2.ExtractMetadata(extractOptions)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to extract metadata")
+		os.Exit(1)
 	}
 
 	header := metadata.Header
 	index := metadata.Index
 	chunkHashes := metadata.Chunks
 
-	fmt.Printf("Metadata: %+v\n", header)
-	fmt.Printf("Tree: %+v\n", index)
-	fmt.Printf("ChunkHashes: %+v\n", chunkHashes)
+	log.Info().Msgf("Metadata: %+v\n", header)
+	log.Info().Msgf("Tree: %+v\n", index)
+	log.Info().Msgf("ChunkHashes: %+v\n", chunkHashes)
 	localStorage, err := storage.NewLocalClipStorage(metadata, storage.LocalClipStorageOpts{
-		ArchivePath: filepath.Join(opts.LocalPath, "index.clip"),
-		ChunkDir:    filepath.Join(opts.LocalPath, "chunks"),
+		ArchivePath: filepath.Join(createOptions.LocalPath, "index.clip"),
+		ChunkDir:    filepath.Join(createOptions.LocalPath, "chunks"),
 	})
 	if err != nil {
-		log.Fatalf("Failed to create local clip storage: %v", err)
+		log.Error().Err(err).Msg("Failed to create local clip storage")
+		os.Exit(1)
 	}
 
 	fsOpts := clip.ClipFileSystemOpts{
@@ -149,7 +172,8 @@ func local() {
 
 	clipFileSystem, err := clip.NewFileSystem(localStorage, fsOpts)
 	if err != nil {
-		log.Fatalf("Failed to create clip file system: %v", err)
+		log.Error().Err(err).Msg("Failed to create clip file system")
+		os.Exit(1)
 	}
 
 	root, _ := clipFileSystem.Root()
@@ -168,7 +192,8 @@ func local() {
 		MaxReadAhead:         1024 * 128, // 128KB
 	})
 	if err != nil {
-		log.Fatalf("could not create server: %v", err)
+		log.Error().Err(err).Msg("Failed to create fuse server")
+		os.Exit(1)
 	}
 	server.Serve()
 }
