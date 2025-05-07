@@ -410,7 +410,7 @@ func (ca *ClipV2Archiver) Create(opts ClipV2ArchiverOptions) error {
 		return fmt.Errorf("failed to write index data: %w", err)
 	}
 
-	log.Info().Msgf("Successfully created index %s (%d nodes, %d blocks) and data blocks in %s",
+	log.Info().Msgf("Successfully created index %s (%d nodes, %d chunks) chunks in %s",
 		opts.IndexID, index.Len(), len(chunkNames), opts.LocalPath)
 	return nil
 }
@@ -516,8 +516,8 @@ func (ca *ClipV2Archiver) extractIndex(header *ClipV2ArchiveHeader, file io.Read
 	return index, nil
 }
 
-// ExpandArchive expands the archive into the given output path.
-func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2ArchiverOptions) error {
+// ExpandLocalArchive expands the archive into the given output path.
+func (ca *ClipV2Archiver) ExpandLocalArchive(ctx context.Context, opts ClipV2ArchiverOptions) error {
 	if opts.LocalPath == "" || opts.OutputPath == "" {
 		return fmt.Errorf("LocalPath and OutputPath must be specified for extraction")
 	}
@@ -558,7 +558,6 @@ func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2Archiver
 		parentDir := filepath.Dir(destPath)
 		if parentDir != "." && parentDir != "/" && parentDir != destPath {
 			if err := os.MkdirAll(parentDir, 0755); err != nil {
-				log.Error().Err(err).Msgf("Failed mkdirall %s for %s", parentDir, destPath)
 				errors = append(errors, fmt.Errorf("mkdirall %s: %w", parentDir, err))
 				return false
 			}
@@ -567,41 +566,36 @@ func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2Archiver
 		switch node.NodeType {
 		case common.DirNode:
 			if err := os.Mkdir(destPath, fs.FileMode(node.Attr.Mode&0777)|os.ModeDir); err != nil && !os.IsExist(err) {
-				log.Error().Err(err).Msgf("Failed mkdir %s", destPath)
 				errors = append(errors, fmt.Errorf("mkdir %s: %w", destPath, err))
 				return true
 			}
 			if err := os.Chmod(destPath, fs.FileMode(node.Attr.Mode&0777)|os.ModeDir); err != nil {
-				log.Warn().Err(err).Msgf("Failed chmod dir %s", destPath)
+				errors = append(errors, fmt.Errorf("chmod dir %s: %w", destPath, err))
 			}
 			if err := os.Lchown(destPath, int(node.Attr.Uid), int(node.Attr.Gid)); err != nil {
-				log.Warn().Err(err).Msgf("Failed chown dir %s", destPath)
+				errors = append(errors, fmt.Errorf("chown dir %s: %w", destPath, err))
 			}
 
 		case common.SymLinkNode:
 			if _, err := os.Lstat(destPath); err == nil {
 				if err := os.RemoveAll(destPath); err != nil {
-					log.Error().Err(err).Msgf("Failed remove existing %s", destPath)
 					errors = append(errors, fmt.Errorf("remove existing %s: %w", destPath, err))
 					return true
 				}
 			} else if !os.IsNotExist(err) {
-				log.Error().Err(err).Msgf("Failed lstat %s", destPath)
 				errors = append(errors, fmt.Errorf("lstat %s: %w", destPath, err))
 				return true
 			}
 			if err := os.Symlink(node.Target, destPath); err != nil {
-				log.Error().Err(err).Msgf("Failed symlink %s -> %s", destPath, node.Target)
 				errors = append(errors, fmt.Errorf("symlink %s: %w", destPath, err))
 				return true
 			}
 			if err := os.Lchown(destPath, int(node.Attr.Uid), int(node.Attr.Gid)); err != nil {
-				log.Warn().Err(err).Msgf("Failed lchown symlink %s", destPath)
+				errors = append(errors, fmt.Errorf("lchown symlink %s: %w", destPath, err))
 			}
 
 		case common.FileNode:
 			if node.DataPos < 0 || node.DataLen < 0 {
-				log.Error().Msgf("Skipping incomplete file %s", node.Path)
 				errors = append(errors, fmt.Errorf("skipped incomplete file %s", node.Path))
 				return true
 			}
@@ -609,17 +603,16 @@ func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2Archiver
 			if expectedFileSize == 0 {
 				emptyFile, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fs.FileMode(node.Attr.Mode&0777))
 				if err != nil {
-					log.Error().Err(err).Msgf("Failed create empty file %s", destPath)
 					errors = append(errors, fmt.Errorf("create empty file %s: %w", destPath, err))
 				} else {
 					emptyFile.Close()
 				}
 				if err == nil {
 					if err := os.Chmod(destPath, fs.FileMode(node.Attr.Mode&0777)); err != nil {
-						log.Warn().Err(err).Msgf("Failed chmod empty %s", destPath)
+						errors = append(errors, fmt.Errorf("chmod empty %s: %w", destPath, err))
 					}
 					if err := os.Lchown(destPath, int(node.Attr.Uid), int(node.Attr.Gid)); err != nil {
-						log.Warn().Err(err).Msgf("Failed chown empty %s", destPath)
+						errors = append(errors, fmt.Errorf("lchown empty %s: %w", destPath, err))
 					}
 				}
 				return true
@@ -627,7 +620,6 @@ func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2Archiver
 
 			outFile, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fs.FileMode(node.Attr.Mode&0777))
 			if err != nil {
-				log.Error().Err(err).Msgf("Failed create file %s", destPath)
 				errors = append(errors, fmt.Errorf("create file %s: %w", destPath, err))
 				return true
 			}
@@ -641,8 +633,7 @@ func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2Archiver
 
 			var reconstructErr error
 			for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
-				chunkFilename := fmt.Sprintf("%s%s", chunkHashes[chunkIdx], ChunkSuffix)
-				chunkPath := filepath.Join(opts.LocalPath, chunkFilename)
+				chunkPath := filepath.Join(opts.LocalPath, opts.IndexID, "chunks", chunkHashes[chunkIdx])
 
 				chunkFile, err := os.Open(chunkPath)
 				if err != nil {
@@ -719,7 +710,6 @@ func (ca *ClipV2Archiver) ExpandArchive(ctx context.Context, opts ClipV2Archiver
 	})
 
 	if len(errors) > 0 {
-		log.Error().Msgf("Extraction completed with %d errors", len(errors))
 		return fmt.Errorf("extraction completed with errors: %w", errors[0])
 	}
 
@@ -817,7 +807,9 @@ func newChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, chunkKey st
 		chunkWriter, err := newS3ChunkWriter(ctx, opts, chunkKey)
 		return chunkWriter, err
 	}
-	dir := filepath.Dir(chunkKey)
+
+	localChunkPath := filepath.Join(opts.LocalPath, "/"+chunkKey)
+	dir := filepath.Dir(localChunkPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
@@ -831,7 +823,7 @@ func newIndexWriter(ctx context.Context, opts ClipV2ArchiverOptions) (io.WriteCl
 		return newS3ChunkWriter(ctx, opts, indexKey)
 	}
 
-	indexFilePath := filepath.Join(opts.LocalPath, "index.clip")
+	indexFilePath := filepath.Join(opts.LocalPath, opts.IndexID, "index.clip")
 	indexFile, err := os.Create(indexFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create index file %s: %w", indexFilePath, err)
@@ -854,11 +846,6 @@ func newIndexReader(ctx context.Context, opts ClipV2ArchiverOptions) (io.ReadClo
 	)
 
 	switch opts.Destination {
-	case DestinationTypeLocal:
-		archiveReader, err = os.Open(filepath.Join(opts.LocalPath, "index.clip"))
-		if err != nil {
-			return nil, fmt.Errorf("failed to open index file %s: %w", filepath.Join(opts.LocalPath, "index.clip"), err)
-		}
 	case DestinationTypeS3:
 		// Get file from S3
 		cfg, err := config.LoadDefaultConfig(ctx,
@@ -890,6 +877,12 @@ func newIndexReader(ctx context.Context, opts ClipV2ArchiverOptions) (io.ReadClo
 		}
 
 		archiveReader = obj.Body
+	default:
+		indexPath := filepath.Join(opts.LocalPath, opts.IndexID, "index.clip")
+		archiveReader, err = os.Open(indexPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open index file %s: %w", indexPath, err)
+		}
 	}
 
 	return archiveReader, nil

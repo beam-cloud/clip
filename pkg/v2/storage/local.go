@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -48,19 +49,23 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 		return 0, nil
 	}
 
+	if len(dest) > int(node.DataLen) {
+		return 0, fmt.Errorf("destination buffer size %d is larger than node data length %d", len(dest), node.DataLen)
+	}
+
 	var (
 		chunkSize            = s.metadata.Header.ChunkSize
-		chunkHashes          = s.metadata.Chunks
-		startOffset          = node.DataPos
-		endOffset            = startOffset + node.DataLen
+		chunkNames           = s.metadata.Chunks
+		startOffset          = node.DataPos + off
+		endOffset            = startOffset + int64(len(dest))
 		startChunk           = startOffset / chunkSize
-		endChunk             = endOffset / chunkSize
+		endChunk             = (endOffset - 1) / chunkSize
 		bytesReadTotal int64 = 0
 	)
 
 	for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
-		chunkHash := chunkHashes[chunkIdx]
-		chunkPath := filepath.Join(s.chunkDir, chunkHash+clipv2.ChunkSuffix)
+		chunkName := chunkNames[chunkIdx]
+		chunkPath := filepath.Join(s.chunkDir, chunkName+clipv2.ChunkSuffix)
 		chunkFile, err := os.Open(chunkPath)
 		if err != nil {
 			return 0, fmt.Errorf("failed to open chunk file %s: %w", chunkPath, err)
@@ -77,8 +82,12 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 
 		bytesRead, err := chunkFile.ReadAt(dest[bytesReadTotal:bytesReadTotal+chunkBytesToRead], offsetInChunk)
 		if err != nil {
-			chunkFile.Close()
-			return 0, fmt.Errorf("failed to read chunk file %s: %w", chunkPath, err)
+			if err == io.EOF {
+				log.Warn().Msgf("ReadFile: reached EOF while reading chunk file %s", chunkPath)
+			} else {
+				chunkFile.Close()
+				return 0, fmt.Errorf("failed to read chunk file %s: %w", chunkPath, err)
+			}
 		}
 
 		bytesReadTotal += int64(bytesRead)

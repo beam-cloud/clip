@@ -33,6 +33,8 @@ func NewCDNClipStorage(cdnURL, imageID string, metadata *clipv2.ClipV2Archive) *
 	}
 }
 
+// ReadFile reads a file from chunks stored in a CDN. It applies the requested offset to the
+// clip node's start offset and begins reading len(destination buffer) bytes from that point.
 func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
 	if node.NodeType != common.FileNode {
 		return 0, fmt.Errorf("cannot ReadFile on non-file node type: %s", node.NodeType)
@@ -44,15 +46,23 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		return 0, nil
 	}
 
+	if len(dest) > int(node.DataLen) {
+		return 0, fmt.Errorf("destination buffer size %d is larger than node data length %d", len(dest), node.DataLen)
+	}
+
 	var (
 		chunkSize      = s.metadata.Header.ChunkSize
 		chunks         = s.metadata.Chunks
-		startOffset    = node.DataPos
-		endOffset      = startOffset + node.DataLen
+		startOffset    = node.DataPos + off
+		endOffset      = startOffset + int64(len(dest))
 		startChunk     = startOffset / chunkSize
-		endChunk       = endOffset / chunkSize
+		endChunk       = (endOffset - 1) / chunkSize
 		totalBytesRead = 0
 	)
+
+	if endChunk+1 > int64(len(chunks)) || startChunk < 0 || startChunk > endChunk {
+		return 0, fmt.Errorf("invalid chunk indices for %d chunks: startChunk %d, endChunk %d", len(chunks), startChunk, endChunk+1)
+	}
 
 	requiredChunks := chunks[startChunk : endChunk+1]
 
@@ -72,7 +82,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		}
 
 		if chunkIdx == len(requiredChunks)-1 {
-			endRange = endOffset % chunkSize
+			endRange = (endOffset - 1) % chunkSize
 		}
 
 		req, err := http.NewRequest(http.MethodGet, chunkURL, nil)

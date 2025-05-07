@@ -99,6 +99,7 @@ require (
 	github.com/docker/cli v27.5.0+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.8.2 // indirect
+	github.com/jarcoal/httpmock v1.4.0
 	github.com/karrick/godirwalk v1.17.0
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/vbatts/tar-split v0.11.6 // indirect
