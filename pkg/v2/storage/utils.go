@@ -16,10 +16,6 @@ func validateReadFileInput(node *common.ClipNode, off int64, dest []byte) error 
 		return fmt.Errorf("negative offset %d is invalid", off)
 	}
 
-	if len(dest) == 0 {
-		return nil
-	}
-
 	if len(dest) > int(node.DataLen) {
 		return fmt.Errorf("destination buffer size %d is larger than node data length %d", len(dest), node.DataLen)
 	}

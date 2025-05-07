@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -83,7 +82,6 @@ func TestLocalClipStorage_ReadFile_Scenarios(t *testing.T) {
 		expectedDestContent       []byte
 		expectError               bool
 		expectedErrorMsgSubstring string
-		expectPanic               bool
 		expectedPanicMsgSubstring string
 	}{
 		{
@@ -205,26 +203,27 @@ func TestLocalClipStorage_ReadFile_Scenarios(t *testing.T) {
 			expectedDestContent:      chunk0Content[8:18],
 		},
 		{
-			name:                      "panic: read beyond metadata chunks (index out of range for s.metadata.Chunks)",
+			name:                      "edge: read beyond metadata chunks (index out of range for s.metadata.Chunks)",
 			metadataChunkSizeToUse:    baseChunkSize,
 			metadataChunkHashesToUse:  []string{chunk0},
 			chunkFilesToCreate:        map[string][]byte{chunk0: chunk0Content},
 			nodeDataPos:               0,
 			nodeDataLen:               baseChunkSize + 10,
 			destBufSize:               int(baseChunkSize + 10),
-			expectPanic:               true,
-			expectedPanicMsgSubstring: "runtime error: index out of range",
+			expectError:               true,
+			expectedErrorMsgSubstring: "invalid chunk indices for 1 chunks: startChunk 0, endChunk ",
 		},
 		{
-			name:                      "panic: dest buffer too small for node.DataLen",
-			metadataChunkSizeToUse:    baseChunkSize,
-			metadataChunkHashesToUse:  []string{chunk0},
-			chunkFilesToCreate:        map[string][]byte{chunk0: chunk0Content},
-			nodeDataPos:               0,
-			nodeDataLen:               20,
-			destBufSize:               10,
-			expectPanic:               true,
-			expectedPanicMsgSubstring: "runtime error: slice bounds out of range",
+			name:                     "edge: dest buffer smaller than node.DataLen",
+			metadataChunkSizeToUse:   baseChunkSize,
+			metadataChunkHashesToUse: []string{chunk0},
+			chunkFilesToCreate:       map[string][]byte{chunk0: chunk0Content},
+			nodeDataPos:              0,
+			nodeDataLen:              20,
+			destBufSize:              10,
+			expectedBytesRead:        10,
+			expectedDestContent:      chunk0Content[0:10],
+			expectError:              false,
 		},
 		{
 			name:                     "short read: chunk file is smaller than expected read from it",
@@ -276,25 +275,7 @@ func TestLocalClipStorage_ReadFile_Scenarios(t *testing.T) {
 
 			dest := make([]byte, tc.destBufSize)
 
-			if tc.expectPanic {
-				defer func() {
-					r := recover()
-					if r == nil {
-						t.Errorf("Expected ReadFile to panic, but it did not")
-					} else if tc.expectedPanicMsgSubstring != "" {
-						panicMsg := fmt.Sprintf("%v", r)
-						if !strings.Contains(panicMsg, tc.expectedPanicMsgSubstring) {
-							t.Errorf("Expected panic message to contain '%s', got '%s'", tc.expectedPanicMsgSubstring, panicMsg)
-						}
-					}
-				}()
-			}
-
 			n, err := s.ReadFile(node, dest, tc.readFileOffset)
-
-			if tc.expectPanic {
-				return
-			}
 
 			if tc.expectError {
 				if err == nil {

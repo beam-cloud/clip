@@ -41,6 +41,10 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		return 0, err
 	}
 
+	if len(dest) == 0 {
+		return 0, nil
+	}
+
 	var (
 		chunkSize      = s.metadata.Header.ChunkSize
 		chunks         = s.metadata.Chunks

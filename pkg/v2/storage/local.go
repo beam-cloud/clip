@@ -44,6 +44,10 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 		return 0, err
 	}
 
+	if len(dest) == 0 {
+		return 0, nil
+	}
+
 	var (
 		chunkSize            = s.metadata.Header.ChunkSize
 		chunks               = s.metadata.Chunks
@@ -72,7 +76,7 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 			offsetInChunk = 0
 		}
 
-		chunkBytesToRead := min(chunkSize-offsetInChunk, node.DataLen-bytesReadTotal)
+		chunkBytesToRead := min(chunkSize-offsetInChunk, int64(len(dest))-bytesReadTotal)
 
 		bytesRead, err := chunkFile.ReadAt(dest[bytesReadTotal:bytesReadTotal+chunkBytesToRead], offsetInChunk)
 		if err != nil {
