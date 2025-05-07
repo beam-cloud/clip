@@ -45,7 +45,7 @@ func s3() {
 		Compress:     false,
 		OutputPath:   "",
 		MaxChunkSize: 0,
-		Destination:  clipv2.DestinationTypeS3,
+		StorageMode:  clipv2.StorageModeS3,
 	}
 
 	startTime := time.Now()

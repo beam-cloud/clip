@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -41,11 +42,11 @@ func init() {
 	gob.Register(common.ClipArchiveHeader{})
 }
 
-type DestinationType string
+type StorageMode string
 
 const (
-	DestinationTypeLocal DestinationType = "local"
-	DestinationTypeS3    DestinationType = "s3"
+	StorageModeLocal StorageMode = "local"
+	StorageModeS3    StorageMode = "s3"
 )
 
 type ClipV2ArchiverOptions struct {
@@ -56,7 +57,7 @@ type ClipV2ArchiverOptions struct {
 	OutputPath   string
 	MaxChunkSize int64
 	IndexID      string
-	Destination  DestinationType
+	StorageMode  StorageMode
 	S3Config     common.S3StorageInfo
 }
 
@@ -331,7 +332,7 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 		}
 
 		// Finalize the hash
-		node.ContentHash = string(hashWriter.Sum(nil))
+		node.ContentHash = hex.EncodeToString(hashWriter.Sum(nil))
 	}
 
 	if err := chunkWriter.Close(); err != nil {
@@ -350,7 +351,7 @@ func (ca *ClipV2Archiver) Create(opts ClipV2ArchiverOptions) error {
 		return fmt.Errorf("SourcePath must be specified")
 	}
 
-	if opts.Destination == DestinationTypeLocal {
+	if opts.StorageMode == StorageModeLocal {
 		if err := os.MkdirAll(opts.LocalPath, 0755); err != nil {
 			return fmt.Errorf("failed to create archive local directory %s: %w", opts.LocalPath, err)
 		}
@@ -785,7 +786,7 @@ func (ca *ClipV2Archiver) EncodeChunkList(chunkList ClipV2ArchiveChunkList) ([]b
 }
 
 func newChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, chunkKey string) (io.WriteCloser, error) {
-	if opts.Destination == DestinationTypeS3 {
+	if opts.StorageMode == StorageModeS3 {
 		chunkWriter, err := newS3ChunkWriter(ctx, opts, chunkKey)
 		return chunkWriter, err
 	}
@@ -800,7 +801,7 @@ func newChunkWriter(ctx context.Context, opts ClipV2ArchiverOptions, chunkKey st
 }
 
 func newIndexWriter(ctx context.Context, opts ClipV2ArchiverOptions) (io.WriteCloser, error) {
-	if opts.Destination == DestinationTypeS3 {
+	if opts.StorageMode == StorageModeS3 {
 		indexKey := fmt.Sprintf("%s/index.clip", opts.IndexID)
 		return newS3ChunkWriter(ctx, opts, indexKey)
 	}
@@ -827,8 +828,8 @@ func newIndexReader(ctx context.Context, opts ClipV2ArchiverOptions) (io.ReadClo
 		err           error
 	)
 
-	switch opts.Destination {
-	case DestinationTypeS3:
+	switch opts.StorageMode {
+	case StorageModeS3:
 		// Get file from S3
 		cfg, err := config.LoadDefaultConfig(ctx,
 			config.WithRegion(opts.S3Config.Region),

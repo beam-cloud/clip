@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	common "github.com/beam-cloud/clip/pkg/common"
 	"github.com/google/go-containerregistry/pkg/crane"
 )
 
@@ -57,10 +58,10 @@ func TestCreateAndExpandArchive_LargeFiles(t *testing.T) {
 
 	// Create the archive
 	options := CreateOptions{
-		IndexID:   "1234567890",
-		InputPath: tempDir,
-		LocalPath: archiveDir,
-		Verbose:   false,
+		IndexID:    "1234567890",
+		SourcePath: tempDir,
+		LocalPath:  archiveDir,
+		Verbose:    false,
 	}
 
 	// Assuming CreateArchive is defined in the same package (e.g., archive.go)
@@ -88,7 +89,7 @@ func TestCreateAndExpandArchive_LargeFiles(t *testing.T) {
 	// Expand the archive
 	err = ExpandLocalArchive(context.Background(), ExtractOptions{
 		IndexID:    "1234567890",
-		SourcePath: archiveDir,
+		LocalPath:  archiveDir,
 		OutputPath: extractDir,
 		Verbose:    true,
 	})
@@ -112,6 +113,30 @@ func TestCreateAndExpandArchive_LargeFiles(t *testing.T) {
 	for _, ed := range expectedDirs {
 		verifyExtractedDirectory(t, extractDir, ed.name, ed.perm)
 	}
+
+	// Calculate the checksums of original files and check those against the index.clip file
+	archive, err := GetMetadata(ExtractOptions{
+		IndexID:    "1234567890",
+		LocalPath:  archiveDir,
+		OutputPath: extractDir,
+		Verbose:    true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to get metadata: %v", err)
+	}
+
+	for _, tf := range testFilesData {
+		node, found := archive.Index.Get(&common.ClipNode{Path: "/" + tf.name})
+		if !found {
+			t.Errorf("File %s not found in index", tf.name)
+		}
+
+		originalContentHash := calculateChecksum(tf.content)
+		if node.ContentHash != originalContentHash {
+			t.Errorf("File %s content hash mismatch: got %s, want %s", node.Path, node.ContentHash, originalContentHash)
+		}
+	}
+
 }
 
 func BenchmarkCreateArchiveFromOCIImage(b *testing.B) {
@@ -176,10 +201,10 @@ func BenchmarkCreateArchiveFromOCIImage(b *testing.B) {
 
 		// Create the archive
 		options := CreateOptions{
-			IndexID:   "1234567890",
-			InputPath: tmpDir,
-			LocalPath: archiveDir,
-			Verbose:   false,
+			IndexID:    "1234567890",
+			SourcePath: tmpDir,
+			LocalPath:  archiveDir,
+			Verbose:    false,
 		}
 
 		start := time.Now()
