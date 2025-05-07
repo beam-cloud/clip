@@ -36,18 +36,9 @@ func NewCDNClipStorage(cdnURL, imageID string, metadata *clipv2.ClipV2Archive) *
 // ReadFile reads a file from chunks stored in a CDN. It applies the requested offset to the
 // clip node's start offset and begins reading len(destination buffer) bytes from that point.
 func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
-	if node.NodeType != common.FileNode {
-		return 0, fmt.Errorf("cannot ReadFile on non-file node type: %s", node.NodeType)
-	}
-	if off < 0 {
-		return 0, fmt.Errorf("negative offset %d is invalid", off)
-	}
-	if len(dest) == 0 {
-		return 0, nil
-	}
-
-	if len(dest) > int(node.DataLen) {
-		return 0, fmt.Errorf("destination buffer size %d is larger than node data length %d", len(dest), node.DataLen)
+	err := validateReadFileInput(node, off, dest)
+	if err != nil {
+		return 0, err
 	}
 
 	var (
@@ -55,13 +46,12 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		chunks         = s.metadata.Chunks
 		startOffset    = node.DataPos + off
 		endOffset      = startOffset + int64(len(dest))
-		startChunk     = startOffset / chunkSize
-		endChunk       = (endOffset - 1) / chunkSize
 		totalBytesRead = 0
 	)
 
-	if endChunk+1 > int64(len(chunks)) || startChunk < 0 || startChunk > endChunk {
-		return 0, fmt.Errorf("invalid chunk indices for %d chunks: startChunk %d, endChunk %d", len(chunks), startChunk, endChunk+1)
+	startChunk, endChunk, err := getChunkIndices(startOffset, chunkSize, endOffset, chunks)
+	if err != nil {
+		return 0, err
 	}
 
 	requiredChunks := chunks[startChunk : endChunk+1]
