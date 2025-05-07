@@ -6,7 +6,7 @@ jobs:
   test:
     defaults:
       run:
-        working-directory: pkg/clip
+        working-directory: pkg
 
     runs-on: ubuntu-latest
     strategy:
