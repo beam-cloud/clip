@@ -3,6 +3,7 @@ package clipv2
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
@@ -29,7 +30,8 @@ import (
 
 // Define chunking constants
 const (
-	DefaultMaxChunkSize = 32 * 1024 * 1024 // 64MB
+	DefaultMaxChunkSize = 32 * 1024 * 1024 // 32MB
+	FileReadBufferSize  = 64 * 1024        // 64KB
 	ChunkSuffix         = ".cblock"
 	HeaderLenSize       = 8
 )
@@ -203,7 +205,6 @@ func (ca *ClipV2Archiver) populateIndex(index *btree.BTreeG[*common.ClipNode], s
 }
 
 // writePackedChunks writes file contents into chunks until the chunk has reached the max chunk size.
-// It then hashes the chunk and writes it to the chunk directory. Files can be split across multiple chunks.
 func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode], opts ClipV2ArchiverOptions) ([]string, error) {
 	var (
 		chunkNames []string
@@ -229,7 +230,7 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 	})
 
 	spaceInBlock := ca.chunkSize
-	fileReadBuffer := make([]byte, 64*1024)
+	fileReadBuffer := make([]byte, FileReadBufferSize)
 	for _, node := range filesToProcess {
 		if node.Attr.Size == 0 {
 			node.DataPos = offset
@@ -252,6 +253,11 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 		if opts.Verbose {
 			log.Info().Msgf("Packing file: %s (size %d) starting at offset %d", node.Path, node.Attr.Size, offset)
 		}
+
+		// Begin hash writer for the file
+		hashWriter := sha256.New()
+		writer := io.MultiWriter(chunkWriter, hashWriter)
+
 		node.DataPos = offset
 		node.DataLen = int64(node.Attr.Size)
 
@@ -272,6 +278,9 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 					return nil, fmt.Errorf("failed to create chunk writer: %w", err)
 				}
 				spaceInBlock = ca.chunkSize
+
+				// New writer continues to write to the file's hashWriter
+				writer = io.MultiWriter(chunkWriter, hashWriter)
 			}
 
 			// bytesToRead must be set to the minimum of
@@ -286,7 +295,7 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 			n, readErr := io.ReadFull(f, fileReadBuffer[:bytesToRead])
 
 			if n > 0 {
-				written, writeErr := chunkWriter.Write(fileReadBuffer[:n])
+				written, writeErr := writer.Write(fileReadBuffer[:n])
 				if writeErr != nil {
 					f.Close()
 					return nil, fmt.Errorf("failed writing %d bytes for %s to block: %w", n, node.Path, writeErr)
@@ -320,6 +329,9 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 			node.DataPos = -1
 			node.DataLen = -1
 		}
+
+		// Finalize the hash
+		node.ContentHash = string(hashWriter.Sum(nil))
 	}
 
 	if err := chunkWriter.Close(); err != nil {
@@ -427,7 +439,7 @@ func (ca *ClipV2Archiver) ExtractArchive(ctx context.Context, opts ClipV2Archive
 		return nil, fmt.Errorf("failed to extract header from archive: %w", err)
 	}
 
-	chunkHashes, err := ca.extractChunkList(archiveReader, header.ChunkListLength)
+	chunks, err := ca.extractChunkList(archiveReader, header.ChunkListLength)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract chunk list from archive: %w", err)
 	}
@@ -440,7 +452,7 @@ func (ca *ClipV2Archiver) ExtractArchive(ctx context.Context, opts ClipV2Archive
 	return &ClipV2Archive{
 		Header: *header,
 		Index:  index,
-		Chunks: chunkHashes,
+		Chunks: chunks,
 	}, nil
 }
 
@@ -522,9 +534,9 @@ func (ca *ClipV2Archiver) ExpandLocalArchive(ctx context.Context, opts ClipV2Arc
 		return fmt.Errorf("LocalPath and OutputPath must be specified for extraction")
 	}
 
-	file, err := os.Open(filepath.Join(opts.LocalPath, "index.clip"))
+	file, err := newIndexReader(ctx, opts)
 	if err != nil {
-		return fmt.Errorf("failed to open index file %s: %w", filepath.Join(opts.LocalPath, "index.clip"), err)
+		return err
 	}
 	defer file.Close()
 
@@ -533,14 +545,14 @@ func (ca *ClipV2Archiver) ExpandLocalArchive(ctx context.Context, opts ClipV2Arc
 		return fmt.Errorf("failed to extract archive from %s: %w", filepath.Join(opts.LocalPath, "index.clip"), err)
 	}
 	header := &archive.Header
-	chunkHashes := archive.Chunks
+	chunks := archive.Chunks
 	index := archive.Index
 
 	chunkSize := header.ChunkSize
 	if chunkSize <= 0 {
 		return fmt.Errorf("invalid chunk size %d found in archive header", chunkSize)
 	}
-	log.Info().Msgf("Starting extraction using chunk size %d and %d chunks", chunkSize, len(chunkHashes))
+	log.Info().Msgf("Starting extraction using chunk size %d and %d chunks", chunkSize, len(chunks))
 
 	if err := os.MkdirAll(opts.OutputPath, 0755); err != nil {
 		return fmt.Errorf("failed to create base output directory %s: %w", opts.OutputPath, err)
@@ -569,31 +581,11 @@ func (ca *ClipV2Archiver) ExpandLocalArchive(ctx context.Context, opts ClipV2Arc
 				errors = append(errors, fmt.Errorf("mkdir %s: %w", destPath, err))
 				return true
 			}
-			if err := os.Chmod(destPath, fs.FileMode(node.Attr.Mode&0777)|os.ModeDir); err != nil {
-				errors = append(errors, fmt.Errorf("chmod dir %s: %w", destPath, err))
-			}
-			if err := os.Lchown(destPath, int(node.Attr.Uid), int(node.Attr.Gid)); err != nil {
-				errors = append(errors, fmt.Errorf("chown dir %s: %w", destPath, err))
-			}
-
 		case common.SymLinkNode:
-			if _, err := os.Lstat(destPath); err == nil {
-				if err := os.RemoveAll(destPath); err != nil {
-					errors = append(errors, fmt.Errorf("remove existing %s: %w", destPath, err))
-					return true
-				}
-			} else if !os.IsNotExist(err) {
-				errors = append(errors, fmt.Errorf("lstat %s: %w", destPath, err))
-				return true
-			}
 			if err := os.Symlink(node.Target, destPath); err != nil {
 				errors = append(errors, fmt.Errorf("symlink %s: %w", destPath, err))
 				return true
 			}
-			if err := os.Lchown(destPath, int(node.Attr.Uid), int(node.Attr.Gid)); err != nil {
-				errors = append(errors, fmt.Errorf("lchown symlink %s: %w", destPath, err))
-			}
-
 		case common.FileNode:
 			if node.DataPos < 0 || node.DataLen < 0 {
 				errors = append(errors, fmt.Errorf("skipped incomplete file %s", node.Path))
@@ -633,7 +625,7 @@ func (ca *ClipV2Archiver) ExpandLocalArchive(ctx context.Context, opts ClipV2Arc
 
 			var reconstructErr error
 			for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
-				chunkPath := filepath.Join(opts.LocalPath, opts.IndexID, "chunks", chunkHashes[chunkIdx])
+				chunkPath := filepath.Join(opts.LocalPath, opts.IndexID, "chunks", chunks[chunkIdx])
 
 				chunkFile, err := os.Open(chunkPath)
 				if err != nil {
@@ -685,23 +677,13 @@ func (ca *ClipV2Archiver) ExpandLocalArchive(ctx context.Context, opts ClipV2Arc
 				return true
 			}
 			if closeErr != nil {
-				log.Error().Err(closeErr).Msgf("Failed close output %s", destPath)
 				errors = append(errors, fmt.Errorf("close file %s: %w", destPath, closeErr))
 				return true
 			}
 
 			if bytesWrittenTotal != expectedFileSize {
-				log.Warn().Msgf("Final size mismatch %s: exp %d, wrote %d", destPath, expectedFileSize, bytesWrittenTotal)
 				errors = append(errors, fmt.Errorf("size mismatch %s", destPath))
 			}
-
-			if err := os.Chmod(destPath, fs.FileMode(node.Attr.Mode&0777)); err != nil {
-				log.Warn().Err(err).Msgf("Failed chmod %s", destPath)
-			}
-			if err := os.Lchown(destPath, int(node.Attr.Uid), int(node.Attr.Gid)); err != nil {
-				log.Warn().Err(err).Msgf("Failed chown %s", destPath)
-			}
-
 		default:
 			log.Warn().Msgf("Skipping extraction - unknown node type %s for %s", node.NodeType, node.Path)
 		}

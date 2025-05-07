@@ -70,7 +70,7 @@ func TestCreateAndExpandArchive_LargeFiles(t *testing.T) {
 	}
 
 	// Verify the archive was created (basic check)
-	archiveFilePath := filepath.Join(archiveDir, "index.clip")
+	archiveFilePath := filepath.Join(archiveDir, options.IndexID, "index.clip")
 	fileInfo, err := os.Stat(archiveFilePath)
 	if err != nil {
 		t.Fatalf("Failed to stat archive file %s: %v", archiveFilePath, err)
