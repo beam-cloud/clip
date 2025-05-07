@@ -852,7 +852,7 @@ func newIndexReader(ctx context.Context, opts ClipV2ArchiverOptions) (io.ReadClo
 			config.WithRegion(opts.S3Config.Region),
 			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 				opts.S3Config.AccessKey,
-				opts.S3Config.SecretAccessKey,
+				opts.S3Config.SecretKey,
 				"",
 			)),
 		)
