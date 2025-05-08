@@ -1,10 +1,9 @@
-package storage
+package clipv2
 
 import (
 	"fmt"
 
 	common "github.com/beam-cloud/clip/pkg/common"
-	clipv2 "github.com/beam-cloud/clip/pkg/v2"
 )
 
 func validateReadFileInput(node *common.ClipNode, off int64, dest []byte) error {
@@ -22,7 +21,7 @@ func validateReadFileInput(node *common.ClipNode, off int64, dest []byte) error 
 	return nil
 }
 
-func getChunkIndices(startOffset int64, chunkSize int64, endOffset int64, chunks clipv2.ClipV2ArchiveChunkList) (int64, int64, error) {
+func getChunkIndices(startOffset int64, chunkSize int64, endOffset int64, chunks ClipV2ArchiveChunkList) (int64, int64, error) {
 	startChunk := startOffset / chunkSize
 	endChunk := (endOffset - 1) / chunkSize
 	if endChunk+1 > int64(len(chunks)) || startChunk < 0 || startChunk > endChunk {

@@ -1,4 +1,4 @@
-package storage
+package clipv2
 
 import (
 	"fmt"
@@ -8,14 +8,13 @@ import (
 
 	common "github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
-	clipv2 "github.com/beam-cloud/clip/pkg/v2"
 	log "github.com/rs/zerolog/log"
 )
 
 type LocalClipStorage struct {
 	archivePath string
 	chunkDir    string
-	metadata    *clipv2.ClipV2Archive
+	metadata    *ClipV2Archive
 }
 
 type LocalClipStorageOpts struct {
@@ -23,7 +22,7 @@ type LocalClipStorageOpts struct {
 	ChunkDir    string
 }
 
-func NewLocalClipStorage(metadata *clipv2.ClipV2Archive, opts LocalClipStorageOpts) (*LocalClipStorage, error) {
+func NewLocalClipStorage(metadata *ClipV2Archive, opts LocalClipStorageOpts) (*LocalClipStorage, error) {
 	if opts.ArchivePath == "" {
 		return nil, fmt.Errorf("archive path cannot be empty")
 	}
@@ -63,7 +62,7 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 
 	for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
 		chunk := chunks[chunkIdx]
-		chunkPath := filepath.Join(s.chunkDir, chunk+clipv2.ChunkSuffix)
+		chunkPath := filepath.Join(s.chunkDir, chunk+ChunkSuffix)
 		chunkFile, err := os.Open(chunkPath)
 		if err != nil {
 			return 0, fmt.Errorf("failed to open chunk file %s: %w", chunkPath, err)

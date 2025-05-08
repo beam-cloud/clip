@@ -1,4 +1,4 @@
-package storage
+package clipv2
 
 import (
 	"fmt"
@@ -10,11 +10,10 @@ import (
 	"github.com/jarcoal/httpmock"
 
 	common "github.com/beam-cloud/clip/pkg/common"
-	clipv2 "github.com/beam-cloud/clip/pkg/v2"
 )
 
 func TestCDNClipStorage_ReadFile_InputValidation(t *testing.T) {
-	s := NewCDNClipStorage("http://mockcdn", "testimg", &clipv2.ClipV2Archive{})
+	s := NewCDNClipStorage("http://mockcdn", "testimg", &ClipV2Archive{})
 
 	t.Run("NotFileNode", func(t *testing.T) {
 		node := &common.ClipNode{NodeType: common.DirNode} // Not a FileNode
@@ -319,8 +318,8 @@ func TestCDNClipStorage_ReadFile_Scenarios(t *testing.T) {
 			httpmock.ActivateNonDefault(mockClient)
 			defer httpmock.DeactivateAndReset()
 
-			metadata := &clipv2.ClipV2Archive{
-				Header: clipv2.ClipV2ArchiveHeader{
+			metadata := &ClipV2Archive{
+				Header: ClipV2ArchiveHeader{
 					ChunkSize: tc.metadataChunkSizeToUse,
 				},
 				Chunks: tc.metadataChunkHashesToUse,

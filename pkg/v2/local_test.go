@@ -1,4 +1,4 @@
-package storage
+package clipv2
 
 import (
 	"os"
@@ -8,8 +8,6 @@ import (
 	"testing"
 
 	common "github.com/beam-cloud/clip/pkg/common"
-	clipv2 "github.com/beam-cloud/clip/pkg/v2"
-	// log "github.com/rs/zerolog/log" // Not strictly needed for test assertions
 )
 
 // Helper to create a temporary directory and populate it with chunk files
@@ -22,7 +20,7 @@ func createTempChunkDirWithFiles(t *testing.T, chunkFiles map[string][]byte) (ch
 
 	for hash, content := range chunkFiles {
 		// Ensure chunk files are named according to how LocalClipStorage expects to find them
-		chunkFilePath := filepath.Join(tempDir, hash+clipv2.ChunkSuffix)
+		chunkFilePath := filepath.Join(tempDir, hash+ChunkSuffix)
 		err := os.WriteFile(chunkFilePath, content, 0644)
 		if err != nil {
 			os.RemoveAll(tempDir) // cleanup partially created
@@ -247,8 +245,8 @@ func TestLocalClipStorage_ReadFile_Scenarios(t *testing.T) {
 			chunkDir, dirCleanup := createTempChunkDirWithFiles(t, tc.chunkFilesToCreate)
 			defer dirCleanup()
 
-			metadata := &clipv2.ClipV2Archive{
-				Header: clipv2.ClipV2ArchiveHeader{
+			metadata := &ClipV2Archive{
+				Header: ClipV2ArchiveHeader{
 					ChunkSize: tc.metadataChunkSizeToUse,
 				},
 				Chunks: tc.metadataChunkHashesToUse,

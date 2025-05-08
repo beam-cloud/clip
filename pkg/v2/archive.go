@@ -66,7 +66,7 @@ type ClipV2ArchiverOptions struct {
 	OutputPath   string
 	MaxChunkSize int64
 	IndexID      string
-	StorageMode  StorageMode
+	StorageType  common.StorageMode
 	S3Config     common.S3StorageInfo
 }
 
@@ -98,7 +98,7 @@ func (ca *ClipV2Archiver) Create() error {
 		return fmt.Errorf("SourcePath must be specified")
 	}
 
-	if ca.StorageMode == StorageModeLocal {
+	if ca.StorageType == common.StorageModeLocal {
 		if err := os.MkdirAll(ca.LocalPath, 0755); err != nil {
 			return fmt.Errorf("failed to create archive local directory %s: %w", ca.LocalPath, err)
 		}
@@ -152,6 +152,16 @@ func (ca *ClipV2Archiver) Create() error {
 	}
 
 	copy(header.StartBytes[:], common.ClipFileStartBytes)
+
+	// FIXME: This logic is setup weirdly. The storage type should
+	// be stored regardless and length shouldn't be used as the determining
+	// factor on mounting.
+	if ca.StorageType == common.StorageModeS3 {
+		var storageType [12]byte
+		copy(storageType[:], []byte(ca.StorageType))
+		header.StorageInfoLength = int64(len(ca.StorageType))
+		header.StorageInfoType = storageType
+	}
 
 	encodedHeaderBytes, err := ca.EncodeHeader(&header)
 	if err != nil {
@@ -788,7 +798,7 @@ func (ca *ClipV2Archiver) extractIndex(header *ClipV2ArchiveHeader, file io.Read
 }
 
 func (ca *ClipV2Archiver) newChunkWriter(ctx context.Context, chunkKey string) (io.WriteCloser, error) {
-	if ca.StorageMode == StorageModeS3 {
+	if ca.StorageType == common.StorageModeS3 {
 		chunkWriter, err := newS3ChunkWriter(ctx, ca.S3Config, chunkKey)
 		return chunkWriter, err
 	}
@@ -803,7 +813,7 @@ func (ca *ClipV2Archiver) newChunkWriter(ctx context.Context, chunkKey string) (
 }
 
 func (ca *ClipV2Archiver) newIndexWriter(ctx context.Context) (io.WriteCloser, error) {
-	if ca.StorageMode == StorageModeS3 {
+	if ca.StorageType == common.StorageModeS3 {
 		indexKey := fmt.Sprintf("%s/index.clip", ca.IndexID)
 		return newS3ChunkWriter(ctx, ca.S3Config, indexKey)
 	}
@@ -830,8 +840,8 @@ func (ca *ClipV2Archiver) newIndexReader(ctx context.Context) (io.ReadCloser, er
 		err           error
 	)
 
-	switch ca.StorageMode {
-	case StorageModeS3:
+	switch ca.StorageType {
+	case common.StorageModeS3:
 		// Get file from S3
 		cfg, err := config.LoadDefaultConfig(ctx,
 			config.WithRegion(ca.S3Config.Region),

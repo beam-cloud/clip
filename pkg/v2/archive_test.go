@@ -58,7 +58,7 @@ func TestCreateAndExpandArchive_LargeFiles(t *testing.T) {
 
 	// Create the archive
 	options := CreateOptions{
-		IndexID:    "1234567890",
+		ImageID:    "1234567890",
 		SourcePath: tempDir,
 		LocalPath:  archiveDir,
 		Verbose:    false,
@@ -71,7 +71,7 @@ func TestCreateAndExpandArchive_LargeFiles(t *testing.T) {
 	}
 
 	// Verify the archive was created (basic check)
-	archiveFilePath := filepath.Join(archiveDir, options.IndexID, "index.clip")
+	archiveFilePath := filepath.Join(archiveDir, options.ImageID, "index.clip")
 	fileInfo, err := os.Stat(archiveFilePath)
 	if err != nil {
 		t.Fatalf("Failed to stat archive file %s: %v", archiveFilePath, err)
@@ -88,7 +88,7 @@ func TestCreateAndExpandArchive_LargeFiles(t *testing.T) {
 
 	// Expand the archive
 	err = ExpandLocalArchive(context.Background(), ExtractOptions{
-		IndexID:    "1234567890",
+		ImageID:    "1234567890",
 		LocalPath:  archiveDir,
 		OutputPath: extractDir,
 		Verbose:    true,
@@ -116,7 +116,7 @@ func TestCreateAndExpandArchive_LargeFiles(t *testing.T) {
 
 	// Calculate the checksums of original files and check those against the index.clip file
 	archive, err := ExtractMetadata(ExtractOptions{
-		IndexID:    "1234567890",
+		ImageID:    "1234567890",
 		LocalPath:  archiveDir,
 		OutputPath: extractDir,
 		Verbose:    true,
@@ -201,7 +201,7 @@ func BenchmarkCreateArchiveFromOCIImage(b *testing.B) {
 
 		// Create the archive
 		options := CreateOptions{
-			IndexID:    "1234567890",
+			ImageID:    "1234567890",
 			SourcePath: tmpDir,
 			LocalPath:  archiveDir,
 			Verbose:    false,

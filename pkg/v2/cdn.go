@@ -1,4 +1,4 @@
-package storage
+package clipv2
 
 import (
 	"fmt"
@@ -7,7 +7,6 @@ import (
 
 	common "github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
-	clipv2 "github.com/beam-cloud/clip/pkg/v2"
 )
 
 type CDNClipStorage struct {
@@ -15,11 +14,11 @@ type CDNClipStorage struct {
 	imageID    string
 	chunkPath  string
 	clipPath   string
-	metadata   *clipv2.ClipV2Archive
+	metadata   *ClipV2Archive
 	client     *http.Client
 }
 
-func NewCDNClipStorage(cdnURL, imageID string, metadata *clipv2.ClipV2Archive) *CDNClipStorage {
+func NewCDNClipStorage(cdnURL, imageID string, metadata *ClipV2Archive) *CDNClipStorage {
 	chunkPath := fmt.Sprintf("%s/chunks", imageID)
 	clipPath := fmt.Sprintf("%s/index.clip", imageID)
 
