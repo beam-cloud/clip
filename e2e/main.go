@@ -72,7 +72,7 @@ func s3() {
 		ExtractOptions:        extractOptions,
 		ContentCache:          nil,
 		ContentCacheAvailable: false,
-		MountPath:             "/tmp/clipfs",
+		MountPoint:            "/tmp/clipfs",
 	}
 
 	_, _, server, err := clipv2.MountArchive(context.Background(), mountOptions)

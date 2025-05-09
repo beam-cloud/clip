@@ -41,7 +41,7 @@ type MountOptions struct {
 	ExtractOptions
 	ContentCache          clip.ContentCache
 	ContentCacheAvailable bool
-	MountPath             string
+	MountPoint            string
 }
 
 // Create Archive
@@ -84,10 +84,10 @@ func ExpandLocalArchive(ctx context.Context, options ExtractOptions) error {
 
 // Mount a clip archive to a directory
 func MountArchive(ctx context.Context, options MountOptions) (func() error, <-chan error, *fuse.Server, error) {
-	log.Info().Msgf("Mounting archive %s to %s", options.ImageID, options.MountPath)
+	log.Info().Msgf("Mounting archive %s to %s", options.ImageID, options.MountPoint)
 
-	if _, err := os.Stat(options.MountPath); os.IsNotExist(err) {
-		err = os.MkdirAll(options.MountPath, 0755)
+	if _, err := os.Stat(options.MountPoint); os.IsNotExist(err) {
+		err = os.MkdirAll(options.MountPoint, 0755)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to create mount point directory: %v", err)
 		}
@@ -128,7 +128,7 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		AttrTimeout:  &attrTimeout,
 		EntryTimeout: &entryTimeout,
 	}
-	server, err := fuse.NewServer(fs.NewNodeFS(root, fsOptions), options.MountPath, &fuse.MountOptions{
+	server, err := fuse.NewServer(fs.NewNodeFS(root, fsOptions), options.MountPoint, &fuse.MountOptions{
 		MaxBackground:        512,
 		DisableXAttrs:        true,
 		EnableSymlinkCaching: true,
