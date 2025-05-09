@@ -12,7 +12,6 @@ require (
 	github.com/google/go-containerregistry v0.19.1
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.5.1
-	github.com/karrick/godirwalk v1.17.0
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
 	github.com/testcontainers/testcontainers-go v0.35.0
@@ -95,10 +94,13 @@ require (
 )
 
 require (
+	github.com/aws/aws-sdk-go v1.55.7
 	github.com/containerd/stargz-snapshotter/estargz v0.16.3 // indirect
 	github.com/docker/cli v27.5.0+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.8.2 // indirect
+	github.com/jarcoal/httpmock v1.4.0
+	github.com/karrick/godirwalk v1.17.0
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/vbatts/tar-split v0.11.6 // indirect
 	golang.org/x/sync v0.10.0 // indirect

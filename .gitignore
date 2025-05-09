@@ -6,3 +6,5 @@ testfs/*
 *.clip
 *.rclip
 *.pprof
+test
+.vscode/launch.json
