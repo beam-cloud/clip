@@ -4,11 +4,18 @@ import (
 	"errors"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
+
+type ClipStorageMetadata interface {
+	Insert(node *common.ClipNode)
+	Get(path string) *common.ClipNode
+	ListDirectory(path string) []fuse.DirEntry
+}
 
 type ClipStorageInterface interface {
 	ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error)
-	Metadata() *common.ClipArchiveMetadata
+	Metadata() ClipStorageMetadata
 	CachedLocally() bool
 	Cleanup() error
 }

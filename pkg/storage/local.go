@@ -42,7 +42,7 @@ func (s *LocalClipStorage) CachedLocally() bool {
 	return true
 }
 
-func (s *LocalClipStorage) Metadata() *common.ClipArchiveMetadata {
+func (s *LocalClipStorage) Metadata() ClipStorageMetadata {
 	return s.metadata
 }
 
