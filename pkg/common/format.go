@@ -59,6 +59,7 @@ type S3StorageInfo struct {
 	ForcePathStyle bool
 	AccessKey      string
 	SecretKey      string
+	Public         bool
 }
 
 func (ssi S3StorageInfo) Type() string {
