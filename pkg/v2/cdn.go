@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 
 	common "github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
+	"github.com/beam-cloud/ristretto"
 )
 
 type CDNClipStorage struct {
@@ -18,7 +18,7 @@ type CDNClipStorage struct {
 	metadata     *ClipV2Archive
 	contentCache ContentCache
 	client       *http.Client
-	localCache   sync.Map
+	localCache   *ristretto.Cache[string, []byte]
 }
 
 type CDNClipStorageOpts struct {
@@ -27,19 +27,32 @@ type CDNClipStorageOpts struct {
 	contentCache ContentCache
 }
 
-func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) *CDNClipStorage {
+func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNClipStorage, error) {
 	chunkPath := fmt.Sprintf("%s/chunks", opts.imageID)
 	clipPath := fmt.Sprintf("%s/index.clip", opts.imageID)
 
-	return &CDNClipStorage{
-		imageID:    opts.imageID,
-		cdnBaseURL: opts.cdnURL,
-		chunkPath:  chunkPath,
-		clipPath:   clipPath,
-		metadata:   metadata,
-		client:     &http.Client{},
-		localCache: sync.Map{},
+	// 5gb cache
+	maxCost := 5 * 1e9
+
+	cache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
+		NumCounters: 1e7,
+		MaxCost:     int64(maxCost),
+		BufferItems: 64,
+	})
+	if err != nil {
+		return nil, err
 	}
+
+	return &CDNClipStorage{
+		imageID:      opts.imageID,
+		cdnBaseURL:   opts.cdnURL,
+		chunkPath:    chunkPath,
+		clipPath:     clipPath,
+		metadata:     metadata,
+		contentCache: opts.contentCache,
+		client:       &http.Client{},
+		localCache:   cache,
+	}, nil
 }
 
 // ReadFile reads a file from chunks stored in a CDN. It applies the requested offset to the
@@ -54,16 +67,18 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		return 0, nil
 	}
 
-	// First check if the file is in the local cache. Only small files are cached locally.
-	if cachedContent, ok := s.localCache.Load(node.ContentHash); ok {
-		content := cachedContent.([]byte)
-		n := copy(dest, content[off:])
+	// Best case, the file is small and is already in the local cache.
+	if cachedContent, ok := s.localCache.Get(node.ContentHash); ok {
+		n := copy(dest, cachedContent[off:off+int64(len(dest))])
 		return n, nil
 	}
 
 	var (
-		chunkSize   = s.metadata.Header.ChunkSize
-		chunks      = s.metadata.Chunks
+		chunkSize = s.metadata.Header.ChunkSize
+		chunks    = s.metadata.Chunks
+
+		// If the file is small read the full file so that it can be cached locally.
+		// Then return the requested offset
 		startOffset = node.DataPos
 		endOffset   = startOffset + int64(len(dest))
 	)
@@ -76,12 +91,29 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	requiredChunks := chunks[startChunk : endChunk+1]
 	chunkBaseUrl := fmt.Sprintf("%s/%s", s.cdnBaseURL, s.chunkPath)
 
+	totalBytesRead := 0
+
 	// When the file is not in the local cache, read through the content cache.
 	// Internally, the content cache will read the entire file and return it. If
 	// the file is small enough, it will be cached in the local cache.
-	totalBytesRead, err := s.contentCache.GetFileFromChunks(requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, dest)
-	if err != nil {
-		return 0, err
+	if s.contentCache != nil {
+		if len(dest) > 50*1024*1024 {
+			totalBytesRead, err = s.contentCache.GetFileFromChunksWithOffset(requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, off, dest)
+			if err != nil {
+				return 0, err
+			}
+			return totalBytesRead, nil
+		} else {
+			// If the file is small, read the entire file and cache it locally.
+			tempDest := make([]byte, endOffset-startOffset)
+			totalBytesRead, err = s.contentCache.GetFileFromChunks(requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, tempDest)
+			if err != nil {
+				return 0, err
+			}
+			s.localCache.Set(node.ContentHash, tempDest, int64(len(tempDest)))
+			copy(dest, tempDest[off:off+int64(len(dest))])
+			return totalBytesRead, nil
+		}
 	}
 
 	if totalBytesRead == 0 {
@@ -91,17 +123,6 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		if err != nil {
 			return 0, err
 		}
-	}
-
-	if len(dest) < 10*1024*1024 {
-		// Cache small files locally
-		s.localCache.Store(node.ContentHash, dest)
-	}
-
-	if off != 0 {
-		// Reduce the destination buffer by the offset
-		dest = dest[off:]
-		totalBytesRead -= int(off)
 	}
 
 	return totalBytesRead, nil

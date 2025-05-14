@@ -39,14 +39,17 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.28.2 // indirect
 	github.com/aws/smithy-go v1.21.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/platforms v0.2.1 // indirect
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dgraph-io/ristretto v1.0.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/docker v28.0.1+incompatible // indirect
 	github.com/docker/go-connections v0.5.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -95,6 +98,7 @@ require (
 
 require (
 	github.com/aws/aws-sdk-go v1.55.7
+	github.com/beam-cloud/ristretto v0.0.0-20241013204426-d1403e359aa2
 	github.com/containerd/stargz-snapshotter/estargz v0.16.3 // indirect
 	github.com/docker/cli v27.5.0+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect

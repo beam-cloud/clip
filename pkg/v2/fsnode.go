@@ -55,9 +55,9 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	childPath := path.Join(n.clipNode.Path, name)
 
 	// Check the cache
-	n.filesystem.cacheMutex.RLock()
+	n.filesystem.lookupCacheMutex.RLock()
 	entry, found := n.filesystem.lookupCache[childPath]
-	n.filesystem.cacheMutex.RUnlock()
+	n.filesystem.lookupCacheMutex.RUnlock()
 	if found {
 		n.log("Lookup cache hit for name: %s", childPath)
 		out.Attr = entry.attr
@@ -78,9 +78,9 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	childInode := n.NewInode(ctx, &FSNode{filesystem: n.filesystem, clipNode: child, attr: child.Attr}, fs.StableAttr{Mode: child.Attr.Mode, Ino: child.Attr.Ino})
 
 	// Cache the result
-	n.filesystem.cacheMutex.Lock()
+	n.filesystem.lookupCacheMutex.Lock()
 	n.filesystem.lookupCache[childPath] = &lookupCacheEntry{inode: childInode, attr: child.Attr}
-	n.filesystem.cacheMutex.Unlock()
+	n.filesystem.lookupCacheMutex.Unlock()
 
 	return childInode, fs.OK
 }
@@ -110,26 +110,9 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	// Attempt to read from cache first
-	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
-		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
-		if cacheErr == nil {
-			nRead = copy(dest, content)
-		} else {
-			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
-			if err != nil {
-				return nil, syscall.EIO
-			}
-
-			go func() {
-				n.filesystem.CacheFile(n)
-			}()
-		}
-	} else {
-		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
-		if err != nil {
-			return nil, syscall.EIO
-		}
+	nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
+	if err != nil {
+		return nil, syscall.EIO
 	}
 
 	// Null-terminate immediately after last read byte if buffer is not fully filled

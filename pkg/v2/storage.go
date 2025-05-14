@@ -41,7 +41,10 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	log.Info().Msgf("Storage type %s", storageType)
 	switch storageType {
 	case common.StorageModeS3:
-		storage = NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID})
+		storage, err = NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID})
+		if err != nil {
+			return nil, err
+		}
 		log.Info().Msgf("Created CDN clip storage")
 	case common.StorageModeLocal:
 		storage, err = NewLocalClipStorage(metadata, LocalClipStorageOpts{
