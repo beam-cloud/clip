@@ -98,7 +98,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	// the file is small enough, it will be cached in the local cache.
 	if s.contentCache != nil {
 		if len(dest) > 50*1024*1024 {
-			totalBytesRead, err = s.contentCache.GetFileFromChunksWithOffset(requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, off, dest)
+			totalBytesRead, err = s.contentCache.GetFileFromChunksWithOffset(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, off, dest)
 			if err != nil {
 				return 0, err
 			}
@@ -106,7 +106,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		} else {
 			// If the file is small, read the entire file and cache it locally.
 			tempDest := make([]byte, endOffset-startOffset)
-			totalBytesRead, err = s.contentCache.GetFileFromChunks(requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, tempDest)
+			totalBytesRead, err = s.contentCache.GetFileFromChunks(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, tempDest)
 			if err != nil {
 				return 0, err
 			}
