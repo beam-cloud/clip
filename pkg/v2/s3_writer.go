@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go/aws"
 	common "github.com/beam-cloud/clip/pkg/common"
 )
@@ -19,6 +20,7 @@ type S3ChunkWriter struct {
 	uploader *manager.Uploader
 	bucket   string
 	key      string
+	public   bool
 
 	buffer *bytes.Buffer
 }
@@ -56,6 +58,7 @@ func newS3ChunkWriter(ctx context.Context, s3Config common.S3StorageInfo, overri
 		bucket:   s3Config.Bucket,
 		key:      key,
 		buffer:   new(bytes.Buffer),
+		public:   s3Config.Public,
 	}, nil
 }
 
@@ -68,11 +71,17 @@ func (s *S3ChunkWriter) Write(p []byte) (int, error) {
 }
 
 func (s *S3ChunkWriter) Close() error {
-	_, err := s.uploader.Upload(s.ctx, &s3.PutObjectInput{
+	pubObjInput := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(s.key),
 		Body:   s.buffer,
-	})
+	}
+
+	if s.public {
+		pubObjInput.ACL = types.ObjectCannedACLPublicRead
+	}
+
+	_, err := s.uploader.Upload(s.ctx, pubObjInput)
 
 	if err != nil {
 		return fmt.Errorf("failed to upload S3 object %s/%s using manager.Uploader: %w", s.bucket, s.key, err)
