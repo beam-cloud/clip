@@ -105,10 +105,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 	// Determine readable length
 	maxReadable := n.clipNode.DataLen - off
-	readLen := int64(len(dest))
-	if readLen > maxReadable {
-		readLen = maxReadable
-	}
+	readLen := min(int64(len(dest)), maxReadable)
 
 	var nRead int
 	var err error
