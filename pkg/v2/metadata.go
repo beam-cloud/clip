@@ -27,11 +27,9 @@ type ClipV2ArchiveHeader struct {
 	ChunkSize             int64
 }
 
-type ClipV2ArchiveChunkList []string
-
 type ClipV2Archive struct {
 	Header      ClipV2ArchiveHeader
-	Chunks      ClipV2ArchiveChunkList
+	Chunks      []string
 	Index       *btree.BTreeG[*common.ClipNode]
 	StorageInfo common.ClipStorageInfo
 }

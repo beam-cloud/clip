@@ -112,7 +112,7 @@ func (ca *ClipV2Archiver) Create() error {
 	}
 	log.Info().Msgf("Index populated with %d items", index.Len())
 
-	var chunkNames ClipV2ArchiveChunkList
+	var chunkNames []string
 	chunkNames, err := ca.writePackedChunks(index)
 	if err != nil {
 		return fmt.Errorf("failed to write packed chunks: %w", err)
@@ -460,7 +460,7 @@ func (ca *ClipV2Archiver) EncodeIndex(index *btree.BTreeG[*common.ClipNode]) ([]
 }
 
 // EncodeChunkList encodes the chunk list into a byte slice.
-func (ca *ClipV2Archiver) EncodeChunkList(chunkList ClipV2ArchiveChunkList) ([]byte, error) {
+func (ca *ClipV2Archiver) EncodeChunkList(chunkList []string) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
 	if err := enc.Encode(chunkList); err != nil {
@@ -743,7 +743,7 @@ func (ca *ClipV2Archiver) extractHeader(file io.Reader) (*ClipV2ArchiveHeader, e
 }
 
 // extractChunkList extracts the chunk list from the given file.
-func (ca *ClipV2Archiver) extractChunkList(file io.Reader, chunkListLength int64) (ClipV2ArchiveChunkList, error) {
+func (ca *ClipV2Archiver) extractChunkList(file io.Reader, chunkListLength int64) ([]string, error) {
 	if chunkListLength < 0 {
 		return nil, fmt.Errorf("invalid negative chunk list length in header: %d", chunkListLength)
 	}
@@ -755,7 +755,7 @@ func (ca *ClipV2Archiver) extractChunkList(file io.Reader, chunkListLength int64
 		}
 	}
 
-	chunkList := ClipV2ArchiveChunkList{}
+	var chunkList []string
 	if err := gob.NewDecoder(bytes.NewReader(chunkListBytes)).Decode(&chunkList); err != nil {
 		return nil, fmt.Errorf("error decoding chunk list: %w", err)
 	}

@@ -6,7 +6,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/beam-cloud/clip/pkg/clip"
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -39,9 +38,10 @@ type ExtractOptions struct {
 
 type MountOptions struct {
 	ExtractOptions
-	ContentCache          clip.ContentCache
+	ContentCache          ContentCache
 	ContentCacheAvailable bool
 	MountPoint            string
+	CacheLocally          bool
 }
 
 // Create Archive
@@ -116,7 +116,7 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := clip.NewFileSystem(storage, clip.ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
+	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}

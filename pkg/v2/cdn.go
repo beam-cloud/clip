@@ -4,31 +4,41 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 
 	common "github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
 )
 
 type CDNClipStorage struct {
-	cdnBaseURL string
-	imageID    string
-	chunkPath  string
-	clipPath   string
-	metadata   *ClipV2Archive
-	client     *http.Client
+	cdnBaseURL   string
+	imageID      string
+	chunkPath    string
+	clipPath     string
+	metadata     *ClipV2Archive
+	contentCache ContentCache
+	client       *http.Client
+	localCache   sync.Map
 }
 
-func NewCDNClipStorage(cdnURL, imageID string, metadata *ClipV2Archive) *CDNClipStorage {
-	chunkPath := fmt.Sprintf("%s/chunks", imageID)
-	clipPath := fmt.Sprintf("%s/index.clip", imageID)
+type CDNClipStorageOpts struct {
+	imageID      string
+	cdnURL       string
+	contentCache ContentCache
+}
+
+func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) *CDNClipStorage {
+	chunkPath := fmt.Sprintf("%s/chunks", opts.imageID)
+	clipPath := fmt.Sprintf("%s/index.clip", opts.imageID)
 
 	return &CDNClipStorage{
-		imageID:    imageID,
-		cdnBaseURL: cdnURL,
+		imageID:    opts.imageID,
+		cdnBaseURL: opts.cdnURL,
 		chunkPath:  chunkPath,
 		clipPath:   clipPath,
 		metadata:   metadata,
 		client:     &http.Client{},
+		localCache: sync.Map{},
 	}
 }
 
@@ -44,12 +54,18 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		return 0, nil
 	}
 
+	// First check if the file is in the local cache. Only small files are cached locally.
+	if cachedContent, ok := s.localCache.Load(node.ContentHash); ok {
+		content := cachedContent.([]byte)
+		n := copy(dest, content[off:])
+		return n, nil
+	}
+
 	var (
-		chunkSize      = s.metadata.Header.ChunkSize
-		chunks         = s.metadata.Chunks
-		startOffset    = node.DataPos + off
-		endOffset      = startOffset + int64(len(dest))
-		totalBytesRead = 0
+		chunkSize   = s.metadata.Header.ChunkSize
+		chunks      = s.metadata.Chunks
+		startOffset = node.DataPos
+		endOffset   = startOffset + int64(len(dest))
 	)
 
 	startChunk, endChunk, err := getChunkIndices(startOffset, chunkSize, endOffset, chunks)
@@ -58,9 +74,43 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	}
 
 	requiredChunks := chunks[startChunk : endChunk+1]
+	chunkBaseUrl := fmt.Sprintf("%s/%s", s.cdnBaseURL, s.chunkPath)
 
+	// When the file is not in the local cache, read through the content cache.
+	// Internally, the content cache will read the entire file and return it. If
+	// the file is small enough, it will be cached in the local cache.
+	totalBytesRead, err := s.contentCache.GetFileFromChunks(requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, dest)
+	if err != nil {
+		return 0, err
+	}
+
+	if totalBytesRead == 0 {
+		// Worst case, the file is not local and the content cache is unavailable.
+		// In this case the file is read from the CDN and the result is cached locally.
+		totalBytesRead, err = ReadFileChunks(s.client, requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, dest)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	if len(dest) < 10*1024*1024 {
+		// Cache small files locally
+		s.localCache.Store(node.ContentHash, dest)
+	}
+
+	if off != 0 {
+		// Reduce the destination buffer by the offset
+		dest = dest[off:]
+		totalBytesRead -= int(off)
+	}
+
+	return totalBytesRead, nil
+}
+
+func ReadFileChunks(httpClient *http.Client, requiredChunks []string, chunkBaseUrl string, chunkSize int64, startOffset int64, endOffset int64, dest []byte) (int, error) {
+	totalBytesRead := 0
 	for chunkIdx, chunk := range requiredChunks {
-		chunkURL := fmt.Sprintf("%s/%s/%s", s.cdnBaseURL, s.chunkPath, chunk)
+		chunkURL := fmt.Sprintf("%s/%s", chunkBaseUrl, chunk)
 
 		// Make a range request to the CDN to get the portion of the required chunk
 		// [ . . . h h ] [ h h h h h ] [ h h . . . ]
@@ -84,7 +134,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		}
 		req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d", startRange, endRange))
 
-		resp, err := s.client.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return 0, err
 		}
@@ -112,7 +162,6 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 
 		totalBytesRead += n
 	}
-
 	return totalBytesRead, nil
 }
 

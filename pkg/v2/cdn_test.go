@@ -13,7 +13,7 @@ import (
 )
 
 func TestCDNClipStorage_ReadFile_InputValidation(t *testing.T) {
-	s := NewCDNClipStorage("http://mockcdn", "testimg", &ClipV2Archive{})
+	s := NewCDNClipStorage(&ClipV2Archive{}, CDNClipStorageOpts{imageID: "testimg", cdnURL: "http://mockcdn"})
 
 	t.Run("NotFileNode", func(t *testing.T) {
 		node := &common.ClipNode{NodeType: common.DirNode} // Not a FileNode
@@ -325,7 +325,7 @@ func TestCDNClipStorage_ReadFile_Scenarios(t *testing.T) {
 				Chunks: tc.metadataChunkHashesToUse,
 			}
 
-			s := NewCDNClipStorage(cdnBaseURL, tc.imageIDToUse, metadata)
+			s := NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: cdnBaseURL, imageID: tc.imageIDToUse})
 			s.client = mockClient
 
 			node := &common.ClipNode{

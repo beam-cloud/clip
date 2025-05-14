@@ -21,7 +21,7 @@ func validateReadFileInput(node *common.ClipNode, off int64, dest []byte) error 
 	return nil
 }
 
-func getChunkIndices(startOffset int64, chunkSize int64, endOffset int64, chunks ClipV2ArchiveChunkList) (int64, int64, error) {
+func getChunkIndices(startOffset int64, chunkSize int64, endOffset int64, chunks []string) (int64, int64, error) {
 	startChunk := startOffset / chunkSize
 	endChunk := (endOffset - 1) / chunkSize
 	if endChunk+1 > int64(len(chunks)) || startChunk < 0 || startChunk > endChunk {
