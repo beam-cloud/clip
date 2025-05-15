@@ -55,13 +55,12 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 		bytesReadTotal int64 = 0
 	)
 
-	startChunk, endChunk, err := getChunkIndices(startOffset, chunkSize, endOffset, chunks)
+	requiredChunks, err := getRequiredChunks(startOffset, chunkSize, endOffset, chunks)
 	if err != nil {
 		return 0, err
 	}
 
-	for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
-		chunk := chunks[chunkIdx]
+	for i, chunk := range requiredChunks {
 		chunkPath := filepath.Join(s.chunkDir, chunk+ChunkSuffix)
 		chunkFile, err := os.Open(chunkPath)
 		if err != nil {
@@ -69,7 +68,7 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 		}
 
 		var offsetInChunk int64
-		if chunkIdx == startChunk {
+		if i == 0 {
 			offsetInChunk = startOffset % chunkSize
 		} else {
 			offsetInChunk = 0

@@ -21,11 +21,13 @@ func validateReadFileInput(node *common.ClipNode, off int64, dest []byte) error 
 	return nil
 }
 
-func getChunkIndices(startOffset int64, chunkSize int64, endOffset int64, chunks []string) (int64, int64, error) {
+func getRequiredChunks(startOffset int64, chunkSize int64, endOffset int64, chunks []string) ([]string, error) {
 	startChunk := startOffset / chunkSize
 	endChunk := (endOffset - 1) / chunkSize
 	if endChunk+1 > int64(len(chunks)) || startChunk < 0 || startChunk > endChunk {
-		return 0, 0, fmt.Errorf("invalid chunk indices for %d chunks: startChunk %d, endChunk %d", len(chunks), startChunk, endChunk+1)
+		return nil, fmt.Errorf("invalid chunk indices for %d chunks: startChunk %d, endChunk %d", len(chunks), startChunk, endChunk+1)
 	}
-	return startChunk, endChunk, nil
+
+	requiredChunks := chunks[startChunk : endChunk+1]
+	return requiredChunks, nil
 }

@@ -14,10 +14,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-type cacheEvent struct {
-	node *FSNode
-}
-
 type FSNode struct {
 	fs.Inode
 	filesystem   *ClipFileSystem
@@ -108,11 +104,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	n.log("Read called with offset: %v", off)
 
 	// Immediately return zeroed buffer if read is completely beyond EOF or file is empty
-	if off >= n.clipNode.DataLen || n.clipNode.DataLen == 0 {
-		return fuse.ReadResultData(dest[:0]), fs.OK
-	}
-
-	if len(dest) == 0 {
+	if off >= n.clipNode.DataLen || n.clipNode.DataLen == 0 || len(dest) == 0 {
 		return fuse.ReadResultData(dest[:0]), fs.OK
 	}
 
@@ -127,9 +119,10 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	if err != nil {
 		return fuse.ReadResultData(dest[:0]), syscall.EIO
 	}
+
 	// Best case, the file is small and is already in the local cache.
 	if cachedContent, ok := n.localCache.Get(n.clipNode.ContentHash); ok {
-		log.Printf("ReadFile local cache hit for hash: %s", n.clipNode.ContentHash)
+		log.Printf("Read local cache hit for hash: %s", n.clipNode.ContentHash)
 
 		if off+int64(len(dest)) <= int64(len(cachedContent)) {
 			return fuse.ReadResultData(cachedContent[off : off+int64(len(dest))]), fs.OK
