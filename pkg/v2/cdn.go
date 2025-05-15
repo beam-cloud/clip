@@ -20,6 +20,7 @@ type CDNClipStorage struct {
 	contentCache ContentCache
 	client       *http.Client
 	localCache   *ristretto.Cache[string, []byte]
+	chunkCache   *ristretto.Cache[string, []byte]
 }
 
 type CDNClipStorageOpts struct {
@@ -28,16 +29,13 @@ type CDNClipStorageOpts struct {
 	contentCache ContentCache
 }
 
-func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNClipStorage, error) {
+func NewCDNClipStorage(metadata *ClipV2Archive, localCache *ristretto.Cache[string, []byte], opts CDNClipStorageOpts) (*CDNClipStorage, error) {
 	chunkPath := fmt.Sprintf("%s/chunks", opts.imageID)
 	clipPath := fmt.Sprintf("%s/index.clip", opts.imageID)
 
-	// 5gb cache
-	maxCost := 5 * 1e9
-
-	cache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
+	chunkCache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
 		NumCounters: 1e7,
-		MaxCost:     int64(maxCost),
+		MaxCost:     1 * 1e9,
 		BufferItems: 64,
 	})
 	if err != nil {
@@ -52,42 +50,14 @@ func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNCl
 		metadata:     metadata,
 		contentCache: opts.contentCache,
 		client:       &http.Client{},
-		localCache:   cache,
+		localCache:   localCache,
+		chunkCache:   chunkCache,
 	}, nil
 }
 
 // ReadFile reads a file from chunks stored in a CDN. It applies the requested offset to the
 // clip node's start offset and begins reading len(destination buffer) bytes from that point.
 func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
-	err := validateReadFileInput(node, off, dest)
-	if err != nil {
-		return 0, err
-	}
-
-	log.Printf("ReadFile called on hash: %s with offset: %v, readLen: %v", node.ContentHash, off, len(dest))
-	if len(dest) == 0 {
-		return 0, nil
-	}
-
-	// Best case, the file is small and is already in the local cache.
-	if cachedContent, ok := s.localCache.Get(node.ContentHash); ok {
-		log.Printf("ReadFile local cache hit for hash: %s", node.ContentHash)
-
-		if off+int64(len(dest)) <= int64(len(cachedContent)) {
-			n := copy(dest, cachedContent[off:off+int64(len(dest))])
-			return n, nil
-		} else if off < int64(len(cachedContent)) {
-			n := copy(dest, cachedContent[off:])
-			log.Printf("ReadFile partial local cache hit for hash: %s, read %d/%d bytes", node.ContentHash, n, len(dest))
-			return n, nil
-		}
-		// If we reach here, the offset is beyond the cached content,
-		// so we fall through to the regular read path
-		log.Printf("ReadFile local cache hit but offset %d is beyond cached content length %d for hash: %s",
-			off, len(cachedContent), node.ContentHash)
-	}
-	log.Printf("ReadFile local cache miss for hash: %s", node.ContentHash)
-
 	var (
 		chunkSize = s.metadata.Header.ChunkSize
 		chunks    = s.metadata.Chunks
@@ -142,14 +112,26 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 			log.Printf("ReadFile small file, content cache hit for hash: %s", node.ContentHash)
 			return n, nil
 		}
-	} else {
-		log.Printf("ReadFile no content cache for hash: %s", node.ContentHash)
 	}
 
 	if totalBytesRead == 0 {
-		// Worst case, the file is not local and the content cache is unavailable.
-		// In this case the file is read from the CDN and the result is cached locally.
-		totalBytesRead, err = ReadFileChunks(s.client, requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, dest)
+		// If the file is not cached and couldn't be read through any cache, read from CDN
+		startOffset = off
+		endOffset = off + int64(len(dest))
+		startChunk, endChunk, err = getChunkIndices(startOffset, chunkSize, endOffset, chunks)
+		if err != nil {
+			return 0, err
+		}
+		requiredChunks = chunks[startChunk : endChunk+1]
+
+		totalBytesRead, err = ReadFileChunks(s.client, ReadFileChunkRequest{
+			RequiredChunks: requiredChunks,
+			ChunkBaseUrl:   chunkBaseUrl,
+			ChunkSize:      chunkSize,
+			StartOffset:    startOffset,
+			EndOffset:      endOffset,
+			ChunkCache:     s.chunkCache,
+		}, dest)
 		if err != nil {
 			return 0, err
 		}
@@ -159,10 +141,19 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	return totalBytesRead, nil
 }
 
-func ReadFileChunks(httpClient *http.Client, requiredChunks []string, chunkBaseUrl string, chunkSize int64, startOffset int64, endOffset int64, dest []byte) (int, error) {
+type ReadFileChunkRequest struct {
+	RequiredChunks []string
+	ChunkBaseUrl   string
+	ChunkSize      int64
+	StartOffset    int64
+	EndOffset      int64
+	ChunkCache     *ristretto.Cache[string, []byte]
+}
+
+func ReadFileChunks(httpClient *http.Client, chunkReq ReadFileChunkRequest, dest []byte) (int, error) {
 	totalBytesRead := 0
-	for chunkIdx, chunk := range requiredChunks {
-		chunkURL := fmt.Sprintf("%s/%s", chunkBaseUrl, chunk)
+	for chunkIdx, chunk := range chunkReq.RequiredChunks {
+		chunkURL := fmt.Sprintf("%s/%s", chunkReq.ChunkBaseUrl, chunk)
 
 		// Make a range request to the CDN to get the portion of the required chunk
 		// [ . . . h h ] [ h h h h h ] [ h h . . . ]
@@ -170,14 +161,32 @@ func ReadFileChunks(httpClient *http.Client, requiredChunks []string, chunkBaseU
 		// (start, end, or both)
 
 		startRange := int64(0)
-		endRange := chunkSize - 1
+		endRange := chunkReq.ChunkSize - 1
 
 		if chunkIdx == 0 {
-			startRange = startOffset % chunkSize
+			startRange = chunkReq.StartOffset % chunkReq.ChunkSize
 		}
 
-		if chunkIdx == len(requiredChunks)-1 {
-			endRange = (endOffset - 1) % chunkSize
+		if chunkIdx == len(chunkReq.RequiredChunks)-1 {
+			endRange = (chunkReq.EndOffset - 1) % chunkReq.ChunkSize
+		}
+
+		destOffset := int64(0)
+		if chunkIdx > 0 {
+			// Calculate where in the destination buffer this result belongs
+			// by multiplying the chunk index by the chunk size and subtracting
+			// the start offset modulo the chunk size because the start offset
+			// may not be aligned with the chunk boundary
+			destOffset = (int64(chunkIdx) * chunkReq.ChunkSize) - (chunkReq.StartOffset % chunkReq.ChunkSize)
+		}
+
+		bytesToRead := endRange - startRange + 1
+
+		// Check if the chunk is locally cached
+		if content, ok := chunkReq.ChunkCache.Get(chunkURL); ok {
+			copy(dest[destOffset:destOffset+bytesToRead], content)
+			totalBytesRead += len(content)
+			continue
 		}
 
 		req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
@@ -195,17 +204,6 @@ func ReadFileChunks(httpClient *http.Client, requiredChunks []string, chunkBaseU
 		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
 			return 0, fmt.Errorf("unexpected status code %d", resp.StatusCode)
 		}
-
-		destOffset := int64(0)
-		if chunkIdx > 0 {
-			// Calculate where in the destination buffer this result belongs
-			// by multiplying the chunk index by the chunk size and subtracting
-			// the start offset modulo the chunk size because the start offset
-			// may not be aligned with the chunk boundary
-			destOffset = (int64(chunkIdx) * chunkSize) - (startOffset % chunkSize)
-		}
-
-		bytesToRead := endRange - startRange + 1
 
 		n, err := io.ReadFull(resp.Body, dest[destOffset:destOffset+bytesToRead])
 		if err != nil {

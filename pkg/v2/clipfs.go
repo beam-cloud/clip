@@ -6,6 +6,7 @@ import (
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
+	"github.com/beam-cloud/ristretto"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -41,7 +42,7 @@ type ContentCache interface {
 	GetFileFromChunksWithOffset(hash string, chunks []string, chunkBaseUrl string, chunkSize int64, startOffset int64, endOffset int64, reqOffset int64, dest []byte) (int, error)
 }
 
-func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*ClipFileSystem, error) {
+func NewFileSystem(s storage.ClipStorageInterface, localCache *ristretto.Cache[string, []byte], opts ClipFileSystemOpts) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
 		storage:               s,
 		verbose:               opts.Verbose,
@@ -51,16 +52,18 @@ func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*Cl
 		options:               opts,
 	}
 
-	metadata := s.Metadata()
-	rootNode := metadata.Get("/")
+	rootNode := s.Metadata().Get("/")
 	if rootNode == nil {
 		return nil, common.ErrMissingArchiveRoot
 	}
 
 	cfs.root = &FSNode{
-		filesystem: cfs,
-		attr:       rootNode.Attr,
-		clipNode:   rootNode,
+		filesystem:   cfs,
+		attr:         rootNode.Attr,
+		clipNode:     rootNode,
+		localCache:   localCache,
+		contentCache: cfs.contentCache,
+		storage:      s,
 	}
 
 	return cfs, nil

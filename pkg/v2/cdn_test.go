@@ -10,10 +10,19 @@ import (
 	"github.com/jarcoal/httpmock"
 
 	common "github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/ristretto"
 )
 
 func TestCDNClipStorage_ReadFile_InputValidation(t *testing.T) {
-	s, err := NewCDNClipStorage(&ClipV2Archive{}, CDNClipStorageOpts{imageID: "testimg", cdnURL: "http://mockcdn"})
+	chunkCache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
+		NumCounters: 1e7,
+		MaxCost:     1 * 1e9,
+		BufferItems: 64,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create CDNClipStorage: %v", err)
+	}
+	s, err := NewCDNClipStorage(&ClipV2Archive{}, chunkCache, CDNClipStorageOpts{imageID: "testimg", cdnURL: "http://mockcdn"})
 	if err != nil {
 		t.Fatalf("Failed to create CDNClipStorage: %v", err)
 	}
@@ -328,7 +337,15 @@ func TestCDNClipStorage_ReadFile_Scenarios(t *testing.T) {
 				Chunks: tc.metadataChunkHashesToUse,
 			}
 
-			s, err := NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: cdnBaseURL, imageID: tc.imageIDToUse})
+			chunkCache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
+				NumCounters: 1e7,
+				MaxCost:     1 * 1e9,
+				BufferItems: 64,
+			})
+			if err != nil {
+				t.Fatalf("Failed to create CDNClipStorage: %v", err)
+			}
+			s, err := NewCDNClipStorage(metadata, chunkCache, CDNClipStorageOpts{cdnURL: cdnBaseURL, imageID: tc.imageIDToUse})
 			if err != nil {
 				t.Fatalf("Failed to create CDNClipStorage: %v", err)
 			}

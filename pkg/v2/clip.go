@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/ristretto"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	log "github.com/rs/zerolog/log"
@@ -106,18 +107,28 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		return nil, nil, nil, fmt.Errorf("invalid archive: %v", err)
 	}
 
+	localCache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
+		NumCounters: 1e7,
+		MaxCost:     1 * 1e9,
+		BufferItems: 64,
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("could not create local cache: %v", err)
+	}
+
 	storage, err := NewClipStorage(ClipStorageOpts{
 		ImageID:      options.ImageID,
 		ArchivePath:  options.LocalPath,
 		ChunkPath:    options.OutputPath,
 		Metadata:     metadata,
 		ContentCache: options.ContentCache,
+		LocalCache:   localCache,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
+	clipfs, err := NewFileSystem(storage, localCache, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}

@@ -8,15 +8,24 @@ import (
 	"syscall"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/clip/pkg/storage"
+	"github.com/beam-cloud/ristretto"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
+type cacheEvent struct {
+	node *FSNode
+}
+
 type FSNode struct {
 	fs.Inode
-	filesystem *ClipFileSystem
-	clipNode   *common.ClipNode
-	attr       fuse.Attr
+	filesystem   *ClipFileSystem
+	clipNode     *common.ClipNode
+	attr         fuse.Attr
+	localCache   *ristretto.Cache[string, []byte]
+	contentCache ContentCache
+	storage      storage.ClipStorageInterface
 }
 
 func (n *FSNode) log(format string, v ...interface{}) {
@@ -103,6 +112,10 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		return fuse.ReadResultData(dest[:0]), fs.OK
 	}
 
+	if len(dest) == 0 {
+		return fuse.ReadResultData(dest[:0]), fs.OK
+	}
+
 	// Determine readable length
 	maxReadable := n.clipNode.DataLen - off
 	readLen := min(int64(len(dest)), maxReadable)
@@ -110,7 +123,18 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	n.log("Read called on hash: %s with offset: %v, readLen: %v", n.clipNode.ContentHash, off, readLen)
+	err = validateReadFileInput(n.clipNode, off, dest)
+	if err != nil {
+		return fuse.ReadResultData(dest[:0]), syscall.EIO
+	}
+	// Best case, the file is small and is already in the local cache.
+	if cachedContent, ok := n.localCache.Get(n.clipNode.ContentHash); ok {
+		log.Printf("ReadFile local cache hit for hash: %s", n.clipNode.ContentHash)
+
+		if off+int64(len(dest)) <= int64(len(cachedContent)) {
+			return fuse.ReadResultData(cachedContent[off : off+int64(len(dest))]), fs.OK
+		}
+	}
 
 	nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 	if err != nil {

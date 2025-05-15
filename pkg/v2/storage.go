@@ -5,6 +5,7 @@ import (
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
+	"github.com/beam-cloud/ristretto"
 	log "github.com/rs/zerolog/log"
 )
 
@@ -22,6 +23,7 @@ type ClipStorageOpts struct {
 	CacheLocally bool
 	ContentCache ContentCache
 	Metadata     *ClipV2Archive
+	LocalCache   *ristretto.Cache[string, []byte]
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
@@ -42,7 +44,7 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	log.Info().Msgf("Storage type %s", storageType)
 	switch storageType {
 	case common.StorageModeS3:
-		storage, err = NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID, contentCache: opts.ContentCache})
+		storage, err = NewCDNClipStorage(metadata, opts.LocalCache, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID, contentCache: opts.ContentCache})
 		if err != nil {
 			return nil, err
 		}
