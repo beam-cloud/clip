@@ -125,14 +125,22 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 			// If the file is small, read the entire file and cache it locally.
 			log.Printf("ReadFile small file, content cache hit for hash: %s", node.ContentHash)
 			tempDest := make([]byte, endOffset-startOffset)
-			totalBytesRead, err = s.contentCache.GetFileFromChunks(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, tempDest)
+			_, err = s.contentCache.GetFileFromChunks(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, tempDest)
 			if err != nil {
 				return 0, err
 			}
 			s.localCache.Set(node.ContentHash, tempDest, int64(len(tempDest)))
-			copy(dest, tempDest[off:off+int64(len(dest))])
+
+			// Make sure we don't overflow the dest buffer
+			bytesToCopy := min(int64(len(dest)), int64(len(tempDest))-off)
+			if bytesToCopy <= 0 {
+				return 0, nil // Nothing to copy
+			}
+			log.Printf("ReadFile small file, content cache hit for hash: %s, bytesToCopy: %d", node.ContentHash, bytesToCopy)
+
+			n := copy(dest, tempDest[off:off+bytesToCopy])
 			log.Printf("ReadFile small file, content cache hit for hash: %s", node.ContentHash)
-			return totalBytesRead, nil
+			return n, nil
 		}
 	} else {
 		log.Printf("ReadFile no content cache for hash: %s", node.ContentHash)
