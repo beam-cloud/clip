@@ -72,8 +72,19 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	// Best case, the file is small and is already in the local cache.
 	if cachedContent, ok := s.localCache.Get(node.ContentHash); ok {
 		log.Printf("ReadFile local cache hit for hash: %s", node.ContentHash)
-		n := copy(dest, cachedContent[off:off+int64(len(dest))])
-		return n, nil
+
+		if off+int64(len(dest)) <= int64(len(cachedContent)) {
+			n := copy(dest, cachedContent[off:off+int64(len(dest))])
+			return n, nil
+		} else if off < int64(len(cachedContent)) {
+			n := copy(dest, cachedContent[off:])
+			log.Printf("ReadFile partial local cache hit for hash: %s, read %d/%d bytes", node.ContentHash, n, len(dest))
+			return n, nil
+		}
+		// If we reach here, the offset is beyond the cached content,
+		// so we fall through to the regular read path
+		log.Printf("ReadFile local cache hit but offset %d is beyond cached content length %d for hash: %s",
+			off, len(cachedContent), node.ContentHash)
 	}
 	log.Printf("ReadFile local cache miss for hash: %s", node.ContentHash)
 
@@ -84,8 +95,9 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		// If the file is small read the full file so that it can be cached locally.
 		// Then return the requested offset
 		startOffset = node.DataPos
-		endOffset   = startOffset + int64(len(dest))
+		endOffset   = startOffset + node.DataLen
 	)
+	log.Printf("ReadFile hash: %s, size: %d, startOffset: %d, endOffset: %d", node.ContentHash, node.DataLen, startOffset, endOffset)
 
 	startChunk, endChunk, err := getChunkIndices(startOffset, chunkSize, endOffset, chunks)
 	if err != nil {
