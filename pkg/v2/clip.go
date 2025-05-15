@@ -107,10 +107,11 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 	}
 
 	storage, err := NewClipStorage(ClipStorageOpts{
-		ImageID:     options.ImageID,
-		ArchivePath: options.LocalPath,
-		ChunkPath:   options.OutputPath,
-		Metadata:    metadata,
+		ImageID:      options.ImageID,
+		ArchivePath:  options.LocalPath,
+		ChunkPath:    options.OutputPath,
+		Metadata:     metadata,
+		ContentCache: options.ContentCache,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)

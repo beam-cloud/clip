@@ -20,6 +20,7 @@ type ClipStorageOpts struct {
 	ArchivePath  string
 	ChunkPath    string
 	CacheLocally bool
+	ContentCache ContentCache
 	Metadata     *ClipV2Archive
 }
 
@@ -41,7 +42,7 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	log.Info().Msgf("Storage type %s", storageType)
 	switch storageType {
 	case common.StorageModeS3:
-		storage, err = NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID})
+		storage, err = NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID, contentCache: opts.ContentCache})
 		if err != nil {
 			return nil, err
 		}

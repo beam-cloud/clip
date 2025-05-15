@@ -122,6 +122,8 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 			log.Printf("ReadFile small file, content cache hit for hash: %s", node.ContentHash)
 			return totalBytesRead, nil
 		}
+	} else {
+		log.Printf("ReadFile no content cache for hash: %s", node.ContentHash)
 	}
 
 	if totalBytesRead == 0 {
