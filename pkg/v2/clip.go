@@ -107,7 +107,7 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		return nil, nil, nil, fmt.Errorf("invalid archive: %v", err)
 	}
 
-	localCache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
+	chunkCache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
 		NumCounters: 1e7,
 		MaxCost:     1 * 1e9,
 		BufferItems: 64,
@@ -122,13 +122,13 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		ChunkPath:    options.OutputPath,
 		Metadata:     metadata,
 		ContentCache: options.ContentCache,
-		LocalCache:   localCache,
+		ChunkCache:   chunkCache,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := NewFileSystem(storage, localCache, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
+	clipfs, err := NewFileSystem(storage, chunkCache, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}

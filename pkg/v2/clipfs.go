@@ -42,7 +42,7 @@ type ContentCache interface {
 	GetFileFromChunksWithOffset(hash string, chunks []string, chunkBaseUrl string, chunkSize int64, startOffset int64, endOffset int64, reqOffset int64, dest []byte) (int, error)
 }
 
-func NewFileSystem(s storage.ClipStorageInterface, localCache *ristretto.Cache[string, []byte], opts ClipFileSystemOpts) (*ClipFileSystem, error) {
+func NewFileSystem(s storage.ClipStorageInterface, chunkCache *ristretto.Cache[string, []byte], opts ClipFileSystemOpts) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
 		storage:               s,
 		verbose:               opts.Verbose,
@@ -61,7 +61,7 @@ func NewFileSystem(s storage.ClipStorageInterface, localCache *ristretto.Cache[s
 		filesystem:   cfs,
 		attr:         rootNode.Attr,
 		clipNode:     rootNode,
-		localCache:   localCache,
+		chunkCache:   chunkCache,
 		contentCache: cfs.contentCache,
 		storage:      s,
 	}

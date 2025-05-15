@@ -19,7 +19,7 @@ type FSNode struct {
 	filesystem   *ClipFileSystem
 	clipNode     *common.ClipNode
 	attr         fuse.Attr
-	localCache   *ristretto.Cache[string, []byte]
+	chunkCache   *ristretto.Cache[string, []byte]
 	contentCache ContentCache
 	storage      storage.ClipStorageInterface
 }
@@ -115,18 +115,9 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	err = validateReadFileInput(n.clipNode, off, dest)
+	err = validateReadFileInput(n.clipNode, off, dest[:readLen])
 	if err != nil {
 		return fuse.ReadResultData(dest[:0]), syscall.EIO
-	}
-
-	// Best case, the file is small and is already in the local cache.
-	if cachedContent, ok := n.localCache.Get(n.clipNode.ContentHash); ok {
-		log.Printf("Read local cache hit for hash: %s", n.clipNode.ContentHash)
-
-		if off+int64(len(dest)) <= int64(len(cachedContent)) {
-			return fuse.ReadResultData(cachedContent[off : off+int64(len(dest))]), fs.OK
-		}
 	}
 
 	nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
