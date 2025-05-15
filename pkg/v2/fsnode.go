@@ -110,6 +110,8 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
+	n.log("Read called on hash: %s with offset: %v, readLen: %v", n.clipNode.ContentHash, off, readLen)
+
 	nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 	if err != nil {
 		return nil, syscall.EIO

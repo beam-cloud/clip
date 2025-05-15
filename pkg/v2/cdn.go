@@ -3,6 +3,7 @@ package clipv2
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 
 	common "github.com/beam-cloud/clip/pkg/common"
@@ -63,15 +64,18 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		return 0, err
 	}
 
+	log.Printf("ReadFile called on hash: %s with offset: %v, readLen: %v", node.ContentHash, off, len(dest))
 	if len(dest) == 0 {
 		return 0, nil
 	}
 
 	// Best case, the file is small and is already in the local cache.
 	if cachedContent, ok := s.localCache.Get(node.ContentHash); ok {
+		log.Printf("ReadFile local cache hit for hash: %s", node.ContentHash)
 		n := copy(dest, cachedContent[off:off+int64(len(dest))])
 		return n, nil
 	}
+	log.Printf("ReadFile local cache miss for hash: %s", node.ContentHash)
 
 	var (
 		chunkSize = s.metadata.Header.ChunkSize
@@ -98,13 +102,16 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	// the file is small enough, it will be cached in the local cache.
 	if s.contentCache != nil {
 		if len(dest) > 50*1024*1024 {
+			log.Printf("ReadFile large file, content cache hit for hash: %s", node.ContentHash)
 			totalBytesRead, err = s.contentCache.GetFileFromChunksWithOffset(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, off, dest)
 			if err != nil {
 				return 0, err
 			}
+			log.Printf("ReadFile large file, content cache hit for hash: %s", node.ContentHash)
 			return totalBytesRead, nil
 		} else {
 			// If the file is small, read the entire file and cache it locally.
+			log.Printf("ReadFile small file, content cache hit for hash: %s", node.ContentHash)
 			tempDest := make([]byte, endOffset-startOffset)
 			totalBytesRead, err = s.contentCache.GetFileFromChunks(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, startOffset, endOffset, tempDest)
 			if err != nil {
@@ -112,6 +119,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 			}
 			s.localCache.Set(node.ContentHash, tempDest, int64(len(tempDest)))
 			copy(dest, tempDest[off:off+int64(len(dest))])
+			log.Printf("ReadFile small file, content cache hit for hash: %s", node.ContentHash)
 			return totalBytesRead, nil
 		}
 	}
@@ -123,6 +131,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		if err != nil {
 			return 0, err
 		}
+		log.Printf("ReadFile CDN hit for hash: %s", node.ContentHash)
 	}
 
 	return totalBytesRead, nil
