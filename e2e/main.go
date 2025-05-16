@@ -29,24 +29,24 @@ func s3() {
 
 	log.Info().Str("accessKey", accessKey).Str("secretKey", secretKey).Str("bucket", bucket).Str("region", region).Str("endpoint", endpoint).Msg("S3 credentials")
 
-	createOptions := clipv2.CreateOptions{
-		ImageID:    "1234567890",
-		SourcePath: "../test",
-		LocalPath:  "",
-		S3Config: common.S3StorageInfo{
-			Bucket:    bucket,
-			Region:    region,
-			AccessKey: accessKey,
-			SecretKey: secretKey,
-			Endpoint:  endpoint,
-		},
-		Verbose:      false,
-		MaxChunkSize: 0,
-		StorageType:  common.StorageModeS3,
-	}
+	// createOptions := clipv2.CreateOptions{
+	// 	ImageID:    "1234567890",
+	// 	SourcePath: "../test",
+	// 	LocalPath:  "",
+	// 	S3Config: common.S3StorageInfo{
+	// 		Bucket:    bucket,
+	// 		Region:    region,
+	// 		AccessKey: accessKey,
+	// 		SecretKey: secretKey,
+	// 		Endpoint:  endpoint,
+	// 	},
+	// 	Verbose:      false,
+	// 	MaxChunkSize: 0,
+	// 	StorageType:  common.StorageModeS3,
+	// }
 
 	extractOptions := clipv2.ExtractOptions{
-		ImageID:     "1234567890",
+		ImageID:     "39b588f7692f2114",
 		LocalPath:   "",
 		StorageType: common.StorageModeS3,
 		Verbose:     false,
@@ -59,14 +59,14 @@ func s3() {
 		},
 	}
 
-	startTime := time.Now()
-	err := clipv2.CreateArchive(createOptions)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to create archive")
-		os.Exit(1)
-	}
-	duration := time.Since(startTime)
-	log.Info().Msgf("Time taken to create archive: %v", duration)
+	// startTime := time.Now()
+	// err := clipv2.CreateArchive(createOptions)
+	// if err != nil {
+	// 	log.Error().Err(err).Msg("Failed to create archive")
+	// 	os.Exit(1)
+	// }
+	// duration := time.Since(startTime)
+	// log.Info().Msgf("Time taken to create archive: %v", duration)
 
 	mountOptions := clipv2.MountOptions{
 		ExtractOptions:        extractOptions,
