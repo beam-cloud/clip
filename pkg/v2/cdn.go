@@ -106,7 +106,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 			return 0, err
 		}
 
-		log.Info().Str("tempDest", string(tempDest)).Msg("ReadFile small file, content cache hit")
+		log.Info().Str("hash", node.ContentHash).Msg("ReadFile small file, content cache hit")
 	} else {
 		// If the file is not cached and couldn't be read through any cache, read from CDN
 		_, err = ReadFileChunks(s.client, ReadFileChunkRequest{
@@ -131,6 +131,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	// Cache the file in the local cache
 	s.localCache.Set(node.ContentHash, tempDest, int64(len(tempDest)))
 
+	log.Info().Str("tempDest", string(tempDest)).Msg("ReadFile")
 	n := copy(dest, tempDest[off:off+bytesToCopy])
 	log.Info().Str("hash", node.ContentHash).Int("bytesRead", n).Msg("ReadFile")
 	log.Info().Str("bstring", string(dest)).Msg("ReadFile")
