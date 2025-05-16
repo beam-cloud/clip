@@ -124,6 +124,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	if err != nil {
 		return nil, syscall.EIO
 	}
+	log.Printf("ReadFile: Copied %d bytes to destination", nRead)
 
 	// Null-terminate immediately after last read byte if buffer is not fully filled
 	if nRead < len(dest) {
