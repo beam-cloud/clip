@@ -3,8 +3,9 @@ package clipv2
 import (
 	"fmt"
 	"io"
-	"log"
 	"net/http"
+
+	"github.com/rs/zerolog/log"
 
 	common "github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
@@ -60,7 +61,7 @@ func NewCDNClipStorage(metadata *ClipV2Archive, chunkCache *ristretto.Cache[stri
 func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
 	// Best case, the file is small and is already in the local cache.
 	if cachedContent, ok := s.localCache.Get(node.ContentHash); ok {
-		log.Printf("Read local cache hit for hash: %s", node.ContentHash)
+		log.Info().Str("hash", node.ContentHash).Msg("Read local cache hit")
 
 		if off+int64(len(dest)) <= int64(len(cachedContent)) {
 			n := copy(dest, cachedContent[off:off+int64(len(dest))])
@@ -91,7 +92,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		if err != nil {
 			return 0, err
 		}
-		log.Printf("ReadFile large file, content cache hit for hash: %s", node.ContentHash)
+		log.Info().Str("hash", node.ContentHash).Msg("ReadFile large file, content cache hit")
 		return totalBytesRead, nil
 	}
 
@@ -105,7 +106,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 			return 0, err
 		}
 
-		log.Printf("ReadFile small file, content cache hit for hash: %s", node.ContentHash)
+		log.Info().Str("hash", node.ContentHash).Msg("ReadFile small file, content cache hit")
 	} else {
 		// If the file is not cached and couldn't be read through any cache, read from CDN
 		_, err = ReadFileChunks(s.client, ReadFileChunkRequest{
@@ -119,7 +120,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		if err != nil {
 			return 0, err
 		}
-		log.Printf("ReadFile CDN hit for hash: %s", node.ContentHash)
+		log.Info().Str("hash", node.ContentHash).Msg("ReadFile CDN hit")
 	}
 
 	bytesToCopy := min(int64(len(dest)), int64(len(tempDest))-off)
@@ -167,10 +168,10 @@ func ReadFileChunks(httpClient *http.Client, chunkReq ReadFileChunkRequest, dest
 		var chunkBytes []byte
 
 		if content, ok := chunkReq.ChunkCache.Get(chunkURL); ok {
-			log.Printf("ReadFileChunks: Cache hit for chunk %s", chunkURL)
+			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache hit")
 			chunkBytes = content
 		} else {
-			log.Printf("ReadFileChunks: Cache miss for chunk %s, fetching from CDN", chunkURL)
+			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache miss, fetching from CDN")
 			req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
 			if err != nil {
 				return 0, err
