@@ -122,7 +122,6 @@ func (ca *ClipV2Archiver) Create() error {
 	if err != nil {
 		return err
 	}
-	defer indexWriter.Close()
 
 	indexBytes, err := ca.EncodeIndex(index)
 	if err != nil {
@@ -178,6 +177,12 @@ func (ca *ClipV2Archiver) Create() error {
 
 	if _, err := indexWriter.Write(indexBytes); err != nil {
 		return fmt.Errorf("failed to write index data: %w", err)
+	}
+
+	indexWriter.Close()
+	err = indexWriter.WaitForCompletion()
+	if err != nil {
+		return fmt.Errorf("failed to wait for index writer completion: %w", err)
 	}
 
 	log.Info().Msgf("Successfully created index %s (%d nodes, %d chunks) chunks in %s",
@@ -586,12 +591,18 @@ func (ca *ClipV2Archiver) populateIndex(index *btree.BTreeG[*common.ClipNode], s
 	return err
 }
 
+type S3ChunkWriter interface {
+	io.WriteCloser
+	WaitForCompletion() error
+}
+
 // writePackedChunks writes file contents into chunks until the chunk has reached the max chunk size.
 func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode]) ([]string, error) {
 	var (
 		chunkNames []string
 		offset     int64 = 0
 		ctx              = context.Background()
+		uploaders  []S3ChunkWriter
 	)
 
 	chunkNum := 0
@@ -647,8 +658,14 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 		for fileBytesProcessed < int64(node.Attr.Size) {
 			if spaceInBlock <= 0 {
 				// Finalize the current chunk
-				chunkWriter.Close()
+				if err := chunkWriter.Close(); err != nil {
+					f.Close()
+					return nil, fmt.Errorf("failed to close chunk writer: %w", err)
+				}
 				chunkNames = append(chunkNames, chunkName)
+				if s3Writer, ok := chunkWriter.(*s3ChunkWriter); ok {
+					uploaders = append(uploaders, s3Writer)
+				}
 
 				// Start a new chunk
 				chunkNum++
@@ -720,6 +737,16 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 		return nil, fmt.Errorf("failed to close chunk writer: %w", err)
 	}
 	chunkNames = append(chunkNames, chunkName)
+	if s3Writer, ok := chunkWriter.(*s3ChunkWriter); ok {
+		uploaders = append(uploaders, s3Writer)
+	}
+
+	// Wait for all uploads to complete
+	for _, uploader := range uploaders {
+		if err := uploader.WaitForCompletion(); err != nil {
+			return nil, fmt.Errorf("failed to upload chunk: %w", err)
+		}
+	}
 
 	log.Info().Msgf("Finished packing. Total chunks created: %d", len(chunkNames))
 	return chunkNames, nil
@@ -797,7 +824,7 @@ func (ca *ClipV2Archiver) extractIndex(header *ClipV2ArchiveHeader, file io.Read
 	return index, nil
 }
 
-func (ca *ClipV2Archiver) newChunkWriter(ctx context.Context, chunkKey string) (io.WriteCloser, error) {
+func (ca *ClipV2Archiver) newChunkWriter(ctx context.Context, chunkKey string) (S3ChunkWriter, error) {
 	if ca.StorageType == common.StorageModeS3 {
 		chunkWriter, err := newS3ChunkWriter(ctx, ca.S3Config, chunkKey)
 		return chunkWriter, err
@@ -809,10 +836,10 @@ func (ca *ClipV2Archiver) newChunkWriter(ctx context.Context, chunkKey string) (
 		return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 	chunkWriter, err := os.Create(filepath.Join(ca.LocalPath, chunkKey))
-	return chunkWriter, err
+	return &LocalChunkWriter{chunkWriter}, err
 }
 
-func (ca *ClipV2Archiver) newIndexWriter(ctx context.Context) (io.WriteCloser, error) {
+func (ca *ClipV2Archiver) newIndexWriter(ctx context.Context) (S3ChunkWriter, error) {
 	if ca.StorageType == common.StorageModeS3 {
 		indexKey := fmt.Sprintf("%s/index.clip", ca.IndexID)
 		return newS3ChunkWriter(ctx, ca.S3Config, indexKey)
@@ -824,7 +851,7 @@ func (ca *ClipV2Archiver) newIndexWriter(ctx context.Context) (io.WriteCloser, e
 		return nil, fmt.Errorf("failed to create index file %s: %w", indexFilePath, err)
 	}
 
-	return indexFile, nil
+	return &LocalChunkWriter{indexFile}, nil
 }
 
 func newIndex() *btree.BTreeG[*common.ClipNode] {

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/singleflight"
 
 	common "github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
@@ -14,13 +14,13 @@ import (
 )
 
 var (
-	globalChunkCache *ristretto.Cache[string, []byte]
-	chunkLocks       = &sync.Map{}
+	localChunkCache *ristretto.Cache[string, []byte]
+	fetchGroup      = singleflight.Group{}
 )
 
 func init() {
 	var err error
-	globalChunkCache, err = ristretto.NewCache(&ristretto.Config[string, []byte]{
+	localChunkCache, err = ristretto.NewCache(&ristretto.Config[string, []byte]{
 		NumCounters: 1e7,     // number of keys to track frequency of (10M).
 		MaxCost:     1 << 30, // maximum cost of cache (1GB).
 		BufferItems: 64,      // number of keys per Get buffer.
@@ -161,47 +161,43 @@ type ReadFileChunkRequest struct {
 func ReadFileChunks(httpClient *http.Client, chunkReq ReadFileChunkRequest, dest []byte) (int, error) {
 	totalBytesRead := 0
 	for chunkIdx, chunk := range chunkReq.RequiredChunks {
+		var chunkBytes []byte
 		chunkURL := fmt.Sprintf("%s/%s", chunkReq.ChunkBaseUrl, chunk)
 
-		mu, _ := chunkLocks.LoadOrStore(chunkURL, &sync.Mutex{})
-		lock := mu.(*sync.Mutex)
-		lock.Lock()
-
-		var chunkBytes []byte
-
-		if content, ok := globalChunkCache.Get(chunkURL); ok {
-			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache hit after lock")
+		if content, ok := localChunkCache.Get(chunkURL); ok {
+			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Local chunk cache hit")
 			chunkBytes = content
 		} else {
-			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache miss, fetching from CDN")
-			req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
-			if err != nil {
-				lock.Unlock()
-				return 0, err
-			}
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				lock.Unlock()
-				return 0, err
-			}
+			v, err, _ := fetchGroup.Do(chunkURL, func() (any, error) {
+				log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache miss, fetching from CDN")
+				req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
+				if err != nil {
+					return nil, err
+				}
+				resp, err := httpClient.Do(req)
+				if err != nil {
+					return nil, err
+				}
 
-			if resp.StatusCode != http.StatusOK {
+				if resp.StatusCode != http.StatusOK {
+					resp.Body.Close()
+					return nil, fmt.Errorf("unexpected status code %d when fetching chunk %s", resp.StatusCode, chunkURL)
+				}
+
+				fullChunkBytes, err := io.ReadAll(resp.Body)
 				resp.Body.Close()
-				lock.Unlock()
-				return 0, fmt.Errorf("unexpected status code %d when fetching chunk %s", resp.StatusCode, chunkURL)
-			}
-
-			fullChunkBytes, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
+				if err != nil {
+					return nil, err
+				}
+				localChunkCache.Set(chunkURL, fullChunkBytes, int64(len(fullChunkBytes)))
+				log.Info().Str("chunk", chunkURL).Int("size", len(fullChunkBytes)).Msg("ReadFileChunks: Fetched and cached chunk from CDN")
+				return fullChunkBytes, nil
+			})
 			if err != nil {
-				lock.Unlock()
 				return 0, err
 			}
-			globalChunkCache.Set(chunkURL, fullChunkBytes, int64(len(fullChunkBytes)))
-			chunkBytes = fullChunkBytes
-			log.Info().Str("chunk", chunkURL).Int("size", len(fullChunkBytes)).Msg("ReadFileChunks: Fetched and cached chunk from CDN")
+			chunkBytes = v.([]byte)
 		}
-		lock.Unlock()
 
 		startRangeInChunk := int64(0)
 		endRangeInChunk := chunkReq.ChunkSize - 1
@@ -245,11 +241,3 @@ func (s *CDNClipStorage) Metadata() storage.ClipStorageMetadata {
 func (s *CDNClipStorage) Cleanup() error {
 	return nil
 }
-
-// Helper function min (if not available, e.g. not Go 1.21+)
-// func min(a, b int64) int64 {
-// 	if a < b {
-// 		return a
-// 	}
-// 	return b
-// }

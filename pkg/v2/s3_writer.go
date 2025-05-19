@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -15,7 +14,7 @@ import (
 	common "github.com/beam-cloud/clip/pkg/common"
 )
 
-type S3ChunkWriter struct {
+type s3ChunkWriter struct {
 	ctx      context.Context
 	uploader *manager.Uploader
 	bucket   string
@@ -23,9 +22,10 @@ type S3ChunkWriter struct {
 	public   bool
 
 	buffer *bytes.Buffer
+	done   chan error
 }
 
-func newS3ChunkWriter(ctx context.Context, s3Config common.S3StorageInfo, overrideKey string) (io.WriteCloser, error) {
+func newS3ChunkWriter(ctx context.Context, s3Config common.S3StorageInfo, overrideKey string) (S3ChunkWriter, error) {
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(s3Config.Region),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
@@ -52,17 +52,18 @@ func newS3ChunkWriter(ctx context.Context, s3Config common.S3StorageInfo, overri
 		key = overrideKey
 	}
 
-	return &S3ChunkWriter{
+	return &s3ChunkWriter{
 		ctx:      ctx,
 		uploader: uploader,
 		bucket:   s3Config.Bucket,
 		key:      key,
 		buffer:   new(bytes.Buffer),
 		public:   s3Config.Public,
+		done:     make(chan error, 1),
 	}, nil
 }
 
-func (s *S3ChunkWriter) Write(p []byte) (int, error) {
+func (s *s3ChunkWriter) Write(p []byte) (int, error) {
 	n, err := s.buffer.Write(p)
 	if err != nil {
 		return n, fmt.Errorf("failed to write to internal buffer: %w", err)
@@ -70,7 +71,7 @@ func (s *S3ChunkWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (s *S3ChunkWriter) Close() error {
+func (s *s3ChunkWriter) Close() error {
 	pubObjInput := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(s.key),
@@ -81,11 +82,14 @@ func (s *S3ChunkWriter) Close() error {
 		pubObjInput.ACL = types.ObjectCannedACLPublicRead
 	}
 
-	_, err := s.uploader.Upload(s.ctx, pubObjInput)
-
-	if err != nil {
-		return fmt.Errorf("failed to upload S3 object %s/%s using manager.Uploader: %w", s.bucket, s.key, err)
-	}
+	go func() {
+		_, err := s.uploader.Upload(s.ctx, pubObjInput)
+		s.done <- err
+	}()
 
 	return nil
+}
+
+func (s *s3ChunkWriter) WaitForCompletion() error {
+	return <-s.done
 }
