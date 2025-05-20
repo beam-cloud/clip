@@ -40,7 +40,7 @@ type ContentCache interface {
 	StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error)
 	GetFileFromChunks(hash string, chunks []string, chunkBaseUrl string, chunkSize int64, startOffset int64, endOffset int64, dest []byte) (int, error)
 	GetFileFromChunksWithOffset(hash string, chunks []string, chunkBaseUrl string, chunkSize int64, startOffset int64, endOffset int64, reqOffset int64, dest []byte) (int, error)
-	WarmChunks(chunks []string) error
+	WarmChunks(chunks []string, chunkBaseURL string) error
 }
 
 func NewFileSystem(s storage.ClipStorageInterface, chunkCache *ristretto.Cache[string, []byte], opts ClipFileSystemOpts) (*ClipFileSystem, error) {
