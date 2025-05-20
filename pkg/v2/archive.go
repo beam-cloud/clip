@@ -32,7 +32,6 @@ import (
 // Define chunking constants
 const (
 	DefaultMaxChunkSize = 32 * 1024 * 1024 // 32MB
-	FileReadBufferSize  = 64 * 1024        // 64KB
 	ChunkSuffix         = ".cblock"
 	HeaderLenSize       = 8
 )
@@ -623,7 +622,7 @@ func (ca *ClipV2Archiver) writePackedChunks(index *btree.BTreeG[*common.ClipNode
 	})
 
 	spaceInBlock := ca.chunkSize
-	fileReadBuffer := make([]byte, FileReadBufferSize)
+	fileReadBuffer := make([]byte, ca.chunkSize)
 	for _, node := range filesToProcess {
 		if node.Attr.Size == 0 {
 			node.DataPos = offset

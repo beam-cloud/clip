@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	localChunkCache *ristretto.Cache[string, []byte]
-	fetchGroup      = singleflight.Group{}
+	localChunkCache       *ristretto.Cache[string, []byte]
+	fetchGroup            = singleflight.Group{}
+	contentCacheReadGroup = singleflight.Group{}
 )
 
 func init() {
@@ -112,17 +113,27 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		return totalBytesRead, nil
 	}
 
-	tempDest := make([]byte, fileEnd-fileStart)
+	var tempDest []byte
 
 	if s.contentCache != nil {
-		// If the file is small, read the entire file and cache it locally.
-		_, err = s.contentCache.GetFileFromChunks(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, fileStart, fileEnd, tempDest)
+		res, err, _ := contentCacheReadGroup.Do(node.ContentHash, func() (interface{}, error) {
+			data := make([]byte, fileEnd-fileStart)
+			_, fetchErr := s.contentCache.GetFileFromChunks(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, fileStart, fileEnd, data)
+			if fetchErr != nil {
+				return nil, fetchErr
+			}
+			return data, nil
+		})
+
 		if err != nil {
 			return 0, err
 		}
 
-		log.Info().Str("hash", node.ContentHash).Msg("ReadFile small file, content cache hit")
+		tempDest = res.([]byte)
+
+		log.Info().Str("hash", node.ContentHash).Msg("ReadFile small file, content cache hit via singleflight")
 	} else {
+		tempDest = make([]byte, fileEnd-fileStart)
 		// If the file is not cached and couldn't be read through any cache, read from CDN
 		_, err = ReadFileChunks(s.client, ReadFileChunkRequest{
 			RequiredChunks: requiredChunks,
