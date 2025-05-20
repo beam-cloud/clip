@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/singleflight"
 
 	common "github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
@@ -15,7 +15,7 @@ import (
 
 var (
 	localChunkCache *ristretto.Cache[string, []byte]
-	chunkLocks      = &sync.Map{}
+	fetchGroup      = singleflight.Group{}
 )
 
 func init() {
@@ -164,48 +164,41 @@ func ReadFileChunks(httpClient *http.Client, chunkReq ReadFileChunkRequest, dest
 		var chunkBytes []byte
 		chunkURL := fmt.Sprintf("%s/%s", chunkReq.ChunkBaseUrl, chunk)
 
-		mu, _ := chunkLocks.LoadOrStore(chunkURL, &sync.Mutex{})
-		lock := mu.(*sync.Mutex)
-		lock.Lock()
-
 		if content, ok := localChunkCache.Get(chunkURL); ok {
-			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache hit after lock")
+			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Local chunk cache hit")
 			chunkBytes = content
 		} else {
-			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache miss, fetching from CDN")
-			req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
+			v, err, _ := fetchGroup.Do(chunkURL, func() (any, error) {
+				log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache miss, fetching from CDN")
+				req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
+				if err != nil {
+					return nil, err
+				}
+				resp, err := httpClient.Do(req)
+				if err != nil {
+					return nil, err
+				}
 
-			if err != nil {
-				lock.Unlock()
-				return 0, err
-			}
+				if resp.StatusCode != http.StatusOK {
+					resp.Body.Close()
+					return nil, fmt.Errorf("unexpected status code %d when fetching chunk %s", resp.StatusCode, chunkURL)
+				}
 
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				lock.Unlock()
-				return 0, err
-			}
-
-			if resp.StatusCode != http.StatusOK {
+				fullChunkBytes, err := io.ReadAll(resp.Body)
 				resp.Body.Close()
-				lock.Unlock()
-				return 0, fmt.Errorf("unexpected status code %d when fetching chunk %s", resp.StatusCode, chunkURL)
-			}
-
-			fullChunkBytes, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-
+				if err != nil {
+					return nil, err
+				}
+				localChunkCache.Set(chunkURL, fullChunkBytes, int64(len(fullChunkBytes)))
+				log.Info().Str("chunk", chunkURL).Int("size", len(fullChunkBytes)).Msg("ReadFileChunks: Fetched and cached chunk from CDN")
+				return fullChunkBytes, nil
+			})
 			if err != nil {
-				lock.Unlock()
 				return 0, err
 			}
-
-			localChunkCache.Set(chunkURL, fullChunkBytes, int64(len(fullChunkBytes)))
-			chunkBytes = fullChunkBytes
-			log.Info().Str("chunk", chunkURL).Int("size", len(fullChunkBytes)).Msg("ReadFileChunks: Fetched and cached chunk from CDN")
+			chunkBytes = v.([]byte)
 		}
 
-		lock.Unlock()
 		startRangeInChunk := int64(0)
 		endRangeInChunk := chunkReq.ChunkSize - 1
 
