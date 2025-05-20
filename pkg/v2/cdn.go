@@ -22,9 +22,9 @@ var (
 func init() {
 	var err error
 	localChunkCache, err = ristretto.NewCache(&ristretto.Config[string, []byte]{
-		NumCounters: 1e7,     // number of keys to track frequency of (10M).
-		MaxCost:     1 << 30, // maximum cost of cache (1GB).
-		BufferItems: 64,      // number of keys per Get buffer.
+		NumCounters: 1e7,      // number of keys to track frequency of (10M).
+		MaxCost:     10 << 30, // maximum cost of cache (10GB).
+		BufferItems: 64,       // number of keys per Get buffer.
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize global chunk cache")
