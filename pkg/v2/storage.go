@@ -2,6 +2,7 @@ package clipv2
 
 import (
 	"errors"
+	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
@@ -17,13 +18,15 @@ type ClipStorageInterface interface {
 }
 
 type ClipStorageOpts struct {
-	ImageID      string
-	ArchivePath  string
-	ChunkPath    string
-	CacheLocally bool
-	ContentCache ContentCache
-	Metadata     *ClipV2Archive
-	ChunkCache   *ristretto.Cache[string, []byte]
+	ImageID                 string
+	ArchivePath             string
+	ChunkPath               string
+	CacheLocally            bool
+	ContentCache            ContentCache
+	Metadata                *ClipV2Archive
+	ChunkCache              *ristretto.Cache[string, []byte]
+	ChunkPriorityCallback   func(chunks []string) error
+	ChunkPrioritySampleTime time.Duration
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
@@ -44,7 +47,7 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	log.Info().Msgf("Storage type %s", storageType)
 	switch storageType {
 	case common.StorageModeS3:
-		storage, err = NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID, contentCache: opts.ContentCache})
+		storage, err = NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID, contentCache: opts.ContentCache, chunkPriorityCallback: opts.ChunkPriorityCallback, chunkPrioritySampleTime: opts.ChunkPrioritySampleTime})
 		if err != nil {
 			return nil, err
 		}

@@ -107,5 +107,5 @@ require (
 	github.com/karrick/godirwalk v1.17.0
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/vbatts/tar-split v0.11.6 // indirect
-	golang.org/x/sync v0.10.0 // indirect
+	golang.org/x/sync v0.10.0
 )

@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/singleflight"
@@ -17,6 +20,7 @@ var (
 	localChunkCache       *ristretto.Cache[string, []byte]
 	fetchGroup            = singleflight.Group{}
 	contentCacheReadGroup = singleflight.Group{}
+	httpClient            = &http.Client{}
 )
 
 func init() {
@@ -29,23 +33,38 @@ func init() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize global chunk cache")
 	}
+
+	// Client configured for quick reads from a CDN.
+	httpClient = &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     10 * time.Second,
+		},
+	}
 }
 
 type CDNClipStorage struct {
-	cdnBaseURL   string
-	imageID      string
-	chunkPath    string
-	clipPath     string
-	metadata     *ClipV2Archive
-	contentCache ContentCache
-	client       *http.Client
-	localCache   *ristretto.Cache[string, []byte]
+	cdnBaseURL         string
+	imageID            string
+	chunkPath          string
+	clipPath           string
+	metadata           *ClipV2Archive
+	contentCache       ContentCache
+	client             *http.Client
+	localCache         *ristretto.Cache[string, []byte]
+	trackChunkAccess   bool
+	chunkAccessOrder   map[string]int
+	chunkAccessOrderMu sync.Mutex
 }
 
 type CDNClipStorageOpts struct {
-	imageID      string
-	cdnURL       string
-	contentCache ContentCache
+	imageID                 string
+	cdnURL                  string
+	contentCache            ContentCache
+	chunkPriorityCallback   func(chunks []string) error
+	chunkPrioritySampleTime time.Duration
 }
 
 func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNClipStorage, error) {
@@ -61,16 +80,36 @@ func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNCl
 		return nil, err
 	}
 
-	return &CDNClipStorage{
-		imageID:      opts.imageID,
-		cdnBaseURL:   opts.cdnURL,
-		chunkPath:    chunkPath,
-		clipPath:     clipPath,
-		metadata:     metadata,
-		contentCache: opts.contentCache,
-		client:       &http.Client{},
-		localCache:   localCache,
-	}, nil
+	cdnStorage := &CDNClipStorage{
+		imageID:            opts.imageID,
+		cdnBaseURL:         opts.cdnURL,
+		chunkPath:          chunkPath,
+		clipPath:           clipPath,
+		metadata:           metadata,
+		contentCache:       opts.contentCache,
+		client:             &http.Client{},
+		localCache:         localCache,
+		trackChunkAccess:   opts.chunkPriorityCallback != nil,
+		chunkAccessOrder:   map[string]int{},
+		chunkAccessOrderMu: sync.Mutex{},
+	}
+
+	if opts.chunkPriorityCallback != nil {
+		go func() {
+			timer := time.NewTicker(opts.chunkPrioritySampleTime)
+			defer timer.Stop()
+			for range timer.C {
+				cdnStorage.chunkAccessOrderMu.Lock()
+				err := opts.chunkPriorityCallback(cdnStorage.orderedChunks())
+				if err != nil {
+					log.Error().Err(err).Msg("Failure while calling chunk priority callback")
+				}
+				cdnStorage.chunkAccessOrderMu.Unlock()
+			}
+		}()
+	}
+
+	return cdnStorage, nil
 }
 
 // ReadFile reads a file from chunks stored in a CDN. It applies the requested offset to the
@@ -96,6 +135,10 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	requiredChunks, err := getRequiredChunks(fileStart, chunkSize, fileEnd, chunks)
 	if err != nil {
 		return 0, err
+	}
+
+	if s.trackChunkAccess {
+		s.updateChunkOrder(requiredChunks)
 	}
 
 	chunkBaseUrl := fmt.Sprintf("%s/%s", s.cdnBaseURL, s.chunkPath)
@@ -131,11 +174,11 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 
 		tempDest = res.([]byte)
 
-		log.Info().Str("hash", node.ContentHash).Msg("ReadFile small file, content cache hit via singleflight")
+		log.Info().Str("hash", node.ContentHash).Msg("ReadFile small file, content cache hit")
 	} else {
 		tempDest = make([]byte, fileEnd-fileStart)
 		// If the file is not cached and couldn't be read through any cache, read from CDN
-		_, err = ReadFileChunks(s.client, ReadFileChunkRequest{
+		_, err = ReadFileChunks(ReadFileChunkRequest{
 			RequiredChunks: requiredChunks,
 			ChunkBaseUrl:   chunkBaseUrl,
 			ChunkSize:      chunkSize,
@@ -169,45 +212,23 @@ type ReadFileChunkRequest struct {
 	EndOffset      int64
 }
 
-func ReadFileChunks(httpClient *http.Client, chunkReq ReadFileChunkRequest, dest []byte) (int, error) {
+func ReadFileChunks(chunkReq ReadFileChunkRequest, dest []byte) (int, error) {
 	totalBytesRead := 0
 	for chunkIdx, chunk := range chunkReq.RequiredChunks {
-		var chunkBytes []byte
+		var (
+			chunkBytes []byte
+			err        error
+		)
 		chunkURL := fmt.Sprintf("%s/%s", chunkReq.ChunkBaseUrl, chunk)
 
 		if content, ok := localChunkCache.Get(chunkURL); ok {
 			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Local chunk cache hit")
 			chunkBytes = content
 		} else {
-			v, err, _ := fetchGroup.Do(chunkURL, func() (any, error) {
-				log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache miss, fetching from CDN")
-				req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
-				if err != nil {
-					return nil, err
-				}
-				resp, err := httpClient.Do(req)
-				if err != nil {
-					return nil, err
-				}
-
-				if resp.StatusCode != http.StatusOK {
-					resp.Body.Close()
-					return nil, fmt.Errorf("unexpected status code %d when fetching chunk %s", resp.StatusCode, chunkURL)
-				}
-
-				fullChunkBytes, err := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if err != nil {
-					return nil, err
-				}
-				localChunkCache.Set(chunkURL, fullChunkBytes, int64(len(fullChunkBytes)))
-				log.Info().Str("chunk", chunkURL).Int("size", len(fullChunkBytes)).Msg("ReadFileChunks: Fetched and cached chunk from CDN")
-				return fullChunkBytes, nil
-			})
+			chunkBytes, err = GetChunk(chunkURL)
 			if err != nil {
 				return 0, err
 			}
-			chunkBytes = v.([]byte)
 		}
 
 		startRangeInChunk := int64(0)
@@ -241,6 +262,38 @@ func ReadFileChunks(httpClient *http.Client, chunkReq ReadFileChunkRequest, dest
 	return totalBytesRead, nil
 }
 
+func GetChunk(chunkURL string) ([]byte, error) {
+	v, err, _ := fetchGroup.Do(chunkURL, func() (any, error) {
+		log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache miss, fetching from CDN")
+		req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("unexpected status code %d when fetching chunk %s", resp.StatusCode, chunkURL)
+		}
+
+		fullChunkBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		localChunkCache.Set(chunkURL, fullChunkBytes, int64(len(fullChunkBytes)))
+		log.Info().Str("chunk", chunkURL).Int("size", len(fullChunkBytes)).Msg("ReadFileChunks: Fetched and cached chunk from CDN")
+		return fullChunkBytes, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.([]byte), nil
+}
+
 func (s *CDNClipStorage) CachedLocally() bool {
 	return false
 }
@@ -251,4 +304,37 @@ func (s *CDNClipStorage) Metadata() storage.ClipStorageMetadata {
 
 func (s *CDNClipStorage) Cleanup() error {
 	return nil
+}
+
+func (s *CDNClipStorage) updateChunkOrder(requiredChunks []string) {
+	s.chunkAccessOrderMu.Lock()
+	for _, chunk := range requiredChunks {
+		if _, ok := s.chunkAccessOrder[chunk]; ok {
+			continue
+		}
+		s.chunkAccessOrder[chunk] = len(s.chunkAccessOrder)
+	}
+	s.chunkAccessOrderMu.Unlock()
+}
+
+func (s *CDNClipStorage) orderedChunks() []string {
+	s.chunkAccessOrderMu.Lock()
+	defer s.chunkAccessOrderMu.Unlock()
+
+	orderedChunks := make([]string, 0, len(s.chunkAccessOrder))
+	for chunk := range s.chunkAccessOrder {
+		orderedChunks = append(orderedChunks, chunk)
+	}
+	sort.Slice(orderedChunks, func(i, j int) bool {
+		return s.chunkAccessOrder[orderedChunks[i]] < s.chunkAccessOrder[orderedChunks[j]]
+	})
+
+	// Add remaining chunks
+	for _, chunk := range s.metadata.Chunks {
+		if _, ok := s.chunkAccessOrder[chunk]; ok {
+			continue
+		}
+		orderedChunks = append(orderedChunks, chunk)
+	}
+	return orderedChunks
 }

@@ -122,14 +122,35 @@ func (ca *ClipV2Archiver) Create() error {
 		return err
 	}
 
-	indexBytes, err := ca.EncodeIndex(index)
+	indexBytes, err := encodeIndexBytes(index, chunkNames, ca.chunkSize, ca.StorageType)
 	if err != nil {
-		return fmt.Errorf("failed to encode index: %w", err)
+		return fmt.Errorf("failed to create index bytes: %w", err)
 	}
 
-	chunkListBytes, err := ca.EncodeChunkList(chunkNames)
+	if _, err := indexWriter.Write(indexBytes); err != nil {
+		return fmt.Errorf("failed to write index data: %w", err)
+	}
+
+	indexWriter.Close()
+	err = indexWriter.WaitForCompletion()
 	if err != nil {
-		return fmt.Errorf("failed to encode chunk list: %w", err)
+		return fmt.Errorf("failed to wait for index writer completion: %w", err)
+	}
+
+	log.Info().Msgf("Successfully created index %s (%d nodes, %d chunks) chunks in %s",
+		ca.IndexID, index.Len(), len(chunkNames), ca.LocalPath)
+	return nil
+}
+
+func encodeIndexBytes(index *btree.BTreeG[*common.ClipNode], chunkNames []string, chunkSize int64, storageMode common.StorageMode) ([]byte, error) {
+	indexBytes, err := EncodeIndex(index)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode index: %w", err)
+	}
+
+	chunkListBytes, err := EncodeChunkList(chunkNames)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode chunk list: %w", err)
 	}
 
 	chunkListLength := int64(len(chunkListBytes))
@@ -146,47 +167,28 @@ func (ca *ClipV2Archiver) Create() error {
 		IndexPos:              indexPos,
 		ChunkListLength:       chunkListLength,
 		ChunkPos:              chunkPos,
-		ChunkSize:             ca.chunkSize,
+		ChunkSize:             chunkSize,
 	}
 
 	copy(header.StartBytes[:], common.ClipFileStartBytes)
 
-	// FIXME: This logic is setup weirdly. The storage type should
-	// be stored regardless and length shouldn't be used as the determining
-	// factor on mounting.
-	if ca.StorageType == common.StorageModeS3 {
+	if storageMode == common.StorageModeS3 {
 		var storageType [12]byte
-		copy(storageType[:], []byte(ca.StorageType))
-		header.StorageInfoLength = int64(len(ca.StorageType))
+		copy(storageType[:], []byte(storageMode))
+		header.StorageInfoLength = int64(len(storageType))
 		header.StorageInfoType = storageType
 	}
 
-	encodedHeaderBytes, err := ca.EncodeHeader(&header)
+	encodedHeaderBytes, err := EncodeHeader(&header)
 	if err != nil {
-		return fmt.Errorf("failed to encode header: %w", err)
+		return nil, fmt.Errorf("failed to encode header: %w", err)
 	}
 
-	if _, err := indexWriter.Write(encodedHeaderBytes); err != nil {
-		return fmt.Errorf("failed to write header: %w", err)
-	}
+	// Combined all the bytes in the order of header, chunk list, index without copying
+	combinedBytes := append(encodedHeaderBytes, chunkListBytes...)
+	combinedBytes = append(combinedBytes, indexBytes...)
 
-	if _, err := indexWriter.Write(chunkListBytes); err != nil {
-		return fmt.Errorf("failed to write chunk list: %w", err)
-	}
-
-	if _, err := indexWriter.Write(indexBytes); err != nil {
-		return fmt.Errorf("failed to write index data: %w", err)
-	}
-
-	indexWriter.Close()
-	err = indexWriter.WaitForCompletion()
-	if err != nil {
-		return fmt.Errorf("failed to wait for index writer completion: %w", err)
-	}
-
-	log.Info().Msgf("Successfully created index %s (%d nodes, %d chunks) chunks in %s",
-		ca.IndexID, index.Len(), len(chunkNames), ca.LocalPath)
-	return nil
+	return combinedBytes, nil
 }
 
 // ExtractArchive extracts the archive from the given path into a new ClipV2Archive object.
@@ -390,7 +392,7 @@ func (ca *ClipV2Archiver) ExpandLocalArchive(ctx context.Context) error {
 }
 
 // EncodeHeader encodes the header into a byte slice.
-func (ca *ClipV2Archiver) EncodeHeader(header *ClipV2ArchiveHeader) ([]byte, error) {
+func EncodeHeader(header *ClipV2ArchiveHeader) ([]byte, error) {
 	var headerDataBuf bytes.Buffer
 	enc := gob.NewEncoder(&headerDataBuf)
 	if err := enc.Encode(header); err != nil {
@@ -446,7 +448,7 @@ func (ca *ClipV2Archiver) DecodeHeader(reader io.Reader) (*ClipV2ArchiveHeader, 
 }
 
 // EncodeIndex encodes the index into a byte slice.
-func (ca *ClipV2Archiver) EncodeIndex(index *btree.BTreeG[*common.ClipNode]) ([]byte, error) {
+func EncodeIndex(index *btree.BTreeG[*common.ClipNode]) ([]byte, error) {
 	var nodes []*common.ClipNode
 	minNode, _ := index.Min()
 	index.Ascend(minNode, func(a *common.ClipNode) bool {
@@ -464,7 +466,7 @@ func (ca *ClipV2Archiver) EncodeIndex(index *btree.BTreeG[*common.ClipNode]) ([]
 }
 
 // EncodeChunkList encodes the chunk list into a byte slice.
-func (ca *ClipV2Archiver) EncodeChunkList(chunkList []string) ([]byte, error) {
+func EncodeChunkList(chunkList []string) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
 	if err := enc.Encode(chunkList); err != nil {

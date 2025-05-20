@@ -39,10 +39,14 @@ type ExtractOptions struct {
 
 type MountOptions struct {
 	ExtractOptions
-	ContentCache          ContentCache
-	ContentCacheAvailable bool
-	MountPoint            string
-	CacheLocally          bool
+	ContentCache             ContentCache
+	ContentCacheAvailable    bool
+	MountPoint               string
+	CacheLocally             bool
+	WarmChunks               bool
+	ChunkPriority            []string
+	ChunkPrioritySampleTime  time.Duration
+	SetChunkPriorityCallback func(chunks []string) error
 }
 
 // Create Archive
@@ -107,6 +111,15 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		return nil, nil, nil, fmt.Errorf("invalid archive: %v", err)
 	}
 
+	if options.WarmChunks && options.ContentCache != nil {
+		go func() {
+			err := options.ContentCache.WarmChunks(options.ChunkPriority)
+			if err != nil {
+				log.Error().Err(err).Msg("failed to warm chunks")
+			}
+		}()
+	}
+
 	chunkCache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
 		NumCounters: 1e7,
 		MaxCost:     1 * 1e9,
@@ -117,12 +130,14 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 	}
 
 	storage, err := NewClipStorage(ClipStorageOpts{
-		ImageID:      options.ImageID,
-		ArchivePath:  options.LocalPath,
-		ChunkPath:    options.OutputPath,
-		Metadata:     metadata,
-		ContentCache: options.ContentCache,
-		ChunkCache:   chunkCache,
+		ImageID:                 options.ImageID,
+		ArchivePath:             options.LocalPath,
+		ChunkPath:               options.OutputPath,
+		Metadata:                metadata,
+		ContentCache:            options.ContentCache,
+		ChunkCache:              chunkCache,
+		ChunkPriorityCallback:   options.SetChunkPriorityCallback,
+		ChunkPrioritySampleTime: options.ChunkPrioritySampleTime,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
