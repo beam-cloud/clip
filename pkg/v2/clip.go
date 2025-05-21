@@ -130,8 +130,9 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 	}
 
 	var priorityChunkCallback func(chunks []string) error = nil
-	if options.SetPriorityChunksCallback != nil {
+	if options.SetPriorityChunksCallback != nil && len(options.PriorityChunks) == 0 {
 		// Only set the callback if there is not already a list of priority chunks
+		log.Info().Msg("Setting priority chunks callback")
 		priorityChunkCallback = options.SetPriorityChunksCallback
 	}
 
