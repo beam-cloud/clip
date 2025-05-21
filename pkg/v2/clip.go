@@ -118,7 +118,7 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 				// If no chunk priority is set, use all chunks
 				chunkList = metadata.Chunks
 			}
-			err := options.ContentCache.WarmChunks(chunkList, "https://beam-cdn.com"+"/"+options.ImageID)
+			err := options.ContentCache.WarmChunks(chunkList, "https://beam-cdn.com"+"/"+options.ImageID+"/chunks")
 			if err != nil {
 				log.Error().Err(err).Msg("failed to warm chunks")
 			}
