@@ -39,14 +39,14 @@ type ExtractOptions struct {
 
 type MountOptions struct {
 	ExtractOptions
-	ContentCache             ContentCache
-	ContentCacheAvailable    bool
-	MountPoint               string
-	CacheLocally             bool
-	WarmChunks               bool
-	ChunkPriority            []string
-	ChunkPrioritySampleTime  time.Duration
-	SetChunkPriorityCallback func(chunks []string) error
+	ContentCache              ContentCache
+	ContentCacheAvailable     bool
+	MountPoint                string
+	CacheLocally              bool
+	WarmChunks                bool
+	PriorityChunks            []string
+	PriorityChunkSampleTime   time.Duration
+	SetPriorityChunksCallback func(chunks []string) error
 }
 
 // Create Archive
@@ -113,7 +113,7 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 
 	if options.WarmChunks && options.ContentCache != nil {
 		go func() {
-			chunkList := options.ChunkPriority
+			chunkList := options.PriorityChunks
 			if len(chunkList) == 0 {
 				// If no chunk priority is set, use all chunks
 				chunkList = metadata.Chunks
@@ -134,15 +134,21 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		return nil, nil, nil, fmt.Errorf("could not create local cache: %v", err)
 	}
 
+	var priorityChunkCallback func(chunks []string) error = nil
+	if options.SetPriorityChunksCallback != nil && options.PriorityChunks == nil {
+		// Only set the callback if there is not already a list of priority chunks
+		priorityChunkCallback = options.SetPriorityChunksCallback
+	}
+
 	storage, err := NewClipStorage(ClipStorageOpts{
-		ImageID:                 options.ImageID,
-		ArchivePath:             options.LocalPath,
-		ChunkPath:               options.OutputPath,
-		Metadata:                metadata,
-		ContentCache:            options.ContentCache,
-		ChunkCache:              chunkCache,
-		ChunkPriorityCallback:   options.SetChunkPriorityCallback,
-		ChunkPrioritySampleTime: options.ChunkPrioritySampleTime,
+		ImageID:                  options.ImageID,
+		ArchivePath:              options.LocalPath,
+		ChunkPath:                options.OutputPath,
+		Metadata:                 metadata,
+		ContentCache:             options.ContentCache,
+		ChunkCache:               chunkCache,
+		SetPriorityChunkCallback: priorityChunkCallback,
+		PriorityChunkSampleTime:  options.PriorityChunkSampleTime,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)

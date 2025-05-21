@@ -18,15 +18,15 @@ type ClipStorageInterface interface {
 }
 
 type ClipStorageOpts struct {
-	ImageID                 string
-	ArchivePath             string
-	ChunkPath               string
-	CacheLocally            bool
-	ContentCache            ContentCache
-	Metadata                *ClipV2Archive
-	ChunkCache              *ristretto.Cache[string, []byte]
-	ChunkPriorityCallback   func(chunks []string) error
-	ChunkPrioritySampleTime time.Duration
+	ImageID                  string
+	ArchivePath              string
+	ChunkPath                string
+	CacheLocally             bool
+	ContentCache             ContentCache
+	Metadata                 *ClipV2Archive
+	ChunkCache               *ristretto.Cache[string, []byte]
+	SetPriorityChunkCallback func(chunks []string) error
+	PriorityChunkSampleTime  time.Duration
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
@@ -47,7 +47,7 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	log.Info().Msgf("Storage type %s", storageType)
 	switch storageType {
 	case common.StorageModeS3:
-		storage, err = NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID, contentCache: opts.ContentCache, chunkPriorityCallback: opts.ChunkPriorityCallback, chunkPrioritySampleTime: opts.ChunkPrioritySampleTime})
+		storage, err = NewCDNClipStorage(metadata, CDNClipStorageOpts{cdnURL: "https://beam-cdn.com", imageID: opts.ImageID, contentCache: opts.ContentCache, chunkPriorityCallback: opts.SetPriorityChunkCallback, chunkPrioritySampleTime: opts.PriorityChunkSampleTime})
 		if err != nil {
 			return nil, err
 		}
