@@ -138,22 +138,8 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	}
 
 	chunkBaseUrl := fmt.Sprintf("%s/%s", s.cdnBaseURL, s.chunkPath)
-	totalBytesRead := 0
-
-	// When the file is not in the local cache, read through the content cache.
-	// Internally, the content cache will read the entire file and return it. If
-	// the file is small enough, it will be cached in the local cache.
-	if s.contentCache != nil && node.DataLen >= 32*1024*1024 { // Check against total file size for large files
-		totalBytesRead, err = s.contentCache.GetFileFromChunksWithOffset(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, fileStart, fileEnd, off, dest)
-		if err != nil {
-			return 0, err
-		}
-		log.Info().Str("hash", node.ContentHash).Msg("ReadFile large file, content cache hit")
-		return totalBytesRead, nil
-	}
 
 	var tempDest []byte
-
 	if s.contentCache != nil {
 		res, err, _ := contentCacheReadGroup.Do(node.ContentHash, func() (interface{}, error) {
 			data := make([]byte, fileEnd-fileStart)

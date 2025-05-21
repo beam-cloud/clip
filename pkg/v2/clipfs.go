@@ -39,7 +39,6 @@ type ContentCache interface {
 	GetContent(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]byte, error)
 	StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error)
 	GetFileFromChunks(hash string, chunks []string, chunkBaseUrl string, chunkSize int64, startOffset int64, endOffset int64, dest []byte) (int, error)
-	GetFileFromChunksWithOffset(hash string, chunks []string, chunkBaseUrl string, chunkSize int64, startOffset int64, endOffset int64, reqOffset int64, dest []byte) (int, error)
 	WarmChunks(chunks []string, chunkBaseURL string) error
 }
 
