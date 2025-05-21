@@ -95,18 +95,13 @@ func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNCl
 	}
 
 	if opts.chunkPriorityCallback != nil {
-		go func() {
-			timer := time.NewTicker(opts.chunkPrioritySampleTime)
-			defer timer.Stop()
-			for range timer.C {
-				orderedChunks := cdnStorage.orderedChunks()
-				log.Info().Msgf("Calling chunk priority callback with %d chunks", len(orderedChunks))
-				err := opts.chunkPriorityCallback(orderedChunks)
-				if err != nil {
-					log.Error().Err(err).Msg("Failure while calling chunk priority callback")
-				}
+		time.AfterFunc(opts.chunkPrioritySampleTime, func() {
+			orderedChunks := cdnStorage.orderedChunks()
+			err := opts.chunkPriorityCallback(orderedChunks)
+			if err != nil {
+				log.Error().Err(err).Msg("Failure while calling chunk priority callback")
 			}
-		}()
+		})
 	}
 
 	return cdnStorage, nil
@@ -117,8 +112,6 @@ func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNCl
 func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
 	// Best case, the file is small and is already in the local cache.
 	if cachedContent, ok := s.localCache.Get(node.ContentHash); ok {
-		log.Info().Str("hash", node.ContentHash).Msg("Read local cache hit")
-
 		if off+int64(len(dest)) <= int64(len(cachedContent)) {
 			n := copy(dest, cachedContent[off:off+int64(len(dest))])
 			return n, nil
@@ -152,7 +145,6 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		if err != nil {
 			return 0, err
 		}
-		log.Info().Str("hash", node.ContentHash).Msg("ReadFile large file, content cache hit")
 		return totalBytesRead, nil
 	}
 
@@ -173,8 +165,6 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		}
 
 		tempDest = res.([]byte)
-
-		log.Info().Str("hash", node.ContentHash).Msg("ReadFile small file, content cache hit")
 	} else {
 		tempDest = make([]byte, fileEnd-fileStart)
 		// If the file is not cached and couldn't be read through any cache, read from CDN
@@ -188,7 +178,6 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		if err != nil {
 			return 0, err
 		}
-		log.Info().Str("hash", node.ContentHash).Msg("ReadFile CDN hit")
 	}
 
 	bytesToCopy := min(int64(len(dest)), int64(len(tempDest))-off)
@@ -200,7 +189,6 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	s.localCache.Set(node.ContentHash, tempDest, int64(len(tempDest)))
 
 	n := copy(dest, tempDest[off:off+bytesToCopy])
-	log.Info().Str("hash", node.ContentHash).Int("bytesRead", n).Msg("ReadFile")
 	return n, nil
 }
 
@@ -259,11 +247,9 @@ func ReadFileChunks(chunkReq ReadFileChunkRequest, dest []byte) (int, error) {
 
 func GetChunk(chunkURL string) ([]byte, error) {
 	if content, ok := localChunkCache.Get(chunkURL); ok {
-		log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Local chunk cache hit")
 		return content, nil
 	}
 	v, err, _ := fetchGroup.Do(chunkURL, func() (any, error) {
-		log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache miss, fetching from CDN")
 		req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
 		if err != nil {
 			return nil, err
@@ -284,7 +270,6 @@ func GetChunk(chunkURL string) ([]byte, error) {
 			return nil, err
 		}
 		localChunkCache.Set(chunkURL, fullChunkBytes, int64(len(fullChunkBytes)))
-		log.Info().Str("chunk", chunkURL).Int("size", len(fullChunkBytes)).Msg("ReadFileChunks: Fetched and cached chunk from CDN")
 		return fullChunkBytes, nil
 	})
 	if err != nil {
