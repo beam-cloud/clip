@@ -95,18 +95,14 @@ func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNCl
 	}
 
 	if opts.chunkPriorityCallback != nil {
-		go func() {
-			timer := time.NewTicker(opts.chunkPrioritySampleTime)
-			defer timer.Stop()
-			for range timer.C {
-				orderedChunks := cdnStorage.orderedChunks()
-				log.Info().Msgf("Calling chunk priority callback with %d chunks", len(orderedChunks))
-				err := opts.chunkPriorityCallback(orderedChunks)
-				if err != nil {
-					log.Error().Err(err).Msg("Failure while calling chunk priority callback")
-				}
+		time.AfterFunc(opts.chunkPrioritySampleTime, func() {
+			log.Info().Msg("Calling chunk priority callback")
+			orderedChunks := cdnStorage.orderedChunks()
+			err := opts.chunkPriorityCallback(orderedChunks)
+			if err != nil {
+				log.Error().Err(err).Msg("Failure while calling chunk priority callback")
 			}
-		}()
+		})
 	}
 
 	return cdnStorage, nil
