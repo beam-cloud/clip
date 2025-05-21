@@ -328,12 +328,5 @@ func (s *CDNClipStorage) orderedChunks() []string {
 		return s.chunkAccessOrder[orderedChunks[i]] < s.chunkAccessOrder[orderedChunks[j]]
 	})
 
-	// Add remaining chunks
-	for _, chunk := range s.metadata.Chunks {
-		if _, ok := s.chunkAccessOrder[chunk]; ok {
-			continue
-		}
-		orderedChunks = append(orderedChunks, chunk)
-	}
 	return orderedChunks
 }
