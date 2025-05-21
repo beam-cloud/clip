@@ -221,14 +221,9 @@ func ReadFileChunks(chunkReq ReadFileChunkRequest, dest []byte) (int, error) {
 		)
 		chunkURL := fmt.Sprintf("%s/%s", chunkReq.ChunkBaseUrl, chunk)
 
-		if content, ok := localChunkCache.Get(chunkURL); ok {
-			log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Local chunk cache hit")
-			chunkBytes = content
-		} else {
-			chunkBytes, err = GetChunk(chunkURL)
-			if err != nil {
-				return 0, err
-			}
+		chunkBytes, err = GetChunk(chunkURL)
+		if err != nil {
+			return 0, err
 		}
 
 		startRangeInChunk := int64(0)
@@ -263,6 +258,10 @@ func ReadFileChunks(chunkReq ReadFileChunkRequest, dest []byte) (int, error) {
 }
 
 func GetChunk(chunkURL string) ([]byte, error) {
+	if content, ok := localChunkCache.Get(chunkURL); ok {
+		log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Local chunk cache hit")
+		return content, nil
+	}
 	v, err, _ := fetchGroup.Do(chunkURL, func() (any, error) {
 		log.Info().Str("chunk", chunkURL).Msg("ReadFileChunks: Cache miss, fetching from CDN")
 		req, err := http.NewRequest(http.MethodGet, chunkURL, nil)
