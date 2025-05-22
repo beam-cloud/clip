@@ -144,7 +144,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	var tempDest []byte
 	if s.contentCache != nil {
 		// FIXME: flip condition after testing
-		if node.DataLen < 20*1e6 { // 20 MB
+		if node.DataLen > 50*1e6 { // 50 MB
 			log.Info().Str("hash", node.ContentHash).Str("node", node.Path).Int64("size", node.DataLen).Msg("ReadFile large file")
 			n, err := s.contentCache.GetFileFromChunksWithOffset(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, fileStart, fileEnd, off, dest)
 			if err != nil {
