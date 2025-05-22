@@ -143,12 +143,34 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 
 	var tempDest []byte
 	if s.contentCache != nil {
+		// FIXME: flip condition after testing
+		if node.DataLen < 20*1e6 { // 20 MB
+			log.Info().Str("hash", node.ContentHash).Str("node", node.Path).Int64("size", node.DataLen).Msg("ReadFile large file")
+			// Recalculate the required chunks and the offset
+			start := fileStart + off
+			end := start + int64(len(dest))
+			requiredChunks, err = getRequiredChunks(start, chunkSize, end, chunks)
+			if err != nil {
+				return 0, err
+			}
+
+			// Calculate the offset in the first chunk that we need to read from
+			chunkRelOffset := start % chunkSize
+			fileRelOffset := off
+
+			n, err := s.contentCache.GetFileFromChunksWithOffset(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, chunkRelOffset, fileRelOffset, dest)
+			if err != nil {
+				return 0, err
+			}
+			return n, nil
+		}
 		res, err, _ := contentCacheReadGroup.Do(node.ContentHash, func() (interface{}, error) {
 			data := make([]byte, fileEnd-fileStart)
 			_, fetchErr := s.contentCache.GetFileFromChunks(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, fileStart, fileEnd, data)
 			if fetchErr != nil {
 				return nil, fetchErr
 			}
+			log.Info().Str("hash", node.ContentHash).Msg("ReadFile small file, content cache hit")
 			return data, nil
 		})
 
@@ -158,7 +180,6 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 
 		tempDest = res.([]byte)
 
-		log.Info().Str("hash", node.ContentHash).Msg("ReadFile small file, content cache hit")
 	} else {
 		tempDest = make([]byte, fileEnd-fileStart)
 		// If the file is not cached and couldn't be read through any cache, read from CDN
@@ -178,10 +199,6 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	bytesToCopy := min(int64(len(dest)), int64(len(tempDest))-off)
 	if bytesToCopy <= 0 {
 		return 0, nil // Nothing to copy
-	}
-
-	if node.DataLen > 50*1e6 { // 50 MB
-		log.Info().Str("hash", node.ContentHash).Str("node", node.Path).Int64("size", node.DataLen).Msg("ReadFile large file")
 	}
 
 	// Cache the file in the local cache, using singleflight to avoid duplicate work
