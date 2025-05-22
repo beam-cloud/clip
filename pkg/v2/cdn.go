@@ -20,15 +20,16 @@ var (
 	localChunkCache       *ristretto.Cache[string, []byte]
 	fetchGroup            = singleflight.Group{}
 	contentCacheReadGroup = singleflight.Group{}
+	localCacheSetGroup    = singleflight.Group{}
 	httpClient            = &http.Client{}
 )
 
 func init() {
 	var err error
 	localChunkCache, err = ristretto.NewCache(&ristretto.Config[string, []byte]{
-		NumCounters: 1e7,      // number of keys to track frequency of (10M).
-		MaxCost:     10 << 30, // maximum cost of cache (10GB).
-		BufferItems: 64,       // number of keys per Get buffer.
+		NumCounters: 1e7, // number of keys to track frequency of (10M).
+		MaxCost:     10 * 1e9,
+		BufferItems: 64, // number of keys per Get buffer.
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize global chunk cache")
@@ -73,7 +74,7 @@ func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNCl
 
 	localCache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
 		NumCounters: 1e7,
-		MaxCost:     1 * 1e9,
+		MaxCost:     5 * 1e9,
 		BufferItems: 64,
 	})
 	if err != nil {
@@ -113,13 +114,14 @@ func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNCl
 func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64) (int, error) {
 	// Best case, the file is small and is already in the local cache.
 	if cachedContent, ok := s.localCache.Get(node.ContentHash); ok {
-		log.Info().Str("hash", node.ContentHash).Msg("Read local cache hit")
-
 		if off+int64(len(dest)) <= int64(len(cachedContent)) {
+			log.Info().Str("hash", node.ContentHash).Msg("Read local cache hit")
 			n := copy(dest, cachedContent[off:off+int64(len(dest))])
 			return n, nil
 		}
+		log.Info().Str("hash", node.ContentHash).Msg("Read local cache hit, but not enough bytes in dest")
 	}
+	log.Info().Str("hash", node.ContentHash).Msg("Read local cache miss")
 
 	var (
 		chunkSize = s.metadata.Header.ChunkSize
@@ -178,8 +180,21 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		return 0, nil // Nothing to copy
 	}
 
-	// Cache the file in the local cache
-	s.localCache.Set(node.ContentHash, tempDest, int64(len(tempDest)))
+	if node.DataLen > 50*1e6 { // 50 MB
+		log.Info().Str("hash", node.ContentHash).Str("node", node.Path).Int64("size", node.DataLen).Msg("ReadFile large file")
+	}
+
+	// Cache the file in the local cache, using singleflight to avoid duplicate work
+	localCacheSetGroup.Do("cache:"+node.ContentHash, func() (interface{}, error) {
+		if _, found := s.localCache.Get(node.ContentHash); !found {
+			ok := s.localCache.SetWithTTL(node.ContentHash, tempDest, int64(len(tempDest)), time.Hour)
+			if !ok {
+				log.Error().Str("hash", node.ContentHash).Msg("Failed to cache file in local cache")
+			}
+			log.Info().Str("hash", node.ContentHash).Msg("Cached file in local cache")
+		}
+		return nil, nil
+	})
 
 	n := copy(dest, tempDest[off:off+bytesToCopy])
 	log.Info().Str("hash", node.ContentHash).Int("bytesRead", n).Msg("ReadFile")
@@ -265,7 +280,10 @@ func GetChunk(chunkURL string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		localChunkCache.Set(chunkURL, fullChunkBytes, int64(len(fullChunkBytes)))
+		// Only cache if not already present to avoid ristretto async issues
+		if _, found := localChunkCache.Get(chunkURL); !found {
+			localChunkCache.SetWithTTL(chunkURL, fullChunkBytes, int64(len(fullChunkBytes)), time.Hour)
+		}
 		log.Info().Str("chunk", chunkURL).Int("size", len(fullChunkBytes)).Msg("ReadFileChunks: Fetched and cached chunk from CDN")
 		return fullChunkBytes, nil
 	})
