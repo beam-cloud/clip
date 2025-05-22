@@ -146,19 +146,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 		// FIXME: flip condition after testing
 		if node.DataLen < 20*1e6 { // 20 MB
 			log.Info().Str("hash", node.ContentHash).Str("node", node.Path).Int64("size", node.DataLen).Msg("ReadFile large file")
-			// Recalculate the required chunks and the offset
-			start := fileStart + off
-			end := start + int64(len(dest))
-			requiredChunks, err = getRequiredChunks(start, chunkSize, end, chunks)
-			if err != nil {
-				return 0, err
-			}
-
-			// Calculate the offset in the first chunk that we need to read from
-			chunkRelOffset := start % chunkSize
-			fileRelOffset := off
-
-			n, err := s.contentCache.GetFileFromChunksWithOffset(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, chunkRelOffset, fileRelOffset, dest)
+			n, err := s.contentCache.GetFileFromChunksWithOffset(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, fileStart, fileEnd, off, dest)
 			if err != nil {
 				return 0, err
 			}
