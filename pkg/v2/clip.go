@@ -170,8 +170,8 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		EnableSymlinkCaching: true,
 		SyncRead:             false,
 		RememberInodes:       true,
-		MaxReadAhead:         1024 * 1024 * 32, // 32MB
-		MaxWrite:             1024 * 1024,      // 1MB
+		MaxReadAhead:         1024 * 1024 * 2, // 32MB
+		MaxWrite:             1024 * 1024,     // 1MB
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create server: %v", err)
@@ -187,7 +187,7 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 				return
 			}
 
-			err = updateReadAheadKB(options.MountPoint, 1024*1024*32)
+			err = updateReadAheadKB(options.MountPoint, 1024*1024*2)
 			if err != nil {
 				log.Error().Err(err).Msg("failed to update read_ahead_kb")
 			}
