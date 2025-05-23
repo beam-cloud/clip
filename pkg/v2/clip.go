@@ -231,5 +231,7 @@ func updateReadAheadKB(mountPoint string, valueKB int) error {
 		return fmt.Errorf("failed to update read_ahead_kb: %w read_ahead_path: %s", err, readAheadPath)
 	}
 
+	log.Info().Msgf("updated read_ahead_kb to %d", valueKB)
+
 	return nil
 }
