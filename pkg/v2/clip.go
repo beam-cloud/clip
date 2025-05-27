@@ -149,7 +149,7 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
 
-	StartProfiling(6060)
+	// StartProfiling(6060)
 
 	root, _ := clipfs.Root()
 	attrTimeout := time.Second * 60
@@ -181,7 +181,7 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 				return
 			}
 
-			err = updateReadAheadKB(options.MountPoint, 1024*1024*2)
+			err = updateReadAheadKB(options.MountPoint, 1024*1024*32)
 			if err != nil {
 				log.Error().Err(err).Msg("failed to update read_ahead_kb")
 			}

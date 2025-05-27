@@ -1,14 +1,11 @@
 package clipv2
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"sort"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -42,30 +39,24 @@ func init() {
 	httpClient = &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
-			MaxConnsPerHost:        100,
-			MaxIdleConns:           100,
-			MaxIdleConnsPerHost:    100,
-			ReadBufferSize:         512 * 1024,
-			WriteBufferSize:        512 * 1024,
-			DisableCompression:     true,
-			IdleConnTimeout:        5 * time.Second,
-			ResponseHeaderTimeout:  10 * time.Second,
-			ExpectContinueTimeout:  1 * time.Second,
-			TLSHandshakeTimeout:    10 * time.Second,
-			MaxResponseHeaderBytes: 0,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				dialer := &net.Dialer{
-					Timeout:   30 * time.Second,
-					KeepAlive: 30 * time.Second,
-					Control: func(network, address string, c syscall.RawConn) error {
-						return c.Control(func(fd uintptr) {
-							syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 1024*1024)
-							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-						})
-					},
-				}
-				return dialer.DialContext(ctx, network, addr)
-			},
+			MaxConnsPerHost:     100,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			// ReadBufferSize:      512 * 1024,
+			// WriteBufferSize:     512 * 1024,
+			// DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// 	dialer := &net.Dialer{
+			// 		Timeout:   30 * time.Second,
+			// 		KeepAlive: 30 * time.Second,
+			// 		Control: func(network, address string, c syscall.RawConn) error {
+			// 			return c.Control(func(fd uintptr) {
+			// 				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 1024*1024)
+			// 				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+			// 			})
+			// 		},
+			// 	}
+			// 	return dialer.DialContext(ctx, network, addr)
+			// },
 		},
 	}
 }
