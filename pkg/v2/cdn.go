@@ -119,6 +119,29 @@ func NewCDNClipStorage(metadata *ClipV2Archive, opts CDNClipStorageOpts) (*CDNCl
 		chunkAccessOrderMu: sync.Mutex{},
 	}
 
+	// Log cache stats periodically
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				metrics := localCache.Metrics
+				globalMetrics := localChunkCache.Metrics
+				log.Info().
+					Str("image_id", opts.imageID).
+					Uint64("local_cache_hits", metrics.Hits()).
+					Uint64("local_cache_misses", metrics.Misses()).
+					Float64("local_cache_ratio", metrics.Ratio()).
+					Uint64("global_cache_hits", globalMetrics.Hits()).
+					Uint64("global_cache_misses", globalMetrics.Misses()).
+					Float64("global_cache_ratio", globalMetrics.Ratio()).
+					Msg("CDN cache stats")
+			}
+		}
+	}()
+
 	if opts.chunkPriorityCallback != nil {
 		time.AfterFunc(opts.chunkPrioritySampleTime, func() {
 			log.Info().Msg("Calling chunk priority callback")

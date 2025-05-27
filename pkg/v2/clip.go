@@ -3,8 +3,11 @@ package clipv2
 import (
 	"context"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
@@ -146,6 +149,8 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
 
+	StartProfiling(6060)
+
 	root, _ := clipfs.Root()
 	attrTimeout := time.Second * 60
 	entryTimeout := time.Second * 60
@@ -191,6 +196,57 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 	}
 
 	return startServer, serverError, server, nil
+}
+
+// StartProfiling starts a pprof server and memory monitoring
+func StartProfiling(port int) {
+	go func() {
+		addr := fmt.Sprintf(":%d", port)
+		log.Info().Msgf("Starting pprof server on %s", addr)
+		log.Info().Msgf("Access profiles at: http://localhost%s/debug/pprof/", addr)
+
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			log.Error().Err(err).Msg("pprof server failed")
+		}
+	}()
+
+	// Log memory stats periodically
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				var m runtime.MemStats
+				runtime.ReadMemStats(&m)
+				log.Info().
+					Uint64("alloc_mb", m.Alloc/1024/1024).
+					Uint64("total_alloc_mb", m.TotalAlloc/1024/1024).
+					Uint64("sys_mb", m.Sys/1024/1024).
+					Uint64("heap_mb", m.HeapAlloc/1024/1024).
+					Uint32("num_gc", m.NumGC).
+					Msg("Memory stats")
+			}
+		}
+	}()
+}
+
+// LogCacheStats logs current cache statistics
+func LogCacheStats() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	log.Info().
+		Uint64("heap_alloc_mb", m.HeapAlloc/1024/1024).
+		Uint64("heap_sys_mb", m.HeapSys/1024/1024).
+		Uint64("heap_idle_mb", m.HeapIdle/1024/1024).
+		Uint64("heap_inuse_mb", m.HeapInuse/1024/1024).
+		Uint64("heap_released_mb", m.HeapReleased/1024/1024).
+		Uint64("stack_inuse_mb", m.StackInuse/1024/1024).
+		Uint64("mspan_inuse_mb", m.MSpanInuse/1024/1024).
+		Uint64("mcache_inuse_mb", m.MCacheInuse/1024/1024).
+		Uint32("num_gc", m.NumGC).
+		Msg("Detailed memory stats")
 }
 
 func updateReadAheadKB(mountPoint string, valueKB int) error {
