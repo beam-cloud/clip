@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
-	"github.com/beam-cloud/ristretto"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/moby/sys/mountinfo"
@@ -122,15 +121,6 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		}()
 	}
 
-	chunkCache, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
-		NumCounters: 1e7,
-		MaxCost:     1 * 1e9,
-		BufferItems: 64,
-	})
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("could not create local cache: %v", err)
-	}
-
 	var priorityChunkCallback func(chunks []string) error = nil
 	if options.SetPriorityChunksCallback != nil {
 		// Only set the callback if there is not already a list of priority chunks
@@ -144,7 +134,6 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		ChunkPath:                options.OutputPath,
 		Metadata:                 metadata,
 		ContentCache:             options.ContentCache,
-		ChunkCache:               chunkCache,
 		SetPriorityChunkCallback: priorityChunkCallback,
 		PriorityChunkSampleTime:  options.PriorityChunkSampleTime,
 	})
@@ -152,7 +141,7 @@ func MountArchive(ctx context.Context, options MountOptions) (func() error, <-ch
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := NewFileSystem(storage, chunkCache, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
+	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}

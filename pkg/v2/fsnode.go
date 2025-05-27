@@ -9,7 +9,6 @@ import (
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
-	"github.com/beam-cloud/ristretto"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -19,7 +18,6 @@ type FSNode struct {
 	filesystem   *ClipFileSystem
 	clipNode     *common.ClipNode
 	attr         fuse.Attr
-	chunkCache   *ristretto.Cache[string, []byte]
 	contentCache ContentCache
 	storage      storage.ClipStorageInterface
 }
