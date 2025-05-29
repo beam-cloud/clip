@@ -1,11 +1,14 @@
 package clipv2
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -42,21 +45,21 @@ func init() {
 			MaxConnsPerHost:     100,
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
-			// ReadBufferSize:      512 * 1024,
-			// WriteBufferSize:     512 * 1024,
-			// DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// 	dialer := &net.Dialer{
-			// 		Timeout:   30 * time.Second,
-			// 		KeepAlive: 30 * time.Second,
-			// 		Control: func(network, address string, c syscall.RawConn) error {
-			// 			return c.Control(func(fd uintptr) {
-			// 				syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 1024*1024)
-			// 				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-			// 			})
-			// 		},
-			// 	}
-			// 	return dialer.DialContext(ctx, network, addr)
-			// },
+			ReadBufferSize:      512 * 1024,
+			WriteBufferSize:     512 * 1024,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				dialer := &net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+					Control: func(network, address string, c syscall.RawConn) error {
+						return c.Control(func(fd uintptr) {
+							syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 1024*1024)
+							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+						})
+					},
+				}
+				return dialer.DialContext(ctx, network, addr)
+			},
 		},
 	}
 }
@@ -182,7 +185,7 @@ func (s *CDNClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64)
 	var tempDest []byte
 	if s.contentCache != nil {
 		// FIXME: flip condition after testing
-		if node.DataLen > 50*1e6 { // 50 MB
+		if node.DataLen > 5*1024*1024 {
 			log.Info().Str("hash", node.ContentHash).Str("node", node.Path).Int64("size", node.DataLen).Msg("ReadFile large file")
 			n, err := s.contentCache.GetFileFromChunksWithOffset(node.ContentHash, requiredChunks, chunkBaseUrl, chunkSize, fileStart, fileEnd, off, dest)
 			if err != nil {
@@ -253,18 +256,41 @@ type ReadFileChunkRequest struct {
 }
 
 func ReadFileChunks(chunkReq ReadFileChunkRequest, dest []byte) (int, error) {
-	totalBytesRead := 0
-	for chunkIdx, chunk := range chunkReq.RequiredChunks {
-		var (
-			chunkBytes []byte
-			err        error
-		)
-		chunkURL := fmt.Sprintf("%s/%s", chunkReq.ChunkBaseUrl, chunk)
+	numChunks := len(chunkReq.RequiredChunks)
+	if numChunks == 0 {
+		return 0, nil
+	}
 
-		chunkBytes, err = GetChunk(chunkURL)
-		if err != nil {
-			return 0, err
+	// Channel to collect chunk results
+	type chunkResult struct {
+		index int
+		data  []byte
+		err   error
+	}
+
+	results := make(chan chunkResult, numChunks)
+
+	// Parallel chunk fetching
+	for chunkIdx, chunk := range chunkReq.RequiredChunks {
+		go func(idx int, chunkName string) {
+			chunkURL := fmt.Sprintf("%s/%s", chunkReq.ChunkBaseUrl, chunkName)
+			chunkBytes, err := GetChunk(chunkURL)
+			results <- chunkResult{index: idx, data: chunkBytes, err: err}
+		}(chunkIdx, chunk)
+	}
+
+	chunkData := make([][]byte, numChunks)
+	for i := 0; i < numChunks; i++ {
+		result := <-results
+		if result.err != nil {
+			return 0, result.err
 		}
+		chunkData[result.index] = result.data
+	}
+
+	totalBytesRead := 0
+	for chunkIdx := 0; chunkIdx < numChunks; chunkIdx++ {
+		chunkBytes := chunkData[chunkIdx]
 
 		startRangeInChunk := int64(0)
 		endRangeInChunk := chunkReq.ChunkSize - 1
