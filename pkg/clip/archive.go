@@ -83,6 +83,25 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
 			log.Info().Msgf("processing path %s", path)
+
+			// Get stat info first to check file type
+			var stat unix.Stat_t
+			var err error
+			if de.IsSymlink() {
+				err = unix.Lstat(path, &stat)
+			} else {
+				err = unix.Stat(path, &stat)
+			}
+			if err != nil {
+				return err
+			}
+
+			// Skip device files
+			if (stat.Mode&unix.S_IFMT) == unix.S_IFCHR || (stat.Mode&unix.S_IFMT) == unix.S_IFBLK {
+				log.Info().Msgf("skipping device file: %s", path)
+				return nil
+			}
+
 			var target string = ""
 			var nodeType common.ClipNodeType
 
@@ -99,32 +118,15 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				nodeType = common.FileNode
 			}
 
-			var stat unix.Stat_t
-			var err error
-			if nodeType == common.SymLinkNode {
-				err = unix.Lstat(path, &stat)
-			} else {
-				err = unix.Stat(path, &stat)
-			}
-			if err != nil {
-				return err
-			}
-
 			var contentHash = ""
 			if nodeType == common.FileNode {
-				// Skip reading device files to avoid blocking
-				if (stat.Mode&unix.S_IFMT) == unix.S_IFCHR || (stat.Mode&unix.S_IFMT) == unix.S_IFBLK {
-					// Character or block device - don't read contents
-					contentHash = ""
-				} else {
-					fileContent, err := os.ReadFile(path)
-					if err != nil {
-						return fmt.Errorf("failed to read file contents for hashing: %w", err)
-					}
-
-					hash := sha256.Sum256(fileContent)
-					contentHash = hex.EncodeToString(hash[:])
+				fileContent, err := os.ReadFile(path)
+				if err != nil {
+					return fmt.Errorf("failed to read file contents for hashing: %w", err)
 				}
+
+				hash := sha256.Sum256(fileContent)
+				contentHash = hex.EncodeToString(hash[:])
 			}
 
 			// Determine the file mode and type
