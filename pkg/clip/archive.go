@@ -181,10 +181,12 @@ func (ca *ClipArchiver) Create(opts ClipArchiverOptions) error {
 	// Create a new index for the archive
 	index := ca.newIndex()
 
+	log.Info().Msgf("populating index for %s", opts.SourcePath)
 	err = ca.populateIndex(index, opts.SourcePath)
 	if err != nil {
 		return err
 	}
+	log.Info().Msgf("index populated for %s", opts.SourcePath)
 
 	// Prepare and write placeholder for the header
 	var storageType [12]byte
