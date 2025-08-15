@@ -82,6 +82,24 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 
 	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
+			// Get stat info first to check file type
+			var stat unix.Stat_t
+			var err error
+			if de.IsSymlink() {
+				err = unix.Lstat(path, &stat)
+			} else {
+				err = unix.Stat(path, &stat)
+			}
+			if err != nil {
+				return err
+			}
+
+			// Skip device files
+			if (stat.Mode&unix.S_IFMT) == unix.S_IFCHR || (stat.Mode&unix.S_IFMT) == unix.S_IFBLK {
+				log.Info().Msgf("skipping device file: %s", path)
+				return nil
+			}
+
 			var target string = ""
 			var nodeType common.ClipNodeType
 
@@ -96,17 +114,6 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				nodeType = common.SymLinkNode
 			} else {
 				nodeType = common.FileNode
-			}
-
-			var stat unix.Stat_t
-			var err error
-			if nodeType == common.SymLinkNode {
-				err = unix.Lstat(path, &stat)
-			} else {
-				err = unix.Stat(path, &stat)
-			}
-			if err != nil {
-				return err
 			}
 
 			var contentHash = ""
