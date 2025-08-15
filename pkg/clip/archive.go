@@ -82,8 +82,6 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 
 	err := godirwalk.Walk(sourcePath, &godirwalk.Options{
 		Callback: func(path string, de *godirwalk.Dirent) error {
-			log.Info().Msgf("processing path %s", path)
-
 			// Get stat info first to check file type
 			var stat unix.Stat_t
 			var err error
