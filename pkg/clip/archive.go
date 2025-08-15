@@ -112,13 +112,19 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 
 			var contentHash = ""
 			if nodeType == common.FileNode {
-				fileContent, err := os.ReadFile(path)
-				if err != nil {
-					return fmt.Errorf("failed to read file contents for hashing: %w", err)
-				}
+				// Skip reading device files to avoid blocking
+				if (stat.Mode&unix.S_IFMT) == unix.S_IFCHR || (stat.Mode&unix.S_IFMT) == unix.S_IFBLK {
+					// Character or block device - don't read contents
+					contentHash = ""
+				} else {
+					fileContent, err := os.ReadFile(path)
+					if err != nil {
+						return fmt.Errorf("failed to read file contents for hashing: %w", err)
+					}
 
-				hash := sha256.Sum256(fileContent)
-				contentHash = hex.EncodeToString(hash[:])
+					hash := sha256.Sum256(fileContent)
+					contentHash = hex.EncodeToString(hash[:])
+				}
 			}
 
 			// Determine the file mode and type
