@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -165,17 +164,7 @@ func (om *OverlayMounter) mountFUSE(ctx context.Context, mount *OverlayMount, cl
 		return fmt.Errorf("failed to wait for mount: %w", err)
 	}
 
-	// CRITICAL: Give FUSE mount time to stabilize before creating overlay
-	// Without this, overlayfs may see a "deleted directory" error
-	time.Sleep(500 * time.Millisecond)
-	
-	// Verify mount is accessible by listing root
-	entries, err := os.ReadDir(mount.ROMount)
-	if err != nil {
-		return fmt.Errorf("FUSE mount not accessible: %w", err)
-	}
-	log.Info().Msgf("FUSE mounted at: %s (%d entries)", mount.ROMount, len(entries))
-	
+	log.Info().Msgf("FUSE mounted at: %s", mount.ROMount)
 	return nil
 }
 
