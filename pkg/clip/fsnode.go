@@ -98,13 +98,23 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
+	// Determine file size based on storage type
+	var fileSize int64
+	if n.clipNode.Remote != nil {
+		// OCI v2 mode: use Remote.ULength
+		fileSize = n.clipNode.Remote.ULength
+	} else {
+		// Legacy mode: use DataLen
+		fileSize = n.clipNode.DataLen
+	}
+
 	// Immediately return zeroed buffer if read is completely beyond EOF or file is empty
-	if off >= n.clipNode.DataLen || n.clipNode.DataLen == 0 {
+	if off >= fileSize || fileSize == 0 {
 		return fuse.ReadResultData(dest[:0]), fs.OK
 	}
 
 	// Determine readable length
-	maxReadable := n.clipNode.DataLen - off
+	maxReadable := fileSize - off
 	readLen := int64(len(dest))
 	if readLen > maxReadable {
 		readLen = maxReadable
@@ -113,7 +123,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	// Attempt to read from cache first
+	// Attempt to read from cache first (only for legacy mode or if content hash is available)
 	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
 		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
 		if cacheErr == nil {
@@ -121,22 +131,28 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		} else {
 			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 			if err != nil {
+				n.log("Read error: %v", err)
 				return nil, syscall.EIO
 			}
 
-			go func() {
-				n.filesystem.CacheFile(n)
-			}()
+			// Only cache for legacy files with content hash
+			if n.clipNode.Remote == nil && n.clipNode.ContentHash != "" {
+				go func() {
+					n.filesystem.CacheFile(n)
+				}()
+			}
 		}
 	} else {
 		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 		if err != nil {
+			n.log("Read error: %v", err)
 			return nil, syscall.EIO
 		}
 	}
 
-	// Null-terminate immediately after last read byte if buffer is not fully filled
-	if nRead < len(dest) {
+	// For OCI v2 mode, we don't null-terminate as it can corrupt binary data
+	// Only null-terminate for legacy mode and only if buffer is not fully filled
+	if n.clipNode.Remote == nil && nRead < len(dest) {
 		dest[nRead] = 0
 		nRead++
 	}

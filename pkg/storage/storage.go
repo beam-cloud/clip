@@ -27,49 +27,53 @@ type ClipStorageOpts struct {
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	var storage ClipStorageInterface = nil
-	var storageType common.StorageMode
 	var err error = nil
 
 	header := opts.Metadata.Header
 	metadata := opts.Metadata
 
-	// This a remote archive, so we have to load that particular storage implementation
+	// Determine storage type based on metadata
 	if header.StorageInfoLength > 0 {
-		storageType = common.StorageModeS3
+		// Check the actual storage info type
+		switch metadata.StorageInfo.Type() {
+		case "s3":
+			if metadata.StorageInfo == nil && opts.StorageInfo == nil {
+				return nil, errors.New("storage info not provided")
+			}
+
+			// If StorageInfo is passed in, we can use that to override the configuration
+			// stored in the metadata. This way you can use a different bucket for the
+			// archive than the one used when the archive was created.
+			storageInfo := metadata.StorageInfo.(common.S3StorageInfo)
+			if opts.StorageInfo != nil {
+				storageInfo = *opts.StorageInfo
+			}
+
+			storage, err = NewS3ClipStorage(metadata, S3ClipStorageOpts{
+				Bucket:         storageInfo.Bucket,
+				Region:         storageInfo.Region,
+				Key:            storageInfo.Key,
+				Endpoint:       storageInfo.Endpoint,
+				ForcePathStyle: storageInfo.ForcePathStyle,
+				CachePath:      opts.CachePath,
+				AccessKey:      opts.Credentials.S3.AccessKey,
+				SecretKey:      opts.Credentials.S3.SecretKey,
+			})
+		case "oci":
+			ociStorageInfo := metadata.StorageInfo.(*common.OCIStorageInfo)
+			storage, err = NewOCIClipStorage(metadata, OCIClipStorageOpts{
+				RegistryURL:    ociStorageInfo.RegistryURL,
+				Repository:     ociStorageInfo.Repository,
+				AuthConfigPath: ociStorageInfo.AuthConfigPath,
+			})
+		default:
+			err = errors.New("unsupported remote storage type: " + metadata.StorageInfo.Type())
+		}
 	} else {
-		storageType = common.StorageModeLocal
-	}
-
-	switch storageType {
-	case common.StorageModeS3:
-		if metadata.StorageInfo == nil && opts.StorageInfo == nil {
-			return nil, errors.New("storage info not provided")
-		}
-
-		// If StorageInfo is passed in, we can use that to override the configuration
-		// stored in the metadata. This way you can use a different bucket for the
-		// archive than the one used when the archive was created.
-		storageInfo := metadata.StorageInfo.(common.S3StorageInfo)
-		if opts.StorageInfo != nil {
-			storageInfo = *opts.StorageInfo
-		}
-
-		storage, err = NewS3ClipStorage(metadata, S3ClipStorageOpts{
-			Bucket:         storageInfo.Bucket,
-			Region:         storageInfo.Region,
-			Key:            storageInfo.Key,
-			Endpoint:       storageInfo.Endpoint,
-			ForcePathStyle: storageInfo.ForcePathStyle,
-			CachePath:      opts.CachePath,
-			AccessKey:      opts.Credentials.S3.AccessKey,
-			SecretKey:      opts.Credentials.S3.SecretKey,
-		})
-	case common.StorageModeLocal:
+		// Local storage
 		storage, err = NewLocalClipStorage(metadata, LocalClipStorageOpts{
 			ArchivePath: opts.ArchivePath,
 		})
-	default:
-		err = errors.New("unsupported storage type")
 	}
 
 	if err != nil {

@@ -14,3 +14,9 @@ stop:
 e2e:
 	go build -o ./bin/e2e ./e2e/main.go
 
+clipctl:
+	go build -o ./bin/clipctl ./cmd/clipctl/main.go
+
+install-clipctl: clipctl
+	sudo cp ./bin/clipctl /usr/local/bin/clipctl
+

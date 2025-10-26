@@ -22,14 +22,25 @@ const (
 	StorageModeS3    StorageMode = "s3"
 )
 
+type RemoteRef struct {
+	LayerDigest string // "sha256:…"
+	UOffset     int64  // file payload start in UNCOMPRESSED tar stream
+	ULength     int64  // file payload length (uncompressed)
+}
+
 type ClipNode struct {
 	NodeType    ClipNodeType
 	Path        string
 	Attr        fuse.Attr
-	Target      string
-	ContentHash string
-	DataPos     int64 // Position of the nodes data in the final binary
-	DataLen     int64 // Length of the nodes data
+	Target      string        // symlink
+	ContentHash string        // optional
+
+	// Legacy (keep for back-compat):
+	DataPos int64 // Position of the nodes data in the final binary
+	DataLen int64 // Length of the nodes data
+
+	// New (v2 read path):
+	Remote *RemoteRef
 }
 
 // IsDir returns true if the ClipNode represents a directory.
@@ -105,4 +116,29 @@ func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
 	})
 
 	return entries
+}
+
+// Gzip decompression index (zran)
+type GzipCheckpoint struct {
+	COff int64 // compressed offset
+	UOff int64 // uncompressed offset
+}
+
+type GzipIndex struct {
+	LayerDigest string
+	// Checkpoint every ~2–4 MiB of uncompressed output
+	Checkpoints []GzipCheckpoint
+}
+
+// (P1) Zstd index
+type ZstdFrame struct {
+	COff int64 // compressed offset
+	CLen int64 // compressed length
+	UOff int64 // uncompressed offset
+	ULen int64 // uncompressed length
+}
+
+type ZstdIndex struct {
+	LayerDigest string
+	Frames      []ZstdFrame
 }

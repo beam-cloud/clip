@@ -1,8 +1,11 @@
 package clip
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
@@ -14,9 +17,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	log "github.com/rs/zerolog/log"
 	"golang.org/x/sys/unix"
@@ -31,6 +37,12 @@ func init() {
 	gob.Register(&common.ClipNode{})
 	gob.Register(&common.StorageInfoWrapper{})
 	gob.Register(&common.S3StorageInfo{})
+	gob.Register(&common.OCIStorageInfo{})
+	gob.Register(&common.RemoteRef{})
+	gob.Register(&common.GzipIndex{})
+	gob.Register(&common.GzipCheckpoint{})
+	gob.Register(&common.ZstdIndex{})
+	gob.Register(&common.ZstdFrame{})
 }
 
 type ClipArchiverOptions struct {
@@ -431,6 +443,12 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 				return nil, fmt.Errorf("error decoding s3 storage info: %v", err)
 			}
 			storageInfo = s3Info
+		case "oci":
+			var ociInfo common.OCIStorageInfo
+			if err := gob.NewDecoder(bytes.NewReader(wrapper.Data)).Decode(&ociInfo); err != nil {
+				return nil, fmt.Errorf("error decoding oci storage info: %v", err)
+			}
+			storageInfo = ociInfo
 		default:
 			return nil, fmt.Errorf("unsupported storage info type: %s", wrapper.Type)
 		}
@@ -689,4 +707,448 @@ func (ca *ClipArchiver) EncodeIndex(index *btree.BTree) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// Helper structures for OCI indexing
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	k, err := cr.r.Read(p)
+	cr.n += int64(k)
+	return k, err
+}
+
+type gzipIndexBuilder struct {
+	checkpoints     []common.GzipCheckpoint
+	checkpointMiB   int64
+	lastCheckpointU int64
+}
+
+func newGzipIndexBuilder(checkpointMiB int64) *gzipIndexBuilder {
+	if checkpointMiB <= 0 {
+		checkpointMiB = 2 // default 2 MiB
+	}
+	return &gzipIndexBuilder{
+		checkpoints:   make([]common.GzipCheckpoint, 0),
+		checkpointMiB: checkpointMiB,
+	}
+}
+
+func (gib *gzipIndexBuilder) maybeAddCheckpoint(cOff, uOff int64) {
+	checkpointBytes := gib.checkpointMiB * 1024 * 1024
+	if uOff-gib.lastCheckpointU >= checkpointBytes || len(gib.checkpoints) == 0 {
+		gib.checkpoints = append(gib.checkpoints, common.GzipCheckpoint{
+			COff: cOff,
+			UOff: uOff,
+		})
+		gib.lastCheckpointU = uOff
+	}
+}
+
+func (gib *gzipIndexBuilder) build(layerDigest string) *common.GzipIndex {
+	return &common.GzipIndex{
+		LayerDigest: layerDigest,
+		Checkpoints: gib.checkpoints,
+	}
+}
+
+// nearestCheckpoint finds the largest checkpoint UOff <= wantU
+func nearestCheckpoint(checkpoints []common.GzipCheckpoint, wantU int64) (cOff, uOff int64) {
+	if len(checkpoints) == 0 {
+		return 0, 0
+	}
+	
+	// Binary search for largest UOff <= wantU
+	i := sort.Search(len(checkpoints), func(i int) bool {
+		return checkpoints[i].UOff > wantU
+	}) - 1
+	
+	if i < 0 {
+		i = 0
+	}
+	
+	return checkpoints[i].COff, checkpoints[i].UOff
+}
+
+// isWhiteout checks if a tar entry is a whiteout file
+func isWhiteout(name string) bool {
+	base := path.Base(name)
+	return strings.HasPrefix(base, ".wh.")
+}
+
+// applyWhiteout applies OCI whiteout semantics to the index
+func applyWhiteout(index *btree.BTree, hdrName string) {
+	base := path.Base(hdrName)
+	dir := path.Dir(hdrName)
+	
+	if base == ".wh..wh..opq" {
+		// Remove all entries under dir from lower layers
+		prefix := "/" + strings.TrimPrefix(dir, "./") + "/"
+		if prefix == "//" {
+			prefix = "/"
+		}
+		
+		// Collect items to delete
+		var toDelete []*common.ClipNode
+		index.Ascend(&common.ClipNode{Path: prefix}, func(item interface{}) bool {
+			node := item.(*common.ClipNode)
+			if strings.HasPrefix(node.Path, prefix) && node.Path != prefix {
+				toDelete = append(toDelete, node)
+			}
+			return true
+		})
+		
+		// Delete collected items
+		for _, node := range toDelete {
+			index.Delete(node)
+		}
+		return
+	}
+	
+	if strings.HasPrefix(base, ".wh.") {
+		victim := path.Join(dir, strings.TrimPrefix(base, ".wh."))
+		victimPath := "/" + strings.TrimPrefix(victim, "./")
+		
+		// Remove the victim file/dir
+		if existing := index.Get(&common.ClipNode{Path: victimPath}); existing != nil {
+			index.Delete(existing)
+		}
+		
+		// Remove anything underneath if it's a directory
+		victimPrefix := victimPath + "/"
+		var toDelete []*common.ClipNode
+		index.Ascend(&common.ClipNode{Path: victimPrefix}, func(item interface{}) bool {
+			node := item.(*common.ClipNode)
+			if strings.HasPrefix(node.Path, victimPrefix) {
+				toDelete = append(toDelete, node)
+			}
+			return true
+		})
+		
+		for _, node := range toDelete {
+			index.Delete(node)
+		}
+	}
+}
+
+// setOrMerge adds or updates a node in the index (overlay semantics)
+func setOrMerge(index *btree.BTree, node *common.ClipNode) {
+	// In overlay semantics, upper layers override lower layers
+	index.Set(node)
+}
+
+// IndexOCIImage creates an index from an OCI image without extracting layer data
+func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, ref string) (
+	index *btree.BTree,
+	layerDigests []string,
+	gzipIdx map[string]*common.GzipIndex,
+	zstdIdx map[string]*common.ZstdIndex,
+	err error,
+) {
+	log.Info().Msgf("indexing OCI image: %s", ref)
+	
+	// Parse image reference
+	imageRef, err := name.ParseReference(ref)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to parse image reference: %w", err)
+	}
+	
+	// Fetch image descriptor
+	img, err := remote.Image(imageRef)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to fetch image: %w", err)
+	}
+	
+	// Get manifest to extract layer information
+	manifest, err := img.Manifest()
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to get manifest: %w", err)
+	}
+	
+	// Initialize return values
+	index = ca.newIndex()
+	layerDigests = make([]string, len(manifest.Layers))
+	gzipIdx = make(map[string]*common.GzipIndex)
+	zstdIdx = make(map[string]*common.ZstdIndex)
+	
+	// Add root directory
+	rootNode := &common.ClipNode{
+		Path:     "/",
+		NodeType: common.DirNode,
+		Attr: fuse.Attr{
+			Mode: uint32(os.ModeDir | 0755),
+			Ino:  1,
+		},
+	}
+	index.Set(rootNode)
+	
+	// Process layers in order
+	layers, err := img.Layers()
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to get layers: %w", err)
+	}
+	
+	for i, layer := range layers {
+		digest, err := layer.Digest()
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("failed to get layer digest: %w", err)
+		}
+		
+		layerDigest := digest.String()
+		layerDigests[i] = layerDigest
+		
+		log.Info().Msgf("processing layer %d/%d: %s", i+1, len(layers), layerDigest)
+		
+		// Get compressed layer stream
+		compressedRC, err := layer.Compressed()
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("failed to get compressed layer: %w", err)
+		}
+		defer compressedRC.Close()
+		
+		// Check media type to determine compression
+		mediaType, err := layer.MediaType()
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("failed to get layer media type: %w", err)
+		}
+		
+		switch mediaType {
+		case "application/vnd.docker.image.rootfs.diff.tar.gzip",
+			 "application/vnd.oci.image.layer.v1.tar+gzip":
+			// Process gzip layer
+			gzipIndex, err := ca.indexGzipLayer(compressedRC, layerDigest, index)
+			if err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("failed to index gzip layer %s: %w", layerDigest, err)
+			}
+			gzipIdx[layerDigest] = gzipIndex
+			
+		case "application/vnd.oci.image.layer.v1.tar+zstd":
+			// TODO: Implement zstd indexing (P1)
+			return nil, nil, nil, nil, fmt.Errorf("zstd layers not yet supported")
+			
+		default:
+			return nil, nil, nil, nil, fmt.Errorf("unsupported layer media type: %s", mediaType)
+		}
+	}
+	
+	log.Info().Msgf("successfully indexed OCI image with %d layers", len(layerDigests))
+	return index, layerDigests, gzipIdx, zstdIdx, nil
+}
+
+// indexGzipLayer processes a single gzip-compressed layer
+func (ca *ClipArchiver) indexGzipLayer(compressedRC io.ReadCloser, layerDigest string, index *btree.BTree) (*common.GzipIndex, error) {
+	defer compressedRC.Close()
+	
+	// Create gzip index builder with 2 MiB checkpoints
+	gzipBuilder := newGzipIndexBuilder(2)
+	
+	// Create a TeeReader to track compressed bytes while decompressing
+	compressedCounter := &countingReader{r: compressedRC}
+	
+	// Create gzip reader
+	gzr, err := gzip.NewReader(compressedCounter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzr.Close()
+	
+	// Create counting reader for uncompressed bytes
+	uncompressedCounter := &countingReader{r: gzr}
+	
+	// Create tar reader
+	tr := tar.NewReader(uncompressedCounter)
+	
+	// Process tar entries
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read tar header: %w", err)
+		}
+		
+		// Record checkpoint periodically
+		gzipBuilder.maybeAddCheckpoint(compressedCounter.n, uncompressedCounter.n)
+		
+		// Handle whiteouts
+		if isWhiteout(hdr.Name) {
+			applyWhiteout(index, hdr.Name)
+			continue
+		}
+		
+		// Convert tar header to ClipNode
+		node, err := ca.tarHeaderToClipNode(hdr, layerDigest, uncompressedCounter.n)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert tar header: %w", err)
+		}
+		
+		if node != nil {
+			// For regular files, skip the data but track the position
+			if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA {
+				dataStart := uncompressedCounter.n
+				
+				// Skip file data by copying to discard
+				if _, err := io.CopyN(io.Discard, tr, hdr.Size); err != nil {
+					return nil, fmt.Errorf("failed to skip file data: %w", err)
+				}
+				
+				// Update node with remote reference
+				node.Remote = &common.RemoteRef{
+					LayerDigest: layerDigest,
+					UOffset:     dataStart,
+					ULength:     hdr.Size,
+				}
+			}
+			
+			// Add node to index (overlay semantics)
+			setOrMerge(index, node)
+		}
+	}
+	
+	// Build final gzip index
+	return gzipBuilder.build(layerDigest), nil
+}
+
+// tarHeaderToClipNode converts a tar header to a ClipNode
+func (ca *ClipArchiver) tarHeaderToClipNode(hdr *tar.Header, layerDigest string, currentOffset int64) (*common.ClipNode, error) {
+	// Clean path
+	cleanPath := "/" + strings.TrimPrefix(strings.TrimPrefix(hdr.Name, "./"), "/")
+	if cleanPath == "/" && hdr.Name != "." && hdr.Name != "./" {
+		cleanPath = "/" + strings.TrimPrefix(hdr.Name, "./")
+	}
+	
+	// Convert tar mode to fuse mode
+	var mode uint32
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		mode = uint32(hdr.Mode) | syscall.S_IFDIR
+	case tar.TypeReg, tar.TypeRegA:
+		mode = uint32(hdr.Mode) | syscall.S_IFREG
+	case tar.TypeSymlink:
+		mode = uint32(hdr.Mode) | syscall.S_IFLNK
+	case tar.TypeLink:
+		// Hard links - for now treat as regular files
+		mode = uint32(hdr.Mode) | syscall.S_IFREG
+	default:
+		// Skip other types (char dev, block dev, etc.)
+		return nil, nil
+	}
+	
+	// Determine node type
+	var nodeType common.ClipNodeType
+	var target string
+	
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		nodeType = common.DirNode
+	case tar.TypeReg, tar.TypeRegA, tar.TypeLink:
+		nodeType = common.FileNode
+	case tar.TypeSymlink:
+		nodeType = common.SymLinkNode
+		target = hdr.Linkname
+	default:
+		return nil, nil
+	}
+	
+	// Create fuse attributes
+	attr := fuse.Attr{
+		Ino:   0, // Will be set later based on path hash
+		Size:  uint64(hdr.Size),
+		Mode:  mode,
+		Nlink: 1,
+		Owner: fuse.Owner{
+			Uid: uint32(hdr.Uid),
+			Gid: uint32(hdr.Gid),
+		},
+		Atime: uint64(hdr.AccessTime.Unix()),
+		Mtime: uint64(hdr.ModTime.Unix()),
+		Ctime: uint64(hdr.ChangeTime.Unix()),
+	}
+	
+	// Generate stable inode based on layer digest and path
+	attr.Ino = ca.generateInode(layerDigest, cleanPath)
+	
+	return &common.ClipNode{
+		Path:     cleanPath,
+		NodeType: nodeType,
+		Attr:     attr,
+		Target:   target,
+		// ContentHash will be computed if needed
+		// DataPos/DataLen are legacy fields, not used for OCI
+		// Remote will be set by caller for regular files
+	}, nil
+}
+
+// generateInode creates a stable inode number from layer digest and path
+func (ca *ClipArchiver) generateInode(layerDigest, path string) uint64 {
+	h := sha256.New()
+	h.Write([]byte(layerDigest))
+	h.Write([]byte(path))
+	hash := h.Sum(nil)
+	
+	// Use first 8 bytes as inode, ensure it's not 0
+	inode := binary.BigEndian.Uint64(hash[:8])
+	if inode == 0 {
+		inode = 1
+	}
+	return inode
+}
+
+// CreateFromOCI creates a metadata-only .clip file from an OCI image
+func (ca *ClipArchiver) CreateFromOCI(
+	ctx context.Context,
+	imageRef, clipOut string,
+	registryURL, authConfigPath string,
+) error {
+	log.Info().Msgf("creating clip from OCI image: %s -> %s", imageRef, clipOut)
+	
+	// Index the OCI image
+	index, layerDigests, gzipIdx, zstdIdx, err := ca.IndexOCIImage(ctx, imageRef)
+	if err != nil {
+		return fmt.Errorf("failed to index OCI image: %w", err)
+	}
+	
+	// Parse image reference to extract repository info
+	ref, err := name.ParseReference(imageRef)
+	if err != nil {
+		return fmt.Errorf("failed to parse image reference: %w", err)
+	}
+	
+	// Extract registry and repository
+	if registryURL == "" {
+		registryURL = ref.Context().RegistryStr()
+	}
+	repository := ref.Context().RepositoryStr()
+	
+	// Create OCI storage info
+	storageInfo := &common.OCIStorageInfo{
+		RegistryURL:        registryURL,
+		Repository:         repository,
+		Layers:             layerDigests,
+		GzipIdxByLayer:     gzipIdx,
+		ZstdIdxByLayer:     zstdIdx,
+		AuthConfigPath:     authConfigPath,
+	}
+	
+	// Create metadata
+	metadata := &common.ClipArchiveMetadata{
+		Header: common.ClipArchiveHeader{
+			ClipFileFormatVersion: common.ClipFileFormatVersion,
+		},
+		Index:       index,
+		StorageInfo: storageInfo,
+	}
+	
+	// Create the remote archive (metadata-only)
+	err = ca.CreateRemoteArchive(storageInfo, metadata, clipOut)
+	if err != nil {
+		return fmt.Errorf("failed to create remote archive: %w", err)
+	}
+	
+	log.Info().Msgf("successfully created OCI clip file: %s", clipOut)
+	return nil
 }

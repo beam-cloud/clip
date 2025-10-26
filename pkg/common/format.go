@@ -72,3 +72,27 @@ func (ssi S3StorageInfo) Encode() ([]byte, error) {
 
 	return buf.Bytes(), nil
 }
+
+// OCI Registry Storage Info for v2
+type OCIStorageInfo struct {
+	RegistryURL        string
+	Repository         string
+	Layers             []string                    // ordered list of layer digests
+	GzipIdxByLayer     map[string]*GzipIndex      // gzip indexes by layer digest
+	ZstdIdxByLayer     map[string]*ZstdIndex      // zstd indexes by layer digest
+	AuthConfigPath     string                     // path to docker config.json or similar
+}
+
+func (osi OCIStorageInfo) Type() string {
+	return "oci"
+}
+
+func (osi OCIStorageInfo) Encode() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(osi); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
