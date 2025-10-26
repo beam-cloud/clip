@@ -292,12 +292,19 @@ func (ca *ClipArchiver) indexLayer(
 			}
 
 		case tar.TypeSymlink:
+			// Get the symlink target
+			target := hdr.Linkname
+			if target == "" {
+				log.Warn().Msgf("Empty symlink target for %s", cleanPath)
+			}
+			
 			node := &common.ClipNode{
 				Path:     cleanPath,
 				NodeType: common.SymLinkNode,
-				Target:   hdr.Linkname,
+				Target:   target,
 				Attr: fuse.Attr{
 					Ino:   ca.generateInode(layerDigest, cleanPath),
+					Size:  uint64(len(target)), // CRITICAL: Symlink size must be length of target
 					Mode:  ca.tarModeToFuse(hdr.Mode, tar.TypeSymlink),
 					Atime: uint64(hdr.AccessTime.Unix()),
 					Mtime: uint64(hdr.ModTime.Unix()),
@@ -312,7 +319,7 @@ func (ca *ClipArchiver) indexLayer(
 			ca.setOrMerge(index, node)
 
 			if opts.Verbose {
-				log.Debug().Msgf("  Symlink: %s -> %s", cleanPath, hdr.Linkname)
+				log.Debug().Msgf("  Symlink: %s -> %s", cleanPath, target)
 			}
 
 		case tar.TypeDir:
