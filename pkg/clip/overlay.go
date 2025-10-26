@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -164,7 +165,17 @@ func (om *OverlayMounter) mountFUSE(ctx context.Context, mount *OverlayMount, cl
 		return fmt.Errorf("failed to wait for mount: %w", err)
 	}
 
-	log.Info().Msgf("FUSE mounted at: %s", mount.ROMount)
+	// CRITICAL: Give FUSE mount time to stabilize before creating overlay
+	// Without this, overlayfs may see a "deleted directory" error
+	time.Sleep(500 * time.Millisecond)
+	
+	// Verify mount is accessible by listing root
+	entries, err := os.ReadDir(mount.ROMount)
+	if err != nil {
+		return fmt.Errorf("FUSE mount not accessible: %w", err)
+	}
+	log.Info().Msgf("FUSE mounted at: %s (%d entries)", mount.ROMount, len(entries))
+	
 	return nil
 }
 
@@ -196,16 +207,29 @@ func (om *OverlayMounter) tryKernelOverlayfs(mount *OverlayMount) error {
 		return fmt.Errorf("kernel overlayfs not supported")
 	}
 
-	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s",
+	// IMPORTANT: Verify lower dir exists and is accessible
+	if _, err := os.Stat(mount.ROMount); err != nil {
+		return fmt.Errorf("lower dir not accessible: %w", err)
+	}
+
+	// Use index=off and metacopy=off for better FUSE compatibility
+	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s,index=off,metacopy=off",
 		mount.ROMount,
 		mount.UpperDir,
 		mount.WorkDir,
 	)
 
-	// Mount using syscall
-	err := syscall.Mount("overlay", mount.RootfsPath, "overlay", 0, opts)
+	// Mount using syscall with MS_NODEV|MS_NOSUID for security
+	flags := uintptr(syscall.MS_NODEV | syscall.MS_NOSUID)
+	err := syscall.Mount("overlay", mount.RootfsPath, "overlay", flags, opts)
 	if err != nil {
 		return fmt.Errorf("kernel overlayfs mount failed: %w", err)
+	}
+
+	// Verify the overlay mount is accessible
+	if _, err := os.Stat(filepath.Join(mount.RootfsPath, ".")); err != nil {
+		syscall.Unmount(mount.RootfsPath, syscall.MNT_FORCE)
+		return fmt.Errorf("overlay mount not accessible after creation: %w", err)
 	}
 
 	log.Info().Msgf("Kernel overlayfs mounted at: %s", mount.RootfsPath)
