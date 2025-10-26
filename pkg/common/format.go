@@ -72,3 +72,28 @@ func (ssi S3StorageInfo) Encode() ([]byte, error) {
 
 	return buf.Bytes(), nil
 }
+
+// OCIStorageInfo stores metadata for OCI images with decompression indexes
+type OCIStorageInfo struct {
+	RegistryURL    string
+	Repository     string
+	Reference      string // tag or digest
+	Layers         []string
+	GzipIdxByLayer map[string]*GzipIndex // per-layer gzip decompression index
+	ZstdIdxByLayer map[string]*ZstdIndex // per-layer zstd index (P1)
+	AuthConfig     string                // optional: base64-encoded auth config
+}
+
+func (osi OCIStorageInfo) Type() string {
+	return "oci"
+}
+
+func (osi OCIStorageInfo) Encode() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(osi); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}

@@ -20,7 +20,15 @@ type StorageMode string
 const (
 	StorageModeLocal StorageMode = "local"
 	StorageModeS3    StorageMode = "s3"
+	StorageModeOCI   StorageMode = "oci"
 )
+
+// RemoteRef points to a file's data within an OCI layer
+type RemoteRef struct {
+	LayerDigest string // "sha256:..."
+	UOffset     int64  // file payload start in UNCOMPRESSED tar stream
+	ULength     int64  // file payload length (uncompressed)
+}
 
 type ClipNode struct {
 	NodeType    ClipNodeType
@@ -28,8 +36,13 @@ type ClipNode struct {
 	Attr        fuse.Attr
 	Target      string
 	ContentHash string
-	DataPos     int64 // Position of the nodes data in the final binary
-	DataLen     int64 // Length of the nodes data
+
+	// Legacy fields (keep for back-compat):
+	DataPos int64 // Position of the nodes data in the final binary
+	DataLen int64 // Length of the nodes data
+
+	// New (v2 read path):
+	Remote *RemoteRef
 }
 
 // IsDir returns true if the ClipNode represents a directory.
@@ -105,4 +118,28 @@ func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
 	})
 
 	return entries
+}
+
+// Gzip decompression index (zran-style checkpoints)
+type GzipCheckpoint struct {
+	COff int64 // Compressed offset
+	UOff int64 // Uncompressed offset
+}
+
+type GzipIndex struct {
+	LayerDigest string
+	Checkpoints []GzipCheckpoint // Checkpoint every ~2–4 MiB of uncompressed output
+}
+
+// Zstd frame index (P1 - future)
+type ZstdFrame struct {
+	COff int64 // Compressed offset
+	CLen int64 // Compressed length
+	UOff int64 // Uncompressed offset
+	ULen int64 // Uncompressed length
+}
+
+type ZstdIndex struct {
+	LayerDigest string
+	Frames      []ZstdFrame
 }

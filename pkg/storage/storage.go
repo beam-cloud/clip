@@ -33,9 +33,21 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	header := opts.Metadata.Header
 	metadata := opts.Metadata
 
-	// This a remote archive, so we have to load that particular storage implementation
+	// Determine storage type from header or metadata
 	if header.StorageInfoLength > 0 {
-		storageType = common.StorageModeS3
+		// Check the actual storage info type
+		if metadata.StorageInfo != nil {
+			switch metadata.StorageInfo.Type() {
+			case "oci":
+				storageType = common.StorageModeOCI
+			case string(common.StorageModeS3):
+				storageType = common.StorageModeS3
+			default:
+				storageType = common.StorageModeS3 // default to S3 for backward compatibility
+			}
+		} else {
+			storageType = common.StorageModeS3
+		}
 	} else {
 		storageType = common.StorageModeLocal
 	}
@@ -63,6 +75,11 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 			CachePath:      opts.CachePath,
 			AccessKey:      opts.Credentials.S3.AccessKey,
 			SecretKey:      opts.Credentials.S3.SecretKey,
+		})
+	case common.StorageModeOCI:
+		storage, err = NewOCIClipStorage(OCIClipStorageOpts{
+			Metadata:   metadata,
+			AuthConfig: "", // TODO: pass from opts if needed
 		})
 	case common.StorageModeLocal:
 		storage, err = NewLocalClipStorage(metadata, LocalClipStorageOpts{

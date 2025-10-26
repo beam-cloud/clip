@@ -31,6 +31,12 @@ func init() {
 	gob.Register(&common.ClipNode{})
 	gob.Register(&common.StorageInfoWrapper{})
 	gob.Register(&common.S3StorageInfo{})
+	gob.Register(&common.OCIStorageInfo{})
+	gob.Register(&common.RemoteRef{})
+	gob.Register(&common.GzipCheckpoint{})
+	gob.Register(&common.GzipIndex{})
+	gob.Register(&common.ZstdFrame{})
+	gob.Register(&common.ZstdIndex{})
 }
 
 type ClipArchiverOptions struct {
@@ -431,6 +437,12 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 				return nil, fmt.Errorf("error decoding s3 storage info: %v", err)
 			}
 			storageInfo = s3Info
+		case "oci":
+			var ociInfo common.OCIStorageInfo
+			if err := gob.NewDecoder(bytes.NewReader(wrapper.Data)).Decode(&ociInfo); err != nil {
+				return nil, fmt.Errorf("error decoding oci storage info: %v", err)
+			}
+			storageInfo = ociInfo
 		default:
 			return nil, fmt.Errorf("unsupported storage info type: %s", wrapper.Type)
 		}
