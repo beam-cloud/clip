@@ -12,7 +12,8 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o /workspace/bin/clip /workspace/cmd/main.go
+# Build the library - no CLI needed, only programmatic API
+RUN go build -v ./pkg/...
 
 RUN mkdir -p /tmp/test
 

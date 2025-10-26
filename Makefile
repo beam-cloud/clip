@@ -14,10 +14,9 @@ stop:
 e2e:
 	go build -o ./bin/e2e ./e2e/main.go
 
-clipctl:
-	go build -o ./bin/clipctl ./cmd/clipctl/main.go
-
-install: clipctl
-	sudo cp ./bin/clipctl /usr/local/bin/clipctl
-	sudo chmod +x /usr/local/bin/clipctl
+# CLI tool removed - use programmatic API instead
+# See pkg/clip/clip.go for:
+#   - CreateFromOCIImage()
+#   - CreateAndUploadOCIArchive()
+#   - MountArchive()
 
