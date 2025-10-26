@@ -8,6 +8,7 @@ Clip v2 implements the complete plan for lazy, read-only FUSE for OCI images wit
 
 - **No data duplication**: Only small sidecar indexes are created per layer
 - **Registry-native**: Image bytes remain in the registry/blob store
+- **OCI Layout support**: Works with local OCI layout directories (buildah/skopeo workflows)
 - **Container runtime compatibility**: Produces real rootfs paths for runc/gVisor
 - **Overlay support**: Uses kernel overlayfs or fuse-overlayfs for read-write layers
 - **Gzip layer support**: Full implementation with zran-style checkpoints
@@ -25,12 +26,22 @@ Clip v2 implements the complete plan for lazy, read-only FUSE for OCI images wit
 
 ### Data Flow
 
+**Registry Mode:**
 ```
 OCI Registry → IndexOCIImage → .clip file (metadata only)
                 ↓
 .clip file → FUSE Mount (RO) → Overlay Mount → Container Rootfs
                 ↓
 Registry Range GET ← FUSE Read ← Container Process
+```
+
+**OCI Layout Mode (for buildah/skopeo):**
+```
+OCI Layout Dir → IndexOCILayout → .clip file (metadata only)
+                ↓
+.clip file → FUSE Mount (RO) → Overlay Mount → Container Rootfs
+                ↓
+Local File Read ← FUSE Read ← Container Process
 ```
 
 ## Implementation Details

@@ -96,3 +96,26 @@ func (osi OCIStorageInfo) Encode() ([]byte, error) {
 
 	return buf.Bytes(), nil
 }
+
+// OCI Layout Storage Info for local OCI layout directories
+type OCILayoutStorageInfo struct {
+	LayoutPath         string                     // path to OCI layout directory
+	Tag                string                     // image tag
+	Layers             []string                   // ordered list of layer digests
+	GzipIdxByLayer     map[string]*GzipIndex     // gzip indexes by layer digest
+	ZstdIdxByLayer     map[string]*ZstdIndex     // zstd indexes by layer digest
+}
+
+func (olsi OCILayoutStorageInfo) Type() string {
+	return "oci-layout"
+}
+
+func (olsi OCILayoutStorageInfo) Encode() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(olsi); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}

@@ -78,6 +78,10 @@ OCI Registry → Indexer → .clip (metadata) → FUSE (RO) → Overlay → Cont
 
 See [CLIP_V2_IMPLEMENTATION.md](CLIP_V2_IMPLEMENTATION.md) for detailed technical documentation.
 
+## Beta9 Integration
+
+For beta9 build system integration with local OCI layouts (buildah/skopeo workflows), see [BETA9_INTEGRATION.md](BETA9_INTEGRATION.md).
+
 ## Contributing
 
 We welcome contributions! Just submit a PR.

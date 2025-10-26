@@ -66,6 +66,12 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 				Repository:     ociStorageInfo.Repository,
 				AuthConfigPath: ociStorageInfo.AuthConfigPath,
 			})
+		case "oci-layout":
+			ociLayoutStorageInfo := metadata.StorageInfo.(*common.OCILayoutStorageInfo)
+			storage, err = NewOCILayoutClipStorage(metadata, OCILayoutClipStorageOpts{
+				LayoutPath: ociLayoutStorageInfo.LayoutPath,
+				Tag:        ociLayoutStorageInfo.Tag,
+			})
 		default:
 			err = errors.New("unsupported remote storage type: " + metadata.StorageInfo.Type())
 		}

@@ -37,6 +37,8 @@ func main() {
 	switch command {
 	case "index":
 		indexCommand()
+	case "index-layout":
+		indexLayoutCommand()
 	case "mount":
 		mountCommand()
 	case "umount", "unmount":
@@ -59,14 +61,18 @@ Usage:
   clipctl <command> [options]
 
 Commands:
-  index     Build metadata-only index file from OCI image
-  mount     Mount OCI image as rootfs for containers
-  umount    Unmount and cleanup container rootfs
-  metrics   Show performance metrics
+  index        Build metadata-only index file from OCI image
+  index-layout Build metadata-only index file from local OCI layout
+  mount        Mount OCI image as rootfs for containers
+  umount       Unmount and cleanup container rootfs
+  metrics      Show performance metrics
 
 Examples:
   # Build index from OCI image
   clipctl index --image docker.io/library/python:3.12 --out /var/lib/clip/indices/python:3.12.clip
+
+  # Build index from local OCI layout (for buildah/skopeo workflows)
+  clipctl index-layout --layout /tmp/ubuntu --tag latest --out ubuntu.clip
 
   # Mount image for container
   clipctl mount --image docker.io/library/python:3.12 --cid mycontainer
@@ -124,6 +130,49 @@ func indexCommand() {
 	err := archiver.CreateFromOCI(ctx, *imageRef, *outputPath, *registryURL, *authConfigPath)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create index from OCI image")
+	}
+	
+	// Get file size for reporting
+	if stat, err := os.Stat(*outputPath); err == nil {
+		log.Info().Msgf("index created successfully: %s (size: %d bytes)", *outputPath, stat.Size())
+	} else {
+		log.Info().Msgf("index created successfully: %s", *outputPath)
+	}
+}
+
+func indexLayoutCommand() {
+	fs := flag.NewFlagSet("index-layout", flag.ExitOnError)
+	
+	var (
+		layoutPath     = fs.String("layout", "", "OCI layout directory path (required)")
+		tag           = fs.String("tag", "latest", "Image tag to index")
+		outputPath    = fs.String("out", "", "Output .clip file path (required)")
+		checkpointMiB = fs.Int("checkpoint-mib", getEnvInt("CLIP_CHECKPOINT_MIB", defaultCheckpointMiB), "Checkpoint interval in MiB")
+		verbose       = fs.Bool("verbose", false, "Verbose logging")
+	)
+	
+	fs.Parse(os.Args[2:])
+	
+	if *layoutPath == "" || *outputPath == "" {
+		fmt.Fprintf(os.Stderr, "Error: --layout and --out are required\n\n")
+		fs.Usage()
+		os.Exit(1)
+	}
+	
+	if *verbose {
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	}
+	
+	log.Info().Msgf("indexing OCI layout: %s:%s", *layoutPath, *tag)
+	log.Info().Msgf("checkpoint interval: %d MiB", *checkpointMiB)
+	
+	// Create archiver and index the OCI layout
+	archiver := clip.NewClipArchiver()
+	
+	ctx := context.Background()
+	err := archiver.CreateFromOCILayout(ctx, *layoutPath, *tag, *outputPath)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to create index from OCI layout")
 	}
 	
 	// Get file size for reporting

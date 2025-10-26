@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"hash/crc64"
 	"io"
@@ -38,6 +39,7 @@ func init() {
 	gob.Register(&common.StorageInfoWrapper{})
 	gob.Register(&common.S3StorageInfo{})
 	gob.Register(&common.OCIStorageInfo{})
+	gob.Register(&common.OCILayoutStorageInfo{})
 	gob.Register(&common.RemoteRef{})
 	gob.Register(&common.GzipIndex{})
 	gob.Register(&common.GzipCheckpoint{})
@@ -449,6 +451,12 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 				return nil, fmt.Errorf("error decoding oci storage info: %v", err)
 			}
 			storageInfo = ociInfo
+		case "oci-layout":
+			var ociLayoutInfo common.OCILayoutStorageInfo
+			if err := gob.NewDecoder(bytes.NewReader(wrapper.Data)).Decode(&ociLayoutInfo); err != nil {
+				return nil, fmt.Errorf("error decoding oci layout storage info: %v", err)
+			}
+			storageInfo = ociLayoutInfo
 		default:
 			return nil, fmt.Errorf("unsupported storage info type: %s", wrapper.Type)
 		}
@@ -1098,7 +1106,7 @@ func (ca *ClipArchiver) generateInode(layerDigest, path string) uint64 {
 	return inode
 }
 
-// CreateFromOCI creates a metadata-only .clip file from an OCI image
+// CreateFromOCI creates a metadata-only .clip file from an OCI image reference
 func (ca *ClipArchiver) CreateFromOCI(
 	ctx context.Context,
 	imageRef, clipOut string,
@@ -1151,4 +1159,241 @@ func (ca *ClipArchiver) CreateFromOCI(
 	
 	log.Info().Msgf("successfully created OCI clip file: %s", clipOut)
 	return nil
+}
+
+// CreateFromOCILayout creates a metadata-only .clip file from a local OCI layout directory
+func (ca *ClipArchiver) CreateFromOCILayout(
+	ctx context.Context,
+	ociLayoutPath, tag, clipOut string,
+) error {
+	log.Info().Msgf("creating clip from OCI layout: %s:%s -> %s", ociLayoutPath, tag, clipOut)
+	
+	// Index the local OCI layout
+	index, layerDigests, gzipIdx, zstdIdx, err := ca.IndexOCILayout(ctx, ociLayoutPath, tag)
+	if err != nil {
+		return fmt.Errorf("failed to index OCI layout: %w", err)
+	}
+	
+	// Create local OCI storage info (no registry URL needed)
+	storageInfo := &common.OCILayoutStorageInfo{
+		LayoutPath:         ociLayoutPath,
+		Tag:               tag,
+		Layers:            layerDigests,
+		GzipIdxByLayer:    gzipIdx,
+		ZstdIdxByLayer:    zstdIdx,
+	}
+	
+	// Create metadata
+	metadata := &common.ClipArchiveMetadata{
+		Header: common.ClipArchiveHeader{
+			ClipFileFormatVersion: common.ClipFileFormatVersion,
+		},
+		Index:       index,
+		StorageInfo: storageInfo,
+	}
+	
+	// Create the remote archive (metadata-only)
+	err = ca.CreateRemoteArchive(storageInfo, metadata, clipOut)
+	if err != nil {
+		return fmt.Errorf("failed to create remote archive: %w", err)
+	}
+	
+	log.Info().Msgf("successfully created OCI layout clip file: %s", clipOut)
+	return nil
+}
+
+// IndexOCILayout creates an index from a local OCI layout directory
+func (ca *ClipArchiver) IndexOCILayout(ctx context.Context, layoutPath, tag string) (
+	index *btree.BTree,
+	layerDigests []string,
+	gzipIdx map[string]*common.GzipIndex,
+	zstdIdx map[string]*common.ZstdIndex,
+	err error,
+) {
+	log.Info().Msgf("indexing OCI layout: %s:%s", layoutPath, tag)
+	
+	// Read index.json to find the manifest
+	indexPath := filepath.Join(layoutPath, "index.json")
+	indexData, err := os.ReadFile(indexPath)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to read index.json: %w", err)
+	}
+	
+	var ociIndex struct {
+		Manifests []struct {
+			Digest    string            `json:"digest"`
+			MediaType string            `json:"mediaType"`
+			Annotations map[string]string `json:"annotations,omitempty"`
+		} `json:"manifests"`
+	}
+	
+	if err := json.Unmarshal(indexData, &ociIndex); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to parse index.json: %w", err)
+	}
+	
+	// Find manifest for the specified tag
+	var manifestDigest string
+	for _, manifest := range ociIndex.Manifests {
+		if refTag, ok := manifest.Annotations["org.opencontainers.image.ref.name"]; ok && refTag == tag {
+			manifestDigest = manifest.Digest
+			break
+		}
+	}
+	
+	if manifestDigest == "" && len(ociIndex.Manifests) > 0 {
+		// If no tag match, use the first manifest
+		manifestDigest = ociIndex.Manifests[0].Digest
+		log.Warn().Msgf("tag %s not found, using first manifest: %s", tag, manifestDigest)
+	}
+	
+	if manifestDigest == "" {
+		return nil, nil, nil, nil, fmt.Errorf("no manifest found for tag %s", tag)
+	}
+	
+	// Read the manifest
+	manifestPath := filepath.Join(layoutPath, "blobs", strings.ReplaceAll(manifestDigest, ":", "/"))
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to read manifest %s: %w", manifestDigest, err)
+	}
+	
+	var manifest struct {
+		Layers []struct {
+			Digest    string `json:"digest"`
+			MediaType string `json:"mediaType"`
+			Size      int64  `json:"size"`
+		} `json:"layers"`
+	}
+	
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to parse manifest: %w", err)
+	}
+	
+	// Initialize return values
+	index = ca.newIndex()
+	layerDigests = make([]string, len(manifest.Layers))
+	gzipIdx = make(map[string]*common.GzipIndex)
+	zstdIdx = make(map[string]*common.ZstdIndex)
+	
+	// Add root directory
+	rootNode := &common.ClipNode{
+		Path:     "/",
+		NodeType: common.DirNode,
+		Attr: fuse.Attr{
+			Mode: uint32(os.ModeDir | 0755),
+			Ino:  1,
+		},
+	}
+	index.Set(rootNode)
+	
+	// Process layers in order
+	for i, layer := range manifest.Layers {
+		layerDigest := layer.Digest
+		layerDigests[i] = layerDigest
+		
+		log.Info().Msgf("processing layer %d/%d: %s", i+1, len(manifest.Layers), layerDigest)
+		
+		// Open layer blob file
+		blobPath := filepath.Join(layoutPath, "blobs", strings.ReplaceAll(layerDigest, ":", "/"))
+		blobFile, err := os.Open(blobPath)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("failed to open layer blob %s: %w", layerDigest, err)
+		}
+		defer blobFile.Close()
+		
+		// Check media type to determine compression
+		switch layer.MediaType {
+		case "application/vnd.docker.image.rootfs.diff.tar.gzip",
+			 "application/vnd.oci.image.layer.v1.tar+gzip":
+			// Process gzip layer
+			gzipIndex, err := ca.indexGzipLayerFromFile(blobFile, layerDigest, index)
+			if err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("failed to index gzip layer %s: %w", layerDigest, err)
+			}
+			gzipIdx[layerDigest] = gzipIndex
+			
+		case "application/vnd.oci.image.layer.v1.tar+zstd":
+			// TODO: Implement zstd indexing (P1)
+			return nil, nil, nil, nil, fmt.Errorf("zstd layers not yet supported")
+			
+		default:
+			return nil, nil, nil, nil, fmt.Errorf("unsupported layer media type: %s", layer.MediaType)
+		}
+	}
+	
+	log.Info().Msgf("successfully indexed OCI layout with %d layers", len(layerDigests))
+	return index, layerDigests, gzipIdx, zstdIdx, nil
+}
+
+// indexGzipLayerFromFile processes a single gzip-compressed layer from a file
+func (ca *ClipArchiver) indexGzipLayerFromFile(file *os.File, layerDigest string, index *btree.BTree) (*common.GzipIndex, error) {
+	// Create gzip index builder with 2 MiB checkpoints
+	gzipBuilder := newGzipIndexBuilder(2)
+	
+	// Create a TeeReader to track compressed bytes while decompressing
+	compressedCounter := &countingReader{r: file}
+	
+	// Create gzip reader
+	gzr, err := gzip.NewReader(compressedCounter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzr.Close()
+	
+	// Create counting reader for uncompressed bytes
+	uncompressedCounter := &countingReader{r: gzr}
+	
+	// Create tar reader
+	tr := tar.NewReader(uncompressedCounter)
+	
+	// Process tar entries
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read tar header: %w", err)
+		}
+		
+		// Record checkpoint periodically
+		gzipBuilder.maybeAddCheckpoint(compressedCounter.n, uncompressedCounter.n)
+		
+		// Handle whiteouts
+		if isWhiteout(hdr.Name) {
+			applyWhiteout(index, hdr.Name)
+			continue
+		}
+		
+		// Convert tar header to ClipNode
+		node, err := ca.tarHeaderToClipNode(hdr, layerDigest, uncompressedCounter.n)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert tar header: %w", err)
+		}
+		
+		if node != nil {
+			// For regular files, skip the data but track the position
+			if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA {
+				dataStart := uncompressedCounter.n
+				
+				// Skip file data by copying to discard
+				if _, err := io.CopyN(io.Discard, tr, hdr.Size); err != nil {
+					return nil, fmt.Errorf("failed to skip file data: %w", err)
+				}
+				
+				// Update node with remote reference
+				node.Remote = &common.RemoteRef{
+					LayerDigest: layerDigest,
+					UOffset:     dataStart,
+					ULength:     hdr.Size,
+				}
+			}
+			
+			// Add node to index (overlay semantics)
+			setOrMerge(index, node)
+		}
+	}
+	
+	// Build final gzip index
+	return gzipBuilder.build(layerDigest), nil
 }
