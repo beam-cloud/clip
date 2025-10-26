@@ -98,13 +98,23 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	n.log("Read called with offset: %v", off)
 
+	// Determine file size (support both legacy and v2 RemoteRef)
+	var fileSize int64
+	if n.clipNode.Remote != nil {
+		// v2: Use RemoteRef
+		fileSize = n.clipNode.Remote.ULength
+	} else {
+		// Legacy: Use DataLen
+		fileSize = n.clipNode.DataLen
+	}
+
 	// Immediately return zeroed buffer if read is completely beyond EOF or file is empty
-	if off >= n.clipNode.DataLen || n.clipNode.DataLen == 0 {
+	if off >= fileSize || fileSize == 0 {
 		return fuse.ReadResultData(dest[:0]), fs.OK
 	}
 
 	// Determine readable length
-	maxReadable := n.clipNode.DataLen - off
+	maxReadable := fileSize - off
 	readLen := int64(len(dest))
 	if readLen > maxReadable {
 		readLen = maxReadable
@@ -113,22 +123,28 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	// Attempt to read from cache first
+	// Attempt to read from cache first (critical for production performance)
 	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
 		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
 		if cacheErr == nil {
+			// Cache hit - use cached content
 			nRead = copy(dest, content)
+			n.log("Cache hit for %s (offset=%d, len=%d)", n.clipNode.Path, off, readLen)
 		} else {
+			// Cache miss - read from storage and populate cache
 			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 			if err != nil {
 				return nil, syscall.EIO
 			}
 
+			// Asynchronously cache the file for future reads
 			go func() {
 				n.filesystem.CacheFile(n)
 			}()
+			n.log("Cache miss for %s (offset=%d, len=%d)", n.clipNode.Path, off, readLen)
 		}
 	} else {
+		// No cache available or local storage - read directly
 		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 		if err != nil {
 			return nil, syscall.EIO

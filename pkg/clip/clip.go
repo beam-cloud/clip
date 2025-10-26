@@ -41,7 +41,7 @@ type MountOptions struct {
 	CachePath             string
 	ContentCache          ContentCache
 	ContentCacheAvailable bool
-	StorageInfo           *common.S3StorageInfo
+	StorageInfo           common.ClipStorageInfo // Changed to interface to support OCI and S3
 	Credentials           storage.ClipStorageCredentials
 }
 
@@ -143,12 +143,22 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		return nil, nil, nil, fmt.Errorf("invalid archive: %v", err)
 	}
 
+	// Handle StorageInfo type conversion
+	var s3Info *common.S3StorageInfo
+	if options.StorageInfo != nil {
+		if si, ok := options.StorageInfo.(*common.S3StorageInfo); ok {
+			s3Info = si
+		} else if si, ok := options.StorageInfo.(common.S3StorageInfo); ok {
+			s3Info = &si
+		}
+	}
+
 	storage, err := storage.NewClipStorage(storage.ClipStorageOpts{
 		ArchivePath: options.ArchivePath,
 		CachePath:   options.CachePath,
 		Metadata:    metadata,
 		Credentials: options.Credentials,
-		StorageInfo: options.StorageInfo,
+		StorageInfo: s3Info,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
@@ -223,5 +233,76 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 	}
 
 	log.Info().Msg("done uploading archive")
+	return nil
+}
+
+// CreateFromOCIImageOptions configures OCI image indexing
+type CreateFromOCIImageOptions struct {
+	ImageRef      string
+	OutputPath    string
+	CheckpointMiB int64
+	Verbose       bool
+	AuthConfig    string
+}
+
+// CreateFromOCIImage creates a metadata-only clip file from an OCI image
+// This is the programmatic API for creating lazy-loading image indexes
+func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) error {
+	log.Info().Msgf("creating OCI archive index from %s to %s", options.ImageRef, options.OutputPath)
+
+	if options.CheckpointMiB == 0 {
+		options.CheckpointMiB = 2 // default
+	}
+
+	archiver := NewClipArchiver()
+	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
+		ImageRef:      options.ImageRef,
+		CheckpointMiB: options.CheckpointMiB,
+		Verbose:       options.Verbose,
+		AuthConfig:    options.AuthConfig,
+	}, options.OutputPath)
+
+	if err != nil {
+		return err
+	}
+
+	log.Info().Msg("OCI archive index created successfully")
+	return nil
+}
+
+// CreateAndUploadOCIArchive creates an OCI index and uploads metadata to S3
+// This combines indexing with remote storage upload
+func CreateAndUploadOCIArchive(ctx context.Context, options CreateFromOCIImageOptions, si common.ClipStorageInfo) error {
+	log.Info().Msgf("creating and uploading OCI archive index from %s", options.ImageRef)
+
+	// Create the OCI index locally
+	err := CreateFromOCIImage(ctx, options)
+	if err != nil {
+		return fmt.Errorf("failed to create OCI index: %w", err)
+	}
+
+	// If S3 storage info is provided, upload the metadata
+	if _, ok := si.(*common.S3StorageInfo); ok {
+		// Load the metadata
+		localArchiver := NewClipArchiver()
+		metadata, err := localArchiver.ExtractMetadata(options.OutputPath)
+		if err != nil {
+			return fmt.Errorf("failed to extract metadata: %w", err)
+		}
+
+		// Create remote archive (uploads metadata to S3)
+		outputPath := options.OutputPath
+		if outputPath == "" {
+			outputPath = fmt.Sprintf("%s.clip", options.ImageRef)
+		}
+
+		err = localArchiver.CreateRemoteArchive(si, metadata, outputPath)
+		if err != nil {
+			return fmt.Errorf("failed to create remote archive: %w", err)
+		}
+
+		log.Info().Msg("OCI archive index uploaded successfully")
+	}
+
 	return nil
 }

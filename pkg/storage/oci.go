@@ -118,9 +118,10 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 		return 0, fmt.Errorf("layer not found: %s", remote.LayerDigest)
 	}
 
-	// Get gzip index for this layer
-	gzipIndex, ok := s.storageInfo.GzipIdxByLayer[remote.LayerDigest]
-	if !ok {
+	// Gzip index exists but we don't use it in MVP (always decompress from start)
+	// TODO: Use gzip index with proper zran-style checkpointing for optimization
+	_, hasIndex := s.storageInfo.GzipIdxByLayer[remote.LayerDigest]
+	if !hasIndex {
 		return 0, fmt.Errorf("gzip index not found for layer: %s", remote.LayerDigest)
 	}
 
@@ -138,21 +139,19 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 		return 0, nil
 	}
 
-	// Find nearest checkpoint
-	cStart, uStart := s.nearestCheckpoint(gzipIndex.Checkpoints, wantUStart)
-
 	// Record metrics
 	metrics := observability.GetGlobalMetrics()
 	metrics.RecordLayerAccess(remote.LayerDigest)
 
-	// Perform range GET starting at compressed offset
-	compressedRC, err := s.rangeGet(layer, cStart)
+	// For MVP: Always decompress from the beginning
+	// TODO: Implement proper zran-style checkpointing with window state for better performance
+	compressedRC, err := s.rangeGet(layer, 0)
 	if err != nil {
 		return 0, fmt.Errorf("range GET failed: %w", err)
 	}
 	defer compressedRC.Close()
 
-	// Decompress
+	// Decompress from start
 	inflateStart := time.Now()
 	gzr, err := gzip.NewReader(compressedRC)
 	if err != nil {
@@ -160,10 +159,9 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 	}
 	defer gzr.Close()
 
-	// Discard bytes until we reach wantUStart
-	skipBytes := wantUStart - uStart
-	if skipBytes > 0 {
-		_, err = io.CopyN(io.Discard, gzr, skipBytes)
+	// Discard bytes until we reach the file offset
+	if wantUStart > 0 {
+		_, err = io.CopyN(io.Discard, gzr, wantUStart)
 		if err != nil {
 			return 0, fmt.Errorf("failed to skip bytes: %w", err)
 		}
@@ -185,11 +183,9 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 
 // rangeGet performs an HTTP Range GET on a layer starting at compressed offset
 func (s *OCIClipStorage) rangeGet(layer v1.Layer, cStart int64) (io.ReadCloser, error) {
-	// Get the full compressed stream
-	// Note: go-containerregistry doesn't directly support Range requests,
-	// so we'll use a workaround by getting the full stream and discarding the prefix
-	// For production, we should implement proper Range GET support
-	
+	// Get a fresh compressed stream each time
+	// Note: go-containerregistry creates a new HTTP request each time Compressed() is called,
+	// so this is safe to call multiple times
 	compressedRC, err := layer.Compressed()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get compressed layer: %w", err)
@@ -201,11 +197,12 @@ func (s *OCIClipStorage) rangeGet(layer v1.Layer, cStart int64) (io.ReadCloser, 
 	}
 
 	// Discard bytes until cStart
-	// This is inefficient but works; a better implementation would use HTTP Range headers
-	_, err = io.CopyN(io.Discard, compressedRC, cStart)
-	if err != nil {
+	// TODO: For production, implement proper HTTP Range GET headers
+	// to avoid fetching data we'll discard
+	discarded, err := io.CopyN(io.Discard, compressedRC, cStart)
+	if err != nil && err != io.EOF {
 		compressedRC.Close()
-		return nil, fmt.Errorf("failed to skip to offset %d: %w", cStart, err)
+		return nil, fmt.Errorf("failed to skip to offset %d (discarded %d): %w", cStart, discarded, err)
 	}
 
 	return compressedRC, nil

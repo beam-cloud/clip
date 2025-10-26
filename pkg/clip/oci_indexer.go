@@ -204,14 +204,16 @@ func (ca *ClipArchiver) indexLayer(
 	}
 	defer gzr.Close()
 
-	// Create index builder
-	indexBuilder := newGzipIndexBuilder(compressedCounter, opts.CheckpointMiB)
-
 	// Wrap uncompressed stream with counting reader
 	uncompressedCounter := &countingReader{r: gzr}
 
 	// Create tar reader
 	tr := tar.NewReader(uncompressedCounter)
+
+	// Track checkpoints
+	checkpoints := make([]common.GzipCheckpoint, 0)
+	checkpointInterval := opts.CheckpointMiB * 1024 * 1024
+	lastCheckpoint := int64(0)
 
 	// Process tar entries
 	for {
@@ -223,9 +225,15 @@ func (ca *ClipArchiver) indexLayer(
 			return nil, fmt.Errorf("failed to read tar header: %w", err)
 		}
 
-		// Record checkpoint periodically
-		if uncompressedCounter.n-indexBuilder.lastCheckpoint >= indexBuilder.checkpointInterval {
-			indexBuilder.addCheckpoint()
+		// Record checkpoint periodically (before processing file data)
+		if uncompressedCounter.n-lastCheckpoint >= checkpointInterval {
+			cp := common.GzipCheckpoint{
+				COff: compressedCounter.n,
+				UOff: uncompressedCounter.n,
+			}
+			checkpoints = append(checkpoints, cp)
+			lastCheckpoint = uncompressedCounter.n
+			log.Debug().Msgf("Added checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
 		}
 
 		// Clean path
@@ -351,8 +359,21 @@ func (ca *ClipArchiver) indexLayer(
 		}
 	}
 
-	// Finalize gzip index
-	return indexBuilder.finalizeIndex(layerDigest), nil
+	// Add final checkpoint if needed
+	if uncompressedCounter.n > lastCheckpoint {
+		cp := common.GzipCheckpoint{
+			COff: compressedCounter.n,
+			UOff: uncompressedCounter.n,
+		}
+		checkpoints = append(checkpoints, cp)
+		log.Debug().Msgf("Added final checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
+	}
+
+	// Return gzip index
+	return &common.GzipIndex{
+		LayerDigest: layerDigest,
+		Checkpoints: checkpoints,
+	}, nil
 }
 
 // handleWhiteout processes OCI whiteout files
