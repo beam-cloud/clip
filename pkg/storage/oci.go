@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -18,7 +19,7 @@ import (
 	log "github.com/rs/zerolog/log"
 )
 
-// ContentCache interface for layer caching
+// ContentCache interface for layer caching (e.g., blobcache)
 type ContentCache interface {
 	Get(key string) ([]byte, bool, error)
 	Set(key string, data []byte) error
@@ -28,10 +29,10 @@ type ContentCache interface {
 type OCIClipStorage struct {
 	metadata     *common.ClipArchiveMetadata
 	storageInfo  *common.OCIStorageInfo
-	layerCache   map[string]v1.Layer // cache of layer descriptors
+	layerCache   map[string]v1.Layer
 	httpClient   *http.Client
 	keychain     authn.Keychain
-	contentCache ContentCache // remote content cache (e.g., blobcache)
+	contentCache ContentCache
 	mu           sync.RWMutex
 }
 
@@ -70,7 +71,6 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 
 // initLayers fetches layer descriptors from the registry
 func (s *OCIClipStorage) initLayers(ctx context.Context) error {
-	// Build full image reference
 	imageRef := fmt.Sprintf("%s/%s:%s", s.storageInfo.RegistryURL, s.storageInfo.Repository, s.storageInfo.Reference)
 	
 	ref, err := name.ParseReference(imageRef)
@@ -78,44 +78,38 @@ func (s *OCIClipStorage) initLayers(ctx context.Context) error {
 		return fmt.Errorf("failed to parse image reference: %w", err)
 	}
 
-	// Fetch image
 	img, err := remote.Image(ref, remote.WithAuthFromKeychain(s.keychain), remote.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("failed to fetch image: %w", err)
 	}
 
-	// Get layers
 	layers, err := img.Layers()
 	if err != nil {
 		return fmt.Errorf("failed to get layers: %w", err)
 	}
 
-	// Cache layers by digest
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, layer := range layers {
 		digest, err := layer.Digest()
 		if err != nil {
-			log.Warn().Msgf("Failed to get layer digest: %v", err)
+			log.Warn().Err(err).Msg("failed to get layer digest")
 			continue
 		}
 		s.layerCache[digest.String()] = layer
 	}
 
-	log.Info().Msgf("Initialized %d layers for OCI image", len(s.layerCache))
+	log.Info().Int("layer_count", len(s.layerCache)).Msg("initialized OCI layers")
 	return nil
 }
 
 // ReadFile reads file content using range requests and decompression
 func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error) {
-	// Check if this is a remote ref (v2) or legacy (v1)
 	if node.Remote == nil {
-		// Legacy path - not supported in OCI storage
 		return 0, fmt.Errorf("legacy data storage not supported in OCI mode")
 	}
 
-	// V2 path: use RemoteRef
 	remote := node.Remote
 	
 	// Get the layer
@@ -127,18 +121,15 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 		return 0, fmt.Errorf("layer not found: %s", remote.LayerDigest)
 	}
 
-	// Gzip index exists but we don't use it in MVP (always decompress from start)
-	// TODO: Use gzip index with proper zran-style checkpointing for optimization
-	_, hasIndex := s.storageInfo.GzipIdxByLayer[remote.LayerDigest]
-	if !hasIndex {
+	// Verify gzip index exists
+	if _, hasIndex := s.storageInfo.GzipIdxByLayer[remote.LayerDigest]; !hasIndex {
 		return 0, fmt.Errorf("gzip index not found for layer: %s", remote.LayerDigest)
 	}
 
-	// Calculate what we want to read in uncompressed space
+	// Calculate read range in uncompressed space
 	wantUStart := remote.UOffset + offset
 	wantUEnd := remote.UOffset + remote.ULength
 	
-	// Cap to what was requested
 	readLen := int64(len(dest))
 	if wantUStart+readLen > wantUEnd {
 		readLen = wantUEnd - wantUStart
@@ -148,215 +139,147 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 		return 0, nil
 	}
 
-	// Record metrics
 	metrics := observability.GetGlobalMetrics()
 	metrics.RecordLayerAccess(remote.LayerDigest)
 
-	// Check if entire layer is cached
+	// Try cache first if available
 	if s.contentCache != nil {
-		cacheKey := fmt.Sprintf("clip:oci:layer:%s", remote.LayerDigest)
-		
-		cachedData, found, err := s.contentCache.Get(cacheKey)
-		if err != nil {
-			log.Warn().Err(err).Str("layer", remote.LayerDigest).Msg("content cache lookup failed")
-		} else if found {
-			log.Debug().Str("layer", remote.LayerDigest).Msg("layer cache hit")
-			
-			// Decompress cached data and read from it
-			return s.readFromCachedLayer(cachedData, wantUStart, dest[:readLen], remote)
+		compressedData, cacheHit := s.tryGetFromCache(remote.LayerDigest)
+		if cacheHit {
+			return s.decompressAndRead(compressedData, wantUStart, dest[:readLen], metrics)
 		}
 		
-		log.Debug().Str("layer", remote.LayerDigest).Msg("layer cache miss, fetching and caching")
-		
-		// Cache miss - fetch entire compressed layer and cache it
-		return s.fetchAndCacheLayer(layer, cacheKey, wantUStart, dest[:readLen], remote, metrics)
+		// Cache miss - fetch, cache, and read
+		return s.fetchCacheAndRead(layer, remote.LayerDigest, wantUStart, dest[:readLen], metrics)
 	}
 
-	// No content cache - fallback to direct read
-	return s.readDirectly(layer, wantUStart, dest[:readLen], remote, metrics)
+	// No cache - direct read
+	return s.fetchAndRead(layer, wantUStart, dest[:readLen], metrics)
 }
 
-// readFromCachedLayer reads from a cached compressed layer
-func (s *OCIClipStorage) readFromCachedLayer(compressedData []byte, wantUStart int64, dest []byte, remote *common.RemoteRef) (int, error) {
-	// Create gzip reader from cached data
-	gzr, err := gzip.NewReader(io.NopCloser(io.NewSectionReader(
-		&bytesReaderAt{compressedData},
-		0,
-		int64(len(compressedData)),
-	)))
+// tryGetFromCache attempts to retrieve compressed layer from cache
+func (s *OCIClipStorage) tryGetFromCache(digest string) ([]byte, bool) {
+	cacheKey := fmt.Sprintf("clip:oci:layer:%s", digest)
+	
+	data, found, err := s.contentCache.Get(cacheKey)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create gzip reader from cache: %w", err)
+		log.Debug().Err(err).Str("digest", digest).Msg("cache lookup error")
+		return nil, false
 	}
-	defer gzr.Close()
-
-	// Skip to desired offset
-	if wantUStart > 0 {
-		_, err = io.CopyN(io.Discard, gzr, wantUStart)
-		if err != nil {
-			return 0, fmt.Errorf("failed to skip to offset: %w", err)
-		}
+	
+	if found {
+		log.Debug().Str("digest", digest).Int("bytes", len(data)).Msg("cache hit")
+		return data, true
 	}
-
-	// Read the data
-	nRead, err := io.ReadFull(gzr, dest)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return nRead, fmt.Errorf("failed to read from cached layer: %w", err)
-	}
-
-	return nRead, nil
+	
+	log.Debug().Str("digest", digest).Msg("cache miss")
+	return nil, false
 }
 
-// fetchAndCacheLayer fetches entire layer, caches it, and returns requested data
-func (s *OCIClipStorage) fetchAndCacheLayer(layer v1.Layer, cacheKey string, wantUStart int64, dest []byte, remote *common.RemoteRef, metrics *observability.Metrics) (int, error) {
+// fetchCacheAndRead fetches layer, stores in cache, and reads requested data
+func (s *OCIClipStorage) fetchCacheAndRead(layer v1.Layer, digest string, startOffset int64, dest []byte, metrics *observability.Metrics) (int, error) {
 	// Fetch entire compressed layer
+	compressedData, err := s.fetchLayer(layer)
+	if err != nil {
+		return 0, err
+	}
+
+	metrics.RecordRangeGet(digest, int64(len(compressedData)))
+
+	// Store in cache asynchronously (don't block on cache write failures)
+	if s.contentCache != nil {
+		go s.storeInCache(digest, compressedData)
+	}
+
+	// Decompress and read
+	return s.decompressAndRead(compressedData, startOffset, dest, metrics)
+}
+
+// fetchAndRead fetches and reads directly without caching
+func (s *OCIClipStorage) fetchAndRead(layer v1.Layer, startOffset int64, dest []byte, metrics *observability.Metrics) (int, error) {
 	compressedRC, err := layer.Compressed()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get compressed layer: %w", err)
 	}
 	defer compressedRC.Close()
 
-	// Read entire compressed layer into memory
-	compressedData, err := io.ReadAll(compressedRC)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read compressed layer: %w", err)
-	}
-
-	// Record fetch metrics
-	metrics.RecordRangeGet(remote.LayerDigest, int64(len(compressedData)))
-
-	// Cache the compressed layer asynchronously (don't block on cache writes)
-	if s.contentCache != nil {
-		go func() {
-			if err := s.contentCache.Set(cacheKey, compressedData); err != nil {
-				log.Warn().Err(err).Str("layer", remote.LayerDigest).Msg("failed to cache layer")
-			} else {
-				log.Info().Str("layer", remote.LayerDigest).Int("bytes", len(compressedData)).Msg("cached compressed layer")
-			}
-		}()
-	}
-
-	// Now read from the fetched data
 	inflateStart := time.Now()
 	
-	gzr, err := gzip.NewReader(io.NopCloser(io.NewSectionReader(
-		&bytesReaderAt{compressedData},
-		0,
-		int64(len(compressedData)),
-	)))
-	if err != nil {
-		return 0, fmt.Errorf("failed to create gzip reader: %w", err)
-	}
-	defer gzr.Close()
-
-	// Skip to desired offset
-	if wantUStart > 0 {
-		_, err = io.CopyN(io.Discard, gzr, wantUStart)
-		if err != nil {
-			return 0, fmt.Errorf("failed to skip to offset: %w", err)
-		}
-	}
-
-	// Read the data
-	nRead, err := io.ReadFull(gzr, dest)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return nRead, fmt.Errorf("failed to read data: %w", err)
-	}
-
-	// Record metrics
-	inflateDuration := time.Since(inflateStart)
-	metrics.RecordInflateCPU(inflateDuration)
-
-	return nRead, nil
-}
-
-// readDirectly reads directly from registry without caching
-func (s *OCIClipStorage) readDirectly(layer v1.Layer, wantUStart int64, dest []byte, remote *common.RemoteRef, metrics *observability.Metrics) (int, error) {
-	// For MVP: Always decompress from the beginning
-	// TODO: Implement proper zran-style checkpointing with window state for better performance
-	compressedRC, err := s.rangeGet(layer, 0)
-	if err != nil {
-		return 0, fmt.Errorf("range GET failed: %w", err)
-	}
-	defer compressedRC.Close()
-
-	// Decompress from start
-	inflateStart := time.Now()
 	gzr, err := gzip.NewReader(compressedRC)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer gzr.Close()
 
-	// Discard bytes until we reach the file offset
-	if wantUStart > 0 {
-		discarded, err := io.CopyN(io.Discard, gzr, wantUStart)
-		if err != nil {
-			return 0, fmt.Errorf("failed to skip %d bytes (discarded %d): %w", wantUStart, discarded, err)
+	// Skip to desired offset
+	if startOffset > 0 {
+		if _, err := io.CopyN(io.Discard, gzr, startOffset); err != nil && err != io.EOF {
+			return 0, fmt.Errorf("failed to skip to offset %d: %w", startOffset, err)
 		}
 	}
 
-	// Read the actual data
+	// Read data
 	nRead, err := io.ReadFull(gzr, dest)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nRead, fmt.Errorf("failed to read data: %w", err)
 	}
 
-	// Record metrics
-	inflateDuration := time.Since(inflateStart)
-	metrics.RecordInflateCPU(inflateDuration)
-	metrics.RecordRangeGet(remote.LayerDigest, int64(nRead))
-
+	metrics.RecordInflateCPU(time.Since(inflateStart))
 	return nRead, nil
 }
 
-// rangeGet performs an HTTP Range GET on a layer starting at compressed offset
-func (s *OCIClipStorage) rangeGet(layer v1.Layer, cStart int64) (io.ReadCloser, error) {
-	// Get a fresh compressed stream each time
-	// Note: go-containerregistry creates a new HTTP request each time Compressed() is called,
-	// so this is safe to call multiple times
+// fetchLayer fetches entire compressed layer into memory
+func (s *OCIClipStorage) fetchLayer(layer v1.Layer) ([]byte, error) {
 	compressedRC, err := layer.Compressed()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get compressed layer: %w", err)
 	}
+	defer compressedRC.Close()
 
-	// If cStart is 0, no need to skip
-	if cStart == 0 {
-		return compressedRC, nil
+	data, err := io.ReadAll(compressedRC)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read compressed layer: %w", err)
 	}
 
-	// Discard bytes until cStart
-	// TODO: For production, implement proper HTTP Range GET headers
-	// to avoid fetching data we'll discard
-	discarded, err := io.CopyN(io.Discard, compressedRC, cStart)
-	if err != nil && err != io.EOF {
-		compressedRC.Close()
-		return nil, fmt.Errorf("failed to skip to offset %d (discarded %d): %w", cStart, discarded, err)
-	}
-
-	return compressedRC, nil
+	return data, nil
 }
 
-// nearestCheckpoint finds the checkpoint with the largest UOff <= wantU
-func (s *OCIClipStorage) nearestCheckpoint(checkpoints []common.GzipCheckpoint, wantU int64) (cOff, uOff int64) {
-	if len(checkpoints) == 0 {
-		return 0, 0
+// storeInCache stores compressed layer in cache (async safe)
+func (s *OCIClipStorage) storeInCache(digest string, data []byte) {
+	cacheKey := fmt.Sprintf("clip:oci:layer:%s", digest)
+	
+	if err := s.contentCache.Set(cacheKey, data); err != nil {
+		log.Warn().Err(err).Str("digest", digest).Msg("failed to cache layer")
+	} else {
+		log.Info().Str("digest", digest).Int("bytes", len(data)).Msg("cached compressed layer")
 	}
+}
 
-	// Binary search for the right checkpoint
-	left, right := 0, len(checkpoints)-1
-	result := 0
+// decompressAndRead decompresses from cached/fetched data and reads requested bytes
+func (s *OCIClipStorage) decompressAndRead(compressedData []byte, startOffset int64, dest []byte, metrics *observability.Metrics) (int, error) {
+	inflateStart := time.Now()
+	
+	gzr, err := gzip.NewReader(bytes.NewReader(compressedData))
+	if err != nil {
+		return 0, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzr.Close()
 
-	for left <= right {
-		mid := (left + right) / 2
-		if checkpoints[mid].UOff <= wantU {
-			result = mid
-			left = mid + 1
-		} else {
-			right = mid - 1
+	// Skip to desired offset
+	if startOffset > 0 {
+		if _, err := io.CopyN(io.Discard, gzr, startOffset); err != nil && err != io.EOF {
+			return 0, fmt.Errorf("failed to skip to offset %d: %w", startOffset, err)
 		}
 	}
 
-	return checkpoints[result].COff, checkpoints[result].UOff
+	// Read data
+	nRead, err := io.ReadFull(gzr, dest)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nRead, fmt.Errorf("failed to read data: %w", err)
+	}
+
+	metrics.RecordInflateCPU(time.Since(inflateStart))
+	return nRead, nil
 }
 
 func (s *OCIClipStorage) Metadata() *common.ClipArchiveMetadata {
@@ -368,29 +291,7 @@ func (s *OCIClipStorage) CachedLocally() bool {
 }
 
 func (s *OCIClipStorage) Cleanup() error {
-	// Nothing to clean up for OCI storage
 	return nil
-}
-
-// bytesReaderAt implements io.ReaderAt for byte slices
-type bytesReaderAt struct {
-	data []byte
-}
-
-func (b *bytesReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
-	if off >= int64(len(b.data)) {
-		return 0, io.EOF
-	}
-	n = copy(p, b.data[off:])
-	if n < len(p) {
-		err = io.EOF
-	}
-	return n, err
-}
-
-// BlobFetcher interface for range requests (for future enhancements)
-type BlobFetcher interface {
-	RangeGet(layerDigest string, cStart int64) (io.ReadCloser, error)
 }
 
 // Ensure OCIClipStorage implements ClipStorageInterface
