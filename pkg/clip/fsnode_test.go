@@ -152,6 +152,10 @@ func (m *mockS3Storage) resetTrackingFields() {
 }
 
 func Test_FSNodeLookupAndRead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Docker-dependent test in short mode")
+	}
+	
 	ctx := context.Background()
 
 	req := tc.ContainerRequest{
