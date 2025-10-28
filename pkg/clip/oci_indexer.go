@@ -171,8 +171,8 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 			return nil, nil, nil, "", "", "", fmt.Errorf("failed to get compressed layer: %w", err)
 		}
 
-		// Index this layer
-		gzipIndex, err := ca.indexLayer(ctx, compressedRC, layerDigestStr, index, opts)
+		// Index this layer with optimizations
+		gzipIndex, err := ca.indexLayerOptimized(ctx, compressedRC, layerDigestStr, index, opts)
 		compressedRC.Close()
 		if err != nil {
 			return nil, nil, nil, "", "", "", fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
@@ -186,8 +186,8 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	return index, layerDigests, gzipIdx, registryURL, repository, reference, nil
 }
 
-// indexLayer processes a single layer and updates the index
-func (ca *ClipArchiver) indexLayer(
+// indexLayerOptimized processes a single layer with optimizations
+func (ca *ClipArchiver) indexLayerOptimized(
 	ctx context.Context,
 	compressedRC io.ReadCloser,
 	layerDigest string,
@@ -249,10 +249,16 @@ func (ca *ClipArchiver) indexLayer(
 		case tar.TypeReg, tar.TypeRegA:
 			dataStart := uncompressedCounter.n
 			
-			// Discard file content (we don't store it, just track offsets)
-			_, err := io.Copy(io.Discard, tr)
-			if err != nil {
-				return nil, fmt.Errorf("failed to skip file content: %w", err)
+			// OPTIMIZATION: Skip file content efficiently
+			// Use CopyN with exact size instead of Copy which reads until EOF
+			if hdr.Size > 0 {
+				n, err := io.CopyN(io.Discard, tr, hdr.Size)
+				if err != nil && err != io.EOF {
+					return nil, fmt.Errorf("failed to skip file content: %w", err)
+				}
+				if n != hdr.Size {
+					return nil, fmt.Errorf("failed to skip complete file (wanted %d, got %d)", hdr.Size, n)
+				}
 			}
 
 			// Compute content hash from the layer digest and file path
