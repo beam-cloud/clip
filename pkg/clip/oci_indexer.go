@@ -329,6 +329,15 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 
 		case tar.TypeDir:
+			// Skip special runtime directories that should be mounted by the container runtime
+			// These directories (/proc, /sys, /dev) cause conflicts when runc tries to mount them
+			if ca.isRuntimeDirectory(cleanPath) {
+				if opts.Verbose {
+					log.Debug().Msgf("  Skipping runtime dir: %s", cleanPath)
+				}
+				continue
+			}
+
 			// Ensure parent directories exist
 			ca.ensureParentDirs(index, cleanPath, layerDigest)
 			
@@ -471,6 +480,24 @@ func (ca *ClipArchiver) ensureParentDirs(index *btree.BTree, filePath string, la
 			index.Set(node)
 		}
 	}
+}
+
+// isRuntimeDirectory checks if a path is a special runtime directory
+// that should be mounted by the container runtime, not included in the image
+func (ca *ClipArchiver) isRuntimeDirectory(path string) bool {
+	runtimeDirs := []string{
+		"/proc",
+		"/sys",
+		"/dev",
+	}
+	
+	for _, dir := range runtimeDirs {
+		if path == dir {
+			return true
+		}
+	}
+	
+	return false
 }
 
 // tarModeToFuse converts tar mode to FUSE mode
