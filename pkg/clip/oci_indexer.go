@@ -261,6 +261,9 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				}
 			}
 
+			// CRITICAL: Ensure parent directories exist BEFORE creating file
+			ca.ensureParentDirs(index, cleanPath, layerDigest, hdr)
+
 			// Compute content hash from the layer digest and file path
 			// This provides a stable identifier for the file
 			hash := sha256.New()
@@ -291,7 +294,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				},
 			}
 
-			ca.setOrMerge(index, node)
+			index.Set(node)
 
 			if opts.Verbose {
 				log.Debug().Msgf("  File: %s (size=%d, uoff=%d)", cleanPath, hdr.Size, dataStart)
@@ -303,6 +306,9 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			if target == "" {
 				log.Warn().Msgf("Empty symlink target for %s", cleanPath)
 			}
+			
+			// CRITICAL: Ensure parent directories exist BEFORE creating symlink
+			ca.ensureParentDirs(index, cleanPath, layerDigest, hdr)
 			
 			node := &common.ClipNode{
 				Path:     cleanPath,
@@ -322,7 +328,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				},
 			}
 
-			ca.setOrMerge(index, node)
+			index.Set(node)
 
 			if opts.Verbose {
 				log.Debug().Msgf("  Symlink: %s -> %s", cleanPath, target)
@@ -339,7 +345,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 
 			// Ensure parent directories exist
-			ca.ensureParentDirs(index, cleanPath, layerDigest)
+			ca.ensureParentDirs(index, cleanPath, layerDigest, hdr)
 			
 			node := &common.ClipNode{
 				Path:     cleanPath,
@@ -357,7 +363,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				},
 			}
 
-			ca.setOrMerge(index, node)
+			index.Set(node)
 
 			if opts.Verbose {
 				log.Debug().Msgf("  Dir: %s", cleanPath)
@@ -368,6 +374,9 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			targetPath := path.Clean("/" + strings.TrimPrefix(hdr.Linkname, "./"))
 			targetNode := index.Get(&common.ClipNode{Path: targetPath})
 			if targetNode != nil {
+				// Ensure parent directories exist BEFORE creating hard link
+				ca.ensureParentDirs(index, cleanPath, layerDigest, hdr)
+				
 				tn := targetNode.(*common.ClipNode)
 				node := &common.ClipNode{
 					Path:        cleanPath,
@@ -376,7 +385,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 					Attr:        tn.Attr, // Share inode with target
 					Remote:      tn.Remote,
 				}
-				ca.setOrMerge(index, node)
+				index.Set(node)
 			}
 		}
 	}
@@ -450,31 +459,43 @@ func (ca *ClipArchiver) deleteRange(index *btree.BTree, prefix string) {
 	}
 }
 
-// setOrMerge adds or updates a node in the index (overlay semantics)
-func (ca *ClipArchiver) setOrMerge(index *btree.BTree, node *common.ClipNode) {
-	// Ensure parent directories exist
-	ca.ensureParentDirs(index, node.Path, "")
-	
-	// In overlay semantics, upper layer replaces lower layer
-	index.Set(node)
-}
-
 // ensureParentDirs creates parent directory nodes if they don't exist
-func (ca *ClipArchiver) ensureParentDirs(index *btree.BTree, filePath string, layerDigest string) {
+// This is CRITICAL for FUSE filesystem integrity - every file must have valid parent dirs
+func (ca *ClipArchiver) ensureParentDirs(index *btree.BTree, filePath string, layerDigest string, hdr *tar.Header) {
+	if filePath == "/" {
+		return
+	}
+	
 	parts := strings.Split(strings.Trim(filePath, "/"), "/")
 	
+	// Create all parent directories with proper metadata
 	for i := 1; i < len(parts); i++ {
 		dirPath := "/" + strings.Join(parts[:i], "/")
 		
 		// Check if directory already exists
 		if index.Get(&common.ClipNode{Path: dirPath}) == nil {
-			// Create directory node
+			// Create directory node with proper metadata
+			// Use the file's header times for consistency if available
+			var atime, mtime, ctime uint64
+			if hdr != nil {
+				atime = uint64(hdr.AccessTime.Unix())
+				mtime = uint64(hdr.ModTime.Unix())
+				ctime = uint64(hdr.ChangeTime.Unix())
+			}
+			
 			node := &common.ClipNode{
 				Path:     dirPath,
 				NodeType: common.DirNode,
 				Attr: fuse.Attr{
-					Ino:  ca.generateInode(layerDigest, dirPath),
-					Mode: uint32(syscall.S_IFDIR | 0755),
+					Ino:   ca.generateInode(layerDigest, dirPath),
+					Mode:  uint32(syscall.S_IFDIR | 0755),
+					Atime: atime,
+					Mtime: mtime,
+					Ctime: ctime,
+					Owner: fuse.Owner{
+						Uid: 0,
+						Gid: 0,
+					},
 				},
 			}
 			index.Set(node)
