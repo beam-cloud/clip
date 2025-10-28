@@ -273,12 +273,17 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				NodeType:    common.FileNode,
 				ContentHash: contentHash,
 				Attr: fuse.Attr{
-					Ino:   ca.generateInode(layerDigest, cleanPath),
-					Size:  uint64(hdr.Size),
-					Mode:  ca.tarModeToFuse(hdr.Mode, tar.TypeReg),
-					Atime: uint64(hdr.AccessTime.Unix()),
-					Mtime: uint64(hdr.ModTime.Unix()),
-					Ctime: uint64(hdr.ChangeTime.Unix()),
+					Ino:       ca.generateInode(layerDigest, cleanPath),
+					Size:      uint64(hdr.Size),
+					Blocks:    (uint64(hdr.Size) + 511) / 512, // Number of 512-byte blocks
+					Atime:     uint64(hdr.AccessTime.Unix()),
+					Atimensec: uint32(hdr.AccessTime.Nanosecond()),
+					Mtime:     uint64(hdr.ModTime.Unix()),
+					Mtimensec: uint32(hdr.ModTime.Nanosecond()),
+					Ctime:     uint64(hdr.ChangeTime.Unix()),
+					Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+					Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeReg),
+					Nlink:     1, // Regular files have link count of 1
 					Owner: fuse.Owner{
 						Uid: uint32(hdr.Uid),
 						Gid: uint32(hdr.Gid),
@@ -309,12 +314,17 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				NodeType: common.SymLinkNode,
 				Target:   target,
 				Attr: fuse.Attr{
-					Ino:   ca.generateInode(layerDigest, cleanPath),
-					Size:  uint64(len(target)), // CRITICAL: Symlink size must be length of target
-					Mode:  ca.tarModeToFuse(hdr.Mode, tar.TypeSymlink),
-					Atime: uint64(hdr.AccessTime.Unix()),
-					Mtime: uint64(hdr.ModTime.Unix()),
-					Ctime: uint64(hdr.ChangeTime.Unix()),
+					Ino:       ca.generateInode(layerDigest, cleanPath),
+					Size:      uint64(len(target)), // Symlink size is length of target
+					Blocks:    0,                    // Symlinks don't use disk blocks
+					Atime:     uint64(hdr.AccessTime.Unix()),
+					Atimensec: uint32(hdr.AccessTime.Nanosecond()),
+					Mtime:     uint64(hdr.ModTime.Unix()),
+					Mtimensec: uint32(hdr.ModTime.Nanosecond()),
+					Ctime:     uint64(hdr.ChangeTime.Unix()),
+					Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+					Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeSymlink),
+					Nlink:     1, // Symlinks have link count of 1
 					Owner: fuse.Owner{
 						Uid: uint32(hdr.Uid),
 						Gid: uint32(hdr.Gid),
@@ -333,12 +343,17 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				Path:     cleanPath,
 				NodeType: common.DirNode,
 				Attr: fuse.Attr{
-					Ino:   ca.generateInode(layerDigest, cleanPath),
-					Mode:  ca.tarModeToFuse(hdr.Mode, tar.TypeDir),
-					Nlink: 2, // Directories start with link count of 2 (. and ..)
-					Atime: uint64(hdr.AccessTime.Unix()),
-					Mtime: uint64(hdr.ModTime.Unix()),
-					Ctime: uint64(hdr.ChangeTime.Unix()),
+					Ino:       ca.generateInode(layerDigest, cleanPath),
+					Size:      0,    // Directories have size 0 (or 4096, but 0 is standard for FUSE)
+					Blocks:    0,    // Directories don't report blocks in FUSE
+					Atime:     uint64(hdr.AccessTime.Unix()),
+					Atimensec: uint32(hdr.AccessTime.Nanosecond()),
+					Mtime:     uint64(hdr.ModTime.Unix()),
+					Mtimensec: uint32(hdr.ModTime.Nanosecond()),
+					Ctime:     uint64(hdr.ChangeTime.Unix()),
+					Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+					Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeDir),
+					Nlink:     2, // Directories start with link count of 2 (. and ..)
 					Owner: fuse.Owner{
 						Uid: uint32(hdr.Uid),
 						Gid: uint32(hdr.Gid),
