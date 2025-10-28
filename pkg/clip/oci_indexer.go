@@ -329,15 +329,6 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 
 		case tar.TypeDir:
-			// Skip special runtime directories that should be mounted by the container runtime
-			// These directories (/proc, /sys, /dev) cause conflicts when runc tries to mount them
-			if ca.isRuntimeDirectory(cleanPath) {
-				if opts.Verbose {
-					log.Debug().Msgf("  Skipping runtime dir: %s", cleanPath)
-				}
-				continue
-			}
-			
 			node := &common.ClipNode{
 				Path:     cleanPath,
 				NodeType: common.DirNode,
@@ -357,7 +348,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			index.Set(node)
 
 			if opts.Verbose {
-				log.Debug().Msgf("  Dir: %s", cleanPath)
+				log.Debug().Msgf("  Dir: %s (mode=%o, mtime=%d)", cleanPath, hdr.Mode, hdr.ModTime.Unix())
 			}
 
 		case tar.TypeLink:
