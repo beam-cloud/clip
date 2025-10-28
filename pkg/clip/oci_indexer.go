@@ -248,7 +248,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 		switch hdr.Typeflag {
 		case tar.TypeReg, tar.TypeRegA:
 			dataStart := uncompressedCounter.n
-			
+
 			// OPTIMIZATION: Skip file content efficiently
 			// Use CopyN with exact size instead of Copy which reads until EOF
 			if hdr.Size > 0 {
@@ -260,9 +260,6 @@ func (ca *ClipArchiver) indexLayerOptimized(
 					return nil, fmt.Errorf("failed to skip complete file (wanted %d, got %d)", hdr.Size, n)
 				}
 			}
-
-			// CRITICAL: Ensure parent directories exist BEFORE creating file
-			ca.ensureParentDirs(index, cleanPath, layerDigest, hdr)
 
 			// Compute content hash from the layer digest and file path
 			// This provides a stable identifier for the file
@@ -307,9 +304,6 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				log.Warn().Msgf("Empty symlink target for %s", cleanPath)
 			}
 			
-			// CRITICAL: Ensure parent directories exist BEFORE creating symlink
-			ca.ensureParentDirs(index, cleanPath, layerDigest, hdr)
-			
 			node := &common.ClipNode{
 				Path:     cleanPath,
 				NodeType: common.SymLinkNode,
@@ -343,9 +337,6 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				}
 				continue
 			}
-
-			// Ensure parent directories exist
-			ca.ensureParentDirs(index, cleanPath, layerDigest, hdr)
 			
 			node := &common.ClipNode{
 				Path:     cleanPath,
@@ -374,9 +365,6 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			targetPath := path.Clean("/" + strings.TrimPrefix(hdr.Linkname, "./"))
 			targetNode := index.Get(&common.ClipNode{Path: targetPath})
 			if targetNode != nil {
-				// Ensure parent directories exist BEFORE creating hard link
-				ca.ensureParentDirs(index, cleanPath, layerDigest, hdr)
-				
 				tn := targetNode.(*common.ClipNode)
 				node := &common.ClipNode{
 					Path:        cleanPath,
@@ -459,49 +447,6 @@ func (ca *ClipArchiver) deleteRange(index *btree.BTree, prefix string) {
 	}
 }
 
-// ensureParentDirs creates parent directory nodes if they don't exist
-// This is CRITICAL for FUSE filesystem integrity - every file must have valid parent dirs
-func (ca *ClipArchiver) ensureParentDirs(index *btree.BTree, filePath string, layerDigest string, hdr *tar.Header) {
-	if filePath == "/" {
-		return
-	}
-	
-	parts := strings.Split(strings.Trim(filePath, "/"), "/")
-	
-	// Create all parent directories with proper metadata
-	for i := 1; i < len(parts); i++ {
-		dirPath := "/" + strings.Join(parts[:i], "/")
-		
-		// Check if directory already exists
-		if index.Get(&common.ClipNode{Path: dirPath}) == nil {
-			// Create directory node with proper metadata
-			// Use the file's header times for consistency if available
-			var atime, mtime, ctime uint64
-			if hdr != nil {
-				atime = uint64(hdr.AccessTime.Unix())
-				mtime = uint64(hdr.ModTime.Unix())
-				ctime = uint64(hdr.ChangeTime.Unix())
-			}
-			
-			node := &common.ClipNode{
-				Path:     dirPath,
-				NodeType: common.DirNode,
-				Attr: fuse.Attr{
-					Ino:   ca.generateInode(layerDigest, dirPath),
-					Mode:  uint32(syscall.S_IFDIR | 0755),
-					Atime: atime,
-					Mtime: mtime,
-					Ctime: ctime,
-					Owner: fuse.Owner{
-						Uid: 0,
-						Gid: 0,
-					},
-				},
-			}
-			index.Set(node)
-		}
-	}
-}
 
 // isRuntimeDirectory checks if a path is a special runtime directory
 // that should be mounted by the container runtime, not included in the image
