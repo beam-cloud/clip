@@ -335,6 +335,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				Attr: fuse.Attr{
 					Ino:   ca.generateInode(layerDigest, cleanPath),
 					Mode:  ca.tarModeToFuse(hdr.Mode, tar.TypeDir),
+					Nlink: 2, // Directories start with link count of 2 (. and ..)
 					Atime: uint64(hdr.AccessTime.Unix()),
 					Mtime: uint64(hdr.ModTime.Unix()),
 					Ctime: uint64(hdr.ChangeTime.Unix()),
@@ -348,7 +349,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			index.Set(node)
 
 			if opts.Verbose {
-				log.Debug().Msgf("  Dir: %s (mode=%o, mtime=%d)", cleanPath, hdr.Mode, hdr.ModTime.Unix())
+				log.Debug().Msgf("  Dir: %s (mode=%o, mtime=%d, nlink=2)", cleanPath, hdr.Mode, hdr.ModTime.Unix())
 			}
 
 		case tar.TypeLink:
