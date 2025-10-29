@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/stretchr/testify/require"
 )
 

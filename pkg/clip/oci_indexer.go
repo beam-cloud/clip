@@ -233,7 +233,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 			checkpoints = append(checkpoints, cp)
 			lastCheckpoint = uncompressedCounter.n
-			log.Debug().Msgf("Added checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
+			log.Debug().Msgf("Added interval checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
 		}
 
 		// Clean path
@@ -248,6 +248,18 @@ func (ca *ClipArchiver) indexLayerOptimized(
 		switch hdr.Typeflag {
 		case tar.TypeReg, tar.TypeRegA:
 			dataStart := uncompressedCounter.n
+			
+			// Content-defined checkpoint: Add checkpoint before large files
+			// This enables instant seeking to file start without decompression
+			if hdr.Size > 512*1024 && uncompressedCounter.n > lastCheckpoint {
+				cp := common.GzipCheckpoint{
+					COff: compressedCounter.n,
+					UOff: uncompressedCounter.n,
+				}
+				checkpoints = append(checkpoints, cp)
+				lastCheckpoint = uncompressedCounter.n
+				log.Debug().Msgf("Added file-boundary checkpoint: COff=%d, UOff=%d, file=%s", cp.COff, cp.UOff, cleanPath)
+			}
 
 			// OPTIMIZATION: Skip file content efficiently
 			// Use CopyN with exact size instead of Copy which reads until EOF
