@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
-	"github.com/beam-cloud/clip/pkg/observability"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -152,7 +151,7 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 		return 0, nil
 	}
 
-	metrics := observability.GetGlobalMetrics()
+	metrics := common.GetGlobalMetrics()
 	metrics.RecordLayerAccess(remote.LayerDigest)
 
 	// 1. Try disk cache first (fastest - local range read)
@@ -279,7 +278,7 @@ func (s *OCIClipStorage) readFromDiskCache(layerPath string, offset int64, dest 
 // This is called when both disk cache and ContentCache miss
 // The entire layer is cached so subsequent reads (on this or other nodes) can do range reads
 func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string) error {
-	metrics := observability.GetGlobalMetrics()
+	metrics := common.GetGlobalMetrics()
 
 	// NOTE: We don't check ContentCache here for the entire layer
 	// Instead, ReadFile already tried a range read from ContentCache

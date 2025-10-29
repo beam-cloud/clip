@@ -1,4 +1,4 @@
-package observability
+package common
 
 import (
 	"sync"
@@ -7,7 +7,7 @@ import (
 	log "github.com/rs/zerolog/log"
 )
 
-// Metrics tracks performance and usage statistics
+// Metrics for performance and usage
 type Metrics struct {
 	mu sync.RWMutex
 
@@ -160,13 +160,13 @@ func (m *Metrics) GetStats() MetricsSnapshot {
 	}
 
 	return MetricsSnapshot{
-		RangeGetBytesTotal:   rangeGetBytes,
-		RangeGetRequestTotal: rangeGetReqs,
+		RangeGetBytesTotal:     rangeGetBytes,
+		RangeGetRequestTotal:   rangeGetReqs,
 		InflateCPUSecondsTotal: m.InflateCPUSecondsTotal,
-		ReadHitsTotal:        m.ReadHitsTotal,
-		ReadMissesTotal:      m.ReadMissesTotal,
-		FirstExecDuration:    m.FirstExecDuration,
-		LayerAccessCount:     layerAccess,
+		ReadHitsTotal:          m.ReadHitsTotal,
+		ReadMissesTotal:        m.ReadMissesTotal,
+		FirstExecDuration:      m.FirstExecDuration,
+		LayerAccessCount:       layerAccess,
 	}
 }
 
