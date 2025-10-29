@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Mock ContentCache for testing
+// Mock ContentCache for testing (implements range read interface)
 type mockCache struct {
 	mu    sync.Mutex
 	store map[string][]byte
@@ -36,32 +36,52 @@ func newMockCache() *mockCache {
 	}
 }
 
-func (m *mockCache) Get(key string) ([]byte, bool, error) {
+func (m *mockCache) GetContent(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	
 	m.getCalls++
 	
 	if m.getError != nil {
-		return nil, false, m.getError
+		return nil, m.getError
 	}
 	
-	data, found := m.store[key]
-	return data, found, nil
+	fullData, found := m.store[hash]
+	if !found {
+		return nil, fmt.Errorf("not found in cache")
+	}
+	
+	// Range read simulation
+	if offset >= int64(len(fullData)) {
+		return nil, fmt.Errorf("offset %d out of range (data length: %d)", offset, len(fullData))
+	}
+	
+	end := offset + length
+	if end > int64(len(fullData)) {
+		end = int64(len(fullData))
+	}
+	
+	return fullData[offset:end], nil
 }
 
-func (m *mockCache) Set(key string, data []byte) error {
+func (m *mockCache) StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	
 	m.setCalls++
 	
 	if m.setError != nil {
-		return m.setError
+		return "", m.setError
 	}
 	
-	m.store[key] = data
-	return nil
+	// Read all chunks
+	var data []byte
+	for chunk := range chunks {
+		data = append(data, chunk...)
+	}
+	
+	m.store[hash] = data
+	return hash, nil
 }
 
 func (m *mockCache) reset() {
