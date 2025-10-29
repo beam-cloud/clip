@@ -13,10 +13,3 @@ stop:
 
 e2e:
 	go build -o ./bin/e2e ./e2e/main.go
-
-# CLI tool removed - use programmatic API instead
-# See pkg/clip/clip.go for:
-#   - CreateFromOCIImage()
-#   - CreateAndUploadOCIArchive()
-#   - MountArchive()
-
