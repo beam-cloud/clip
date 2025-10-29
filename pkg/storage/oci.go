@@ -379,6 +379,51 @@ func (s *OCIClipStorage) writeToDiskCache(path string, data []byte) error {
 	return os.Rename(tempPath, path)
 }
 
+// streamFileInChunks reads a file and sends it in chunks over a channel
+// This matches the behavior in clipfs.go for consistent streaming
+// Default chunk size is 32MB to balance memory usage and throughput
+func streamFileInChunks(filePath string, chunks chan []byte) error {
+	const chunkSize = int64(1 << 25) // 32MB chunks
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	// Get file size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
+	fileSize := fileInfo.Size()
+
+	// Stream in chunks
+	for offset := int64(0); offset < fileSize; {
+		// Calculate chunk size for this iteration
+		currentChunkSize := chunkSize
+		if remaining := fileSize - offset; remaining < chunkSize {
+			currentChunkSize = remaining
+		}
+
+		// Read chunk
+		buffer := make([]byte, currentChunkSize)
+		nRead, err := io.ReadFull(file, buffer)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return fmt.Errorf("failed to read chunk at offset %d: %w", offset, err)
+		}
+
+		// Send chunk
+		if nRead > 0 {
+			chunks <- buffer[:nRead]
+		}
+
+		offset += int64(nRead)
+	}
+
+	return nil
+}
+
 // tryRangeReadFromContentCache attempts a ranged read from remote ContentCache
 // This enables lazy loading: we fetch only the bytes we need, not the entire layer
 func (s *OCIClipStorage) tryRangeReadFromContentCache(digest string, offset, length int64) ([]byte, error) {
@@ -398,28 +443,36 @@ func (s *OCIClipStorage) tryRangeReadFromContentCache(digest string, offset, len
 
 // storeDecompressedInRemoteCache stores decompressed layer in remote cache (async safe)
 // Stores the ENTIRE layer so other nodes can do range reads from it
+// Streams content in chunks to avoid loading the entire layer into memory
 func (s *OCIClipStorage) storeDecompressedInRemoteCache(digest string, diskPath string) {
-	// Read entire decompressed layer from disk
-	data, err := os.ReadFile(diskPath)
-	if err != nil {
-		log.Warn().Err(err).Str("digest", digest).Msg("failed to read disk cache for remote caching")
-		return
-	}
-
 	// Use just the content hash (hex part) for true content-addressing
 	// This allows cross-image cache sharing (same layer digest = same cache key)
 	cacheKey := s.getContentHash(digest)
 
-	// Store using StoreContent (streams the data)
+	// Get file size for logging
+	fileInfo, err := os.Stat(diskPath)
+	if err != nil {
+		log.Warn().Err(err).Str("digest", digest).Msg("failed to stat disk cache for remote caching")
+		return
+	}
+	totalSize := fileInfo.Size()
+
+	// Stream the file in chunks (similar to clipfs.go)
 	chunks := make(chan []byte, 1)
-	chunks <- data
-	close(chunks)
+
+	go func() {
+		defer close(chunks)
+
+		if err := streamFileInChunks(diskPath, chunks); err != nil {
+			log.Warn().Err(err).Str("digest", digest).Msg("failed to stream file for remote caching")
+		}
+	}()
 
 	_, err = s.contentCache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{})
 	if err != nil {
 		log.Warn().Err(err).Str("digest", digest).Msg("failed to cache to remote")
 	} else {
-		log.Info().Str("digest", digest).Int("bytes", len(data)).Msg("cached decompressed layer to remote cache")
+		log.Info().Str("digest", digest).Int64("bytes", totalSize).Msg("cached decompressed layer to remote cache")
 	}
 }
 

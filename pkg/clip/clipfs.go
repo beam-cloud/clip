@@ -12,7 +12,7 @@ import (
 
 type ClipFileSystemOpts struct {
 	Verbose               bool
-	ContentCache          ContentCache
+	ContentCache          storage.ContentCache
 	ContentCacheAvailable bool
 }
 
@@ -20,7 +20,7 @@ type ClipFileSystem struct {
 	storage               storage.ClipStorageInterface
 	root                  *FSNode
 	lookupCache           map[string]*lookupCacheEntry
-	contentCache          ContentCache
+	contentCache          storage.ContentCache
 	contentCacheAvailable bool
 	cacheMutex            sync.RWMutex
 	verbose               bool
@@ -32,11 +32,6 @@ type ClipFileSystem struct {
 type lookupCacheEntry struct {
 	inode *fs.Inode
 	attr  fuse.Attr
-}
-
-type ContentCache interface {
-	GetContent(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]byte, error)
-	StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error)
 }
 
 type cacheEvent struct {

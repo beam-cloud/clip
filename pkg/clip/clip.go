@@ -39,7 +39,7 @@ type MountOptions struct {
 	MountPoint            string
 	Verbose               bool
 	CachePath             string
-	ContentCache          ContentCache
+	ContentCache          storage.ContentCache
 	ContentCacheAvailable bool
 	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
