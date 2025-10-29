@@ -454,7 +454,7 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 				return nil, fmt.Errorf("error decoding s3 storage info: %v", err)
 			}
 			storageInfo = s3Info
-		case "oci":
+		case string(common.StorageModeOCI):
 			var ociInfo common.OCIStorageInfo
 			if err := gob.NewDecoder(bytes.NewReader(wrapper.Data)).Decode(&ociInfo); err != nil {
 				return nil, fmt.Errorf("error decoding oci storage info: %v", err)

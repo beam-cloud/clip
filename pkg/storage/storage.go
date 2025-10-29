@@ -38,7 +38,7 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 		// Check the actual storage info type
 		if metadata.StorageInfo != nil {
 			switch metadata.StorageInfo.Type() {
-			case "oci":
+			case string(common.StorageModeOCI):
 				storageType = common.StorageModeOCI
 			case string(common.StorageModeS3):
 				storageType = common.StorageModeS3
