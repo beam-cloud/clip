@@ -60,7 +60,7 @@ type MountOptions struct {
 	ArchivePath           string
 	MountPoint            string
 	CachePath             string
-	ContentCache          ContentCache
+	ContentCache          storage.ContentCache
 	ContentCacheAvailable bool
 	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials

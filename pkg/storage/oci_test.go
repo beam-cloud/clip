@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -579,4 +581,279 @@ func TestOCIStorage_ConcurrentReads(t *testing.T) {
 	for err := range errors {
 		t.Errorf("Concurrent read error: %v", err)
 	}
+}
+
+// Test streaming functionality
+func TestStreamFileInChunks_SmallFile(t *testing.T) {
+	// Create a small test file (less than chunk size)
+	testData := []byte("Hello, World! This is a small test file.")
+	
+	// Write to temp file
+	tmpDir := t.TempDir()
+	tmpFile := tmpDir + "/test.dat"
+	err := os.WriteFile(tmpFile, testData, 0644)
+	require.NoError(t, err)
+	
+	// Stream file
+	chunks := make(chan []byte, 10)
+	errChan := make(chan error, 1)
+	go func() {
+		defer close(chunks)
+		if err := streamFileInChunks(tmpFile, chunks); err != nil {
+			errChan <- err
+		}
+		close(errChan)
+	}()
+	
+	// Collect chunks
+	var collected []byte
+	chunkCount := 0
+	for chunk := range chunks {
+		collected = append(collected, chunk...)
+		chunkCount++
+	}
+	
+	// Check for errors
+	err = <-errChan
+	require.NoError(t, err)
+	
+	// Verify
+	assert.Equal(t, 1, chunkCount, "small file should be sent as single chunk")
+	assert.Equal(t, testData, collected, "data should match")
+}
+
+func TestStreamFileInChunks_LargeFile(t *testing.T) {
+	// Create a large test file (100MB - should be split into multiple chunks)
+	fileSize := int64(100 * 1024 * 1024) // 100MB
+	chunkSize := int64(1 << 25)          // 32MB
+	
+	// Write to temp file
+	tmpDir := t.TempDir()
+	tmpFile := tmpDir + "/large_test.dat"
+	
+	file, err := os.Create(tmpFile)
+	require.NoError(t, err)
+	
+	// Write test pattern
+	pattern := []byte("0123456789ABCDEF")
+	written := int64(0)
+	for written < fileSize {
+		n, err := file.Write(pattern)
+		require.NoError(t, err)
+		written += int64(n)
+	}
+	file.Close()
+	
+	// Stream file
+	chunks := make(chan []byte, 10)
+	errChan := make(chan error, 1)
+	go func() {
+		defer close(chunks)
+		if err := streamFileInChunks(tmpFile, chunks); err != nil {
+			errChan <- err
+		}
+		close(errChan)
+	}()
+	
+	// Collect and verify chunks
+	var collected []byte
+	chunkCount := 0
+	for chunk := range chunks {
+		chunkCount++
+		collected = append(collected, chunk...)
+		
+		// Each chunk (except possibly the last) should be chunkSize
+		if chunkCount < 4 { // First 3 chunks should be full size
+			assert.Equal(t, int(chunkSize), len(chunk), "chunk %d should be full size", chunkCount)
+		}
+	}
+	
+	// Check for errors
+	err = <-errChan
+	require.NoError(t, err)
+	
+	// Verify
+	expectedChunks := (fileSize + chunkSize - 1) / chunkSize
+	assert.Equal(t, int(expectedChunks), chunkCount, "should split into expected number of chunks")
+	assert.Equal(t, int(fileSize), len(collected), "total size should match")
+}
+
+func TestStreamFileInChunks_ExactMultipleOfChunkSize(t *testing.T) {
+	// Create file that's exactly 2x chunk size
+	chunkSize := int64(1 << 25) // 32MB
+	fileSize := chunkSize * 2
+	
+	// Write to temp file
+	tmpDir := t.TempDir()
+	tmpFile := tmpDir + "/exact_test.dat"
+	
+	data := make([]byte, fileSize)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	
+	err := os.WriteFile(tmpFile, data, 0644)
+	require.NoError(t, err)
+	
+	// Stream file
+	chunks := make(chan []byte, 10)
+	errChan := make(chan error, 1)
+	go func() {
+		defer close(chunks)
+		if err := streamFileInChunks(tmpFile, chunks); err != nil {
+			errChan <- err
+		}
+		close(errChan)
+	}()
+	
+	// Collect chunks
+	chunkCount := 0
+	for range chunks {
+		chunkCount++
+	}
+	
+	// Check for errors
+	err = <-errChan
+	require.NoError(t, err)
+	
+	// Verify exactly 2 chunks
+	assert.Equal(t, 2, chunkCount, "should split into exactly 2 chunks")
+}
+
+func TestStreamFileInChunks_NonExistentFile(t *testing.T) {
+	// Try to stream non-existent file
+	chunks := make(chan []byte, 1)
+	err := streamFileInChunks("/nonexistent/file.dat", chunks)
+	
+	// Should return error
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to open file")
+}
+
+// Mock cache that tracks chunked writes
+type chunkTrackingCache struct {
+	mockCache
+	chunksReceived []int // Track sizes of chunks received
+	mu             sync.Mutex
+}
+
+func (c *chunkTrackingCache) StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	c.setCalls++
+	
+	// Track chunk sizes
+	var data []byte
+	for chunk := range chunks {
+		c.chunksReceived = append(c.chunksReceived, len(chunk))
+		data = append(data, chunk...)
+	}
+	
+	c.store[hash] = data
+	return hash, nil
+}
+
+func TestStoreDecompressedInRemoteCache_StreamsInChunks(t *testing.T) {
+	// Create a large test file (100MB)
+	fileSize := int64(100 * 1024 * 1024) // 100MB
+	
+	tmpDir := t.TempDir()
+	tmpFile := tmpDir + "/large_layer.dat"
+	
+	// Create test file
+	file, err := os.Create(tmpFile)
+	require.NoError(t, err)
+	
+	// Write test pattern
+	pattern := []byte("ABCDEFGHIJ")
+	written := int64(0)
+	for written < fileSize {
+		n, err := file.Write(pattern)
+		require.NoError(t, err)
+		written += int64(n)
+	}
+	file.Close()
+	
+	// Setup tracking cache
+	cache := &chunkTrackingCache{
+		mockCache: mockCache{
+			store: make(map[string][]byte),
+		},
+	}
+	
+	digest := "sha256:test123"
+	
+	// Create storage
+	storage := &OCIClipStorage{
+		contentCache: cache,
+	}
+	
+	// Call storeDecompressedInRemoteCache
+	storage.storeDecompressedInRemoteCache(digest, tmpFile)
+	
+	// Give async operation time to complete
+	time.Sleep(100 * time.Millisecond)
+	
+	// Verify chunking behavior
+	cache.mu.Lock()
+	chunksReceived := cache.chunksReceived
+	cache.mu.Unlock()
+	
+	assert.Greater(t, len(chunksReceived), 1, "should receive multiple chunks for large file")
+	
+	// Verify most chunks are the expected size (32MB)
+	chunkSize := 1 << 25
+	for i := 0; i < len(chunksReceived)-1; i++ {
+		assert.Equal(t, chunkSize, chunksReceived[i], "chunk %d should be full size", i)
+	}
+	
+	// Verify total size
+	totalSize := 0
+	for _, size := range chunksReceived {
+		totalSize += size
+	}
+	assert.Equal(t, int(fileSize), totalSize, "total size should match file size")
+}
+
+func TestStoreDecompressedInRemoteCache_SmallFile(t *testing.T) {
+	// Create a small test file
+	testData := []byte("Small file content")
+	
+	tmpDir := t.TempDir()
+	tmpFile := tmpDir + "/small_layer.dat"
+	
+	err := os.WriteFile(tmpFile, testData, 0644)
+	require.NoError(t, err)
+	
+	// Setup tracking cache
+	cache := &chunkTrackingCache{
+		mockCache: mockCache{
+			store: make(map[string][]byte),
+		},
+	}
+	
+	digest := "sha256:small123"
+	
+	// Create storage
+	storage := &OCIClipStorage{
+		contentCache: cache,
+	}
+	
+	// Call storeDecompressedInRemoteCache
+	storage.storeDecompressedInRemoteCache(digest, tmpFile)
+	
+	// Give async operation time to complete
+	time.Sleep(50 * time.Millisecond)
+	
+	// Verify
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	
+	assert.Equal(t, 1, len(cache.chunksReceived), "small file should be single chunk")
+	assert.Equal(t, len(testData), cache.chunksReceived[0], "chunk size should match file size")
+	
+	// Verify content
+	cacheKey := "small123" // getContentHash strips "sha256:" prefix
+	assert.Equal(t, testData, cache.store[cacheKey], "cached content should match original")
 }
