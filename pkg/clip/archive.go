@@ -75,7 +75,7 @@ func (ig *InodeGenerator) Next() uint64 {
 
 // populateIndex creates a representation of the filesystem/folder being archived
 func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) error {
-	// Create root directory with complete FUSE attributes
+	// Create root directory
 	now := time.Now()
 	root := &common.ClipNode{
 		Path:     "/",
