@@ -6,6 +6,13 @@ import (
 	"github.com/beam-cloud/clip/pkg/common"
 )
 
+// ContentCache interface for layer caching (e.g., blobcache)
+// Supports range reads for lazy loading
+type ContentCache interface {
+	GetContent(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]byte, error)
+	StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error)
+}
+
 type ClipStorageInterface interface {
 	ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error)
 	Metadata() *common.ClipArchiveMetadata
