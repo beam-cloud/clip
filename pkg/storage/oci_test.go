@@ -153,7 +153,7 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		decompressedLayers:  make(map[string][]byte),
+		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
 	}
@@ -213,7 +213,7 @@ func TestOCIStorage_CacheMiss(t *testing.T) {
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		decompressedLayers:  make(map[string][]byte),
+		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
 	}
@@ -270,7 +270,7 @@ func TestOCIStorage_NoCache(t *testing.T) {
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		decompressedLayers:  make(map[string][]byte),
+		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        nil, // No cache
 	}
@@ -326,7 +326,7 @@ func TestOCIStorage_PartialRead(t *testing.T) {
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		decompressedLayers:  make(map[string][]byte),
+		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
 	}
@@ -397,7 +397,7 @@ func TestOCIStorage_CacheError(t *testing.T) {
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		decompressedLayers:  make(map[string][]byte),
+		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
 	}
@@ -452,7 +452,7 @@ func TestOCIStorage_LayerFetchError(t *testing.T) {
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		decompressedLayers:  make(map[string][]byte),
+		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
 	}
@@ -507,7 +507,7 @@ func TestOCIStorage_ConcurrentReads(t *testing.T) {
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		decompressedLayers:  make(map[string][]byte),
+		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
 	}

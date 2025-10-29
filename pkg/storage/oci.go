@@ -3,9 +3,13 @@ package storage
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -24,15 +28,15 @@ type ContentCache interface {
 	Set(key string, data []byte) error
 }
 
-// OCIClipStorage implements lazy, range-based reading from OCI registries with content caching
+// OCIClipStorage implements lazy, range-based reading from OCI registries with disk + remote caching
 type OCIClipStorage struct {
 	metadata            *common.ClipArchiveMetadata
 	storageInfo         *common.OCIStorageInfo
 	layerCache          map[string]v1.Layer
-	decompressedLayers  map[string][]byte // In-memory cache of decompressed layers
+	diskCacheDir        string          // Local disk cache directory for decompressed layers
 	httpClient          *http.Client
 	keychain            authn.Keychain
-	contentCache        ContentCache
+	contentCache        ContentCache    // Remote content cache (blobcache)
 	mu                  sync.RWMutex
 	layerDecompressMu   sync.Mutex // Prevents duplicate decompression
 	layersDecompressing map[string]chan struct{} // Tracks in-progress decompressions
@@ -41,7 +45,8 @@ type OCIClipStorage struct {
 type OCIClipStorageOpts struct {
 	Metadata     *common.ClipArchiveMetadata
 	AuthConfig   string       // optional base64-encoded auth config
-	ContentCache ContentCache // optional remote content cache
+	ContentCache ContentCache // optional remote content cache (blobcache)
+	DiskCacheDir string       // optional local disk cache directory
 }
 
 func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
@@ -54,16 +59,31 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		storageInfo = *storageInfoPtr
 	}
 
+	// Setup disk cache directory
+	diskCacheDir := opts.DiskCacheDir
+	if diskCacheDir == "" {
+		// Default to system temp dir
+		diskCacheDir = filepath.Join(os.TempDir(), "clip-oci-cache")
+	}
+	
+	// Ensure cache directory exists
+	if err := os.MkdirAll(diskCacheDir, 0755); err != nil {
+		log.Warn().Err(err).Str("dir", diskCacheDir).Msg("failed to create disk cache dir, will use temp")
+		diskCacheDir = os.TempDir()
+	}
+
 	storage := &OCIClipStorage{
 		metadata:            opts.Metadata,
 		storageInfo:         &storageInfo,
 		layerCache:          make(map[string]v1.Layer),
-		decompressedLayers:  make(map[string][]byte),
+		diskCacheDir:        diskCacheDir,
 		httpClient:          &http.Client{},
 		keychain:            authn.DefaultKeychain,
 		contentCache:        opts.ContentCache,
 		layersDecompressing: make(map[string]chan struct{}),
 	}
+	
+	log.Info().Str("cache_dir", diskCacheDir).Msg("initialized OCI storage with disk cache")
 
 	// Pre-fetch layer descriptors
 	if err := storage.initLayers(context.Background()); err != nil {
@@ -108,7 +128,7 @@ func (s *OCIClipStorage) initLayers(ctx context.Context) error {
 	return nil
 }
 
-// ReadFile reads file content using decompressed layer caching
+// ReadFile reads file content using disk + remote cache
 func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error) {
 	if node.Remote == nil {
 		return 0, fmt.Errorf("legacy data storage not supported in OCI mode")
@@ -132,40 +152,25 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 	metrics := observability.GetGlobalMetrics()
 	metrics.RecordLayerAccess(remote.LayerDigest)
 
-	// Get decompressed layer (from memory cache or decompress)
-	decompressed, err := s.getDecompressedLayer(remote.LayerDigest)
+	// Ensure layer is cached on disk
+	layerPath, err := s.ensureLayerCached(remote.LayerDigest)
 	if err != nil {
 		return 0, err
 	}
 
-	// Simple byte slice copy from decompressed data
-	if wantUStart >= int64(len(decompressed)) {
-		return 0, fmt.Errorf("offset %d beyond layer size %d", wantUStart, len(decompressed))
-	}
-
-	endPos := wantUStart + readLen
-	if endPos > int64(len(decompressed)) {
-		endPos = int64(len(decompressed))
-	}
-
-	n := copy(dest, decompressed[wantUStart:endPos])
-	return n, nil
+	// Read from disk cache file
+	return s.readFromDiskCache(layerPath, wantUStart, dest[:readLen])
 }
 
-// getDecompressedLayer returns the fully decompressed layer, using cache
-func (s *OCIClipStorage) getDecompressedLayer(digest string) ([]byte, error) {
-	// Fast path: check if already in memory
-	s.mu.RLock()
-	if data, exists := s.decompressedLayers[digest]; exists {
-		s.mu.RUnlock()
-		log.Debug().Str("digest", digest).Int("bytes", len(data)).Msg("decompressed layer cache hit")
-		return data, nil
-	}
-	layer, layerExists := s.layerCache[digest]
-	s.mu.RUnlock()
-
-	if !layerExists {
-		return nil, fmt.Errorf("layer not found: %s", digest)
+// ensureLayerCached ensures the decompressed layer is available on disk, returns path
+func (s *OCIClipStorage) ensureLayerCached(digest string) (string, error) {
+	// Generate cache file path
+	layerPath := s.getDiskCachePath(digest)
+	
+	// Fast path: check if already on disk
+	if _, err := os.Stat(layerPath); err == nil {
+		log.Debug().Str("digest", digest).Str("path", layerPath).Msg("disk cache hit")
+		return layerPath, nil
 	}
 
 	// Check if another goroutine is already decompressing this layer
@@ -176,14 +181,11 @@ func (s *OCIClipStorage) getDecompressedLayer(digest string) ([]byte, error) {
 		log.Debug().Str("digest", digest).Msg("waiting for in-progress decompression")
 		<-waitChan
 		
-		// Now it should be in cache
-		s.mu.RLock()
-		data, exists := s.decompressedLayers[digest]
-		s.mu.RUnlock()
-		if exists {
-			return data, nil
+		// Now it should be on disk
+		if _, err := os.Stat(layerPath); err == nil {
+			return layerPath, nil
 		}
-		return nil, fmt.Errorf("decompression failed for layer: %s", digest)
+		return "", fmt.Errorf("decompression failed for layer: %s", digest)
 	}
 
 	// We're the first - mark as in-progress
@@ -191,9 +193,9 @@ func (s *OCIClipStorage) getDecompressedLayer(digest string) ([]byte, error) {
 	s.layersDecompressing[digest] = doneChan
 	s.layerDecompressMu.Unlock()
 
-	// Decompress the layer
+	// Decompress and cache the layer
 	log.Info().Str("digest", digest).Msg("decompressing layer (first access)")
-	decompressed, err := s.decompressLayer(layer, digest)
+	err := s.decompressAndCacheLayer(digest, layerPath)
 	
 	// Clean up in-progress tracking
 	s.layerDecompressMu.Lock()
@@ -202,34 +204,69 @@ func (s *OCIClipStorage) getDecompressedLayer(digest string) ([]byte, error) {
 	s.layerDecompressMu.Unlock()
 
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	// Store in memory cache
-	s.mu.Lock()
-	s.decompressedLayers[digest] = decompressed
-	s.mu.Unlock()
-
-	log.Info().Str("digest", digest).Int("bytes", len(decompressed)).Msg("layer decompressed and cached")
-
-	// Optionally store in remote cache asynchronously
-	if s.contentCache != nil {
-		go s.storeDecompressedInCache(digest, decompressed)
-	}
-
-	return decompressed, nil
+	return layerPath, nil
 }
 
-// decompressLayer decompresses an entire layer
-func (s *OCIClipStorage) decompressLayer(layer v1.Layer, digest string) ([]byte, error) {
+// getDiskCachePath returns the local disk cache path for a layer
+func (s *OCIClipStorage) getDiskCachePath(digest string) string {
+	// Use first 16 chars of digest for filename (safe for filesystems)
+	safeDigest := digest
+	if len(safeDigest) > 16 {
+		// Hash the digest to get a shorter, filesystem-safe name
+		h := sha256.Sum256([]byte(digest))
+		safeDigest = hex.EncodeToString(h[:])[:16]
+	}
+	return filepath.Join(s.diskCacheDir, fmt.Sprintf("layer-%s.decompressed", safeDigest))
+}
+
+// readFromDiskCache reads data from the cached layer file
+func (s *OCIClipStorage) readFromDiskCache(layerPath string, offset int64, dest []byte) (int, error) {
+	f, err := os.Open(layerPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open cached layer: %w", err)
+	}
+	defer f.Close()
+
+	// Seek to desired offset
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("failed to seek to offset %d: %w", offset, err)
+	}
+
+	// Read requested data
+	n, err := io.ReadFull(f, dest)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return n, fmt.Errorf("failed to read from cache: %w", err)
+	}
+
+	return n, nil
+}
+
+// decompressAndCacheLayer decompresses a layer and caches it to disk + remote
+func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string) error {
 	metrics := observability.GetGlobalMetrics()
 	
 	// Try remote cache first
 	if s.contentCache != nil {
-		if cached, found := s.tryGetDecompressedFromCache(digest); found {
-			log.Info().Str("digest", digest).Int("bytes", len(cached)).Msg("loaded decompressed layer from remote cache")
-			return cached, nil
+		if cached, found := s.tryGetDecompressedFromRemoteCache(digest); found {
+			log.Info().Str("digest", digest).Int("bytes", len(cached)).Msg("loaded from remote cache")
+			// Write to disk cache
+			if err := s.writeToDiskCache(diskPath, cached); err != nil {
+				log.Warn().Err(err).Msg("failed to write remote cache data to disk")
+			}
+			return nil
 		}
+	}
+
+	// Get layer descriptor
+	s.mu.RLock()
+	layer, exists := s.layerCache[digest]
+	s.mu.RUnlock()
+	
+	if !exists {
+		return fmt.Errorf("layer not found: %s", digest)
 	}
 
 	inflateStart := time.Now()
@@ -237,20 +274,36 @@ func (s *OCIClipStorage) decompressLayer(layer v1.Layer, digest string) ([]byte,
 	// Fetch compressed layer
 	compressedRC, err := layer.Compressed()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get compressed layer: %w", err)
+		return fmt.Errorf("failed to get compressed layer: %w", err)
 	}
 	defer compressedRC.Close()
 
-	// Decompress entire layer
+	// Create temp file for atomic write
+	tempPath := diskPath + ".tmp"
+	tempFile, err := os.Create(tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp cache file: %w", err)
+	}
+	defer os.Remove(tempPath) // Clean up on error
+
+	// Decompress directly to disk (streaming, low memory!)
 	gzr, err := gzip.NewReader(compressedRC)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		tempFile.Close()
+		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer gzr.Close()
 
-	decompressed, err := io.ReadAll(gzr)
+	written, err := io.Copy(tempFile, gzr)
+	tempFile.Close()
+	
 	if err != nil {
-		return nil, fmt.Errorf("failed to decompress layer: %w", err)
+		return fmt.Errorf("failed to decompress layer to disk: %w", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(tempPath, diskPath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
 	inflateDuration := time.Since(inflateStart)
@@ -258,15 +311,30 @@ func (s *OCIClipStorage) decompressLayer(layer v1.Layer, digest string) ([]byte,
 	
 	log.Info().
 		Str("digest", digest).
-		Int("decompressed_bytes", len(decompressed)).
+		Int64("decompressed_bytes", written).
+		Str("path", diskPath).
 		Dur("duration", inflateDuration).
-		Msg("layer decompression complete")
+		Msg("layer decompressed and cached to disk")
 
-	return decompressed, nil
+	// Async: Store in remote cache for other workers
+	if s.contentCache != nil {
+		go s.storeDecompressedInRemoteCache(digest, diskPath)
+	}
+
+	return nil
 }
 
-// tryGetDecompressedFromCache attempts to retrieve decompressed layer from remote cache
-func (s *OCIClipStorage) tryGetDecompressedFromCache(digest string) ([]byte, bool) {
+// writeToDiskCache writes data to disk cache
+func (s *OCIClipStorage) writeToDiskCache(path string, data []byte) error {
+	tempPath := path + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
+}
+
+// tryGetDecompressedFromRemoteCache attempts to retrieve decompressed layer from remote cache
+func (s *OCIClipStorage) tryGetDecompressedFromRemoteCache(digest string) ([]byte, bool) {
 	cacheKey := fmt.Sprintf("clip:oci:layer:decompressed:%s", digest)
 	
 	data, found, err := s.contentCache.Get(cacheKey)
@@ -283,12 +351,19 @@ func (s *OCIClipStorage) tryGetDecompressedFromCache(digest string) ([]byte, boo
 	return nil, false
 }
 
-// storeDecompressedInCache stores decompressed layer in remote cache (async safe)
-func (s *OCIClipStorage) storeDecompressedInCache(digest string, data []byte) {
+// storeDecompressedInRemoteCache stores decompressed layer in remote cache (async safe)
+func (s *OCIClipStorage) storeDecompressedInRemoteCache(digest string, diskPath string) {
+	// Read from disk
+	data, err := os.ReadFile(diskPath)
+	if err != nil {
+		log.Warn().Err(err).Str("digest", digest).Msg("failed to read disk cache for remote caching")
+		return
+	}
+
 	cacheKey := fmt.Sprintf("clip:oci:layer:decompressed:%s", digest)
 	
 	if err := s.contentCache.Set(cacheKey, data); err != nil {
-		log.Warn().Err(err).Str("digest", digest).Msg("failed to cache decompressed layer")
+		log.Warn().Err(err).Str("digest", digest).Msg("failed to cache to remote")
 	} else {
 		log.Info().Str("digest", digest).Int("bytes", len(data)).Msg("cached decompressed layer to remote cache")
 	}
