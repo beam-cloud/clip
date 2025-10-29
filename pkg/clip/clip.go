@@ -5,19 +5,43 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
+
+// SetLogLevel configures the logging verbosity for the CLIP library.
+// Valid levels: "debug", "info", "warn", "error", "disabled"
+// Use "debug" to see detailed operation logs (file operations, cache hits/misses, etc.)
+// Use "info" for high-level operation logs (default)
+// Use "disabled" to suppress all logs
+func SetLogLevel(level string) error {
+	switch strings.ToLower(level) {
+	case "debug":
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	case "info":
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	case "warn", "warning":
+		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	case "error":
+		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+	case "disabled", "none", "off":
+		zerolog.SetGlobalLevel(zerolog.Disabled)
+	default:
+		return fmt.Errorf("invalid log level %q: must be one of: debug, info, warn, error, disabled", level)
+	}
+	return nil
+}
 
 type CreateOptions struct {
 	InputPath    string
 	OutputPath   string
-	Verbose      bool
 	Credentials  storage.ClipStorageCredentials
 	ProgressChan chan<- int
 }
@@ -25,19 +49,16 @@ type CreateOptions struct {
 type CreateRemoteOptions struct {
 	InputPath  string
 	OutputPath string
-	Verbose    bool
 }
 
 type ExtractOptions struct {
 	InputFile  string
 	OutputPath string
-	Verbose    bool
 }
 
 type MountOptions struct {
 	ArchivePath           string
 	MountPoint            string
-	Verbose               bool
 	CachePath             string
 	ContentCache          ContentCache
 	ContentCacheAvailable bool
@@ -238,7 +259,6 @@ type CreateFromOCIImageOptions struct {
 	ImageRef      string
 	OutputPath    string
 	CheckpointMiB int64
-	Verbose       bool
 	AuthConfig    string
 }
 
