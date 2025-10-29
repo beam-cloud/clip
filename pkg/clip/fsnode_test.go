@@ -300,7 +300,6 @@ func Test_FSNodeLookupAndRead(t *testing.T) {
 
 	// Create ClipFileSystem instance with ContentCacheAvailable=true
 	fsOpts := ClipFileSystemOpts{
-		Verbose:               true,
 		ContentCache:          mockCache,
 		ContentCacheAvailable: true,
 	}

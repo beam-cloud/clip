@@ -24,12 +24,22 @@ import (
 	"github.com/tidwall/btree"
 )
 
+// OCIIndexProgress represents a progress update during OCI image indexing
+type OCIIndexProgress struct {
+	LayerIndex    int    // Current layer being processed (1-based)
+	TotalLayers   int    // Total number of layers
+	LayerDigest   string // Digest of current layer
+	Stage         string // "starting" or "completed"
+	FilesIndexed  int    // Number of files indexed so far (only for "completed")
+	Message       string // Human-readable message
+}
+
 // IndexOCIImageOptions configures the OCI indexer
 type IndexOCIImageOptions struct {
 	ImageRef       string
-	CheckpointMiB  int64  // Checkpoint every N MiB (default 2)
-	Verbose        bool
-	AuthConfig     string // optional base64-encoded auth config
+	CheckpointMiB  int64                   // Checkpoint every N MiB (default 2)
+	AuthConfig     string                  // optional base64-encoded auth config
+	ProgressChan   chan<- OCIIndexProgress // optional channel for progress updates
 }
 
 // countingReader tracks bytes read from an io.Reader
@@ -180,6 +190,17 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 
 		log.Info().Msgf("Processing layer %d/%d: %s", i+1, len(layers), layerDigestStr)
 
+		// Send progress update: starting layer
+		if opts.ProgressChan != nil {
+			opts.ProgressChan <- OCIIndexProgress{
+				LayerIndex:  i + 1,
+				TotalLayers: len(layers),
+				LayerDigest: layerDigestStr,
+				Stage:       "starting",
+				Message:     fmt.Sprintf("Processing layer %d/%d", i+1, len(layers)),
+			}
+		}
+
 		// Get compressed layer stream
 		compressedRC, err := layer.Compressed()
 		if err != nil {
@@ -194,6 +215,18 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		}
 
 		gzipIdx[layerDigestStr] = gzipIndex
+
+		// Send progress update: completed layer
+		if opts.ProgressChan != nil {
+			opts.ProgressChan <- OCIIndexProgress{
+				LayerIndex:   i + 1,
+				TotalLayers:  len(layers),
+				LayerDigest:  layerDigestStr,
+				Stage:        "completed",
+				FilesIndexed: index.Len(),
+				Message:      fmt.Sprintf("Completed layer %d/%d (%d files total)", i+1, len(layers), index.Len()),
+			}
+		}
 	}
 
 	log.Info().Msgf("Successfully indexed image with %d files", index.Len())
@@ -324,10 +357,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 
 			index.Set(node)
-
-			if opts.Verbose {
-				log.Debug().Msgf("  File: %s (size=%d, uoff=%d)", cleanPath, hdr.Size, dataStart)
-			}
+			log.Debug().Str("path", cleanPath).Int64("size", hdr.Size).Int64("uoff", dataStart).Msg("File")
 
 		case tar.TypeSymlink:
 			// Get the symlink target
@@ -360,10 +390,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 
 			index.Set(node)
-
-			if opts.Verbose {
-				log.Debug().Msgf("  Symlink: %s -> %s", cleanPath, target)
-			}
+			log.Debug().Str("path", cleanPath).Str("target", target).Msg("Symlink")
 
 		case tar.TypeDir:
 			node := &common.ClipNode{
@@ -389,10 +416,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 
 			index.Set(node)
-
-			if opts.Verbose {
-				log.Debug().Msgf("  Dir: %s (mode=%o, mtime=%d, nlink=2)", cleanPath, hdr.Mode, hdr.ModTime.Unix())
-			}
+			log.Debug().Str("path", cleanPath).Int64("mode", hdr.Mode).Int64("mtime", hdr.ModTime.Unix()).Msg("Dir")
 
 		case tar.TypeLink:
 			// Hard links: point to the same inode as the target

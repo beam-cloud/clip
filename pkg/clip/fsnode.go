@@ -2,14 +2,13 @@ package clip
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"path"
 	"syscall"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/rs/zerolog/log"
 )
 
 type FSNode struct {
@@ -19,18 +18,12 @@ type FSNode struct {
 	attr       fuse.Attr
 }
 
-func (n *FSNode) log(format string, v ...interface{}) {
-	if n.filesystem.verbose {
-		log.Printf(fmt.Sprintf("[CLIPFS] (%s) %s", n.clipNode.Path, format), v...)
-	}
-}
-
 func (n *FSNode) OnAdd(ctx context.Context) {
-	n.log("OnAdd called")
+	log.Debug().Str("path", n.clipNode.Path).Msg("OnAdd called")
 }
 
 func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	n.log("Getattr called")
+	log.Debug().Str("path", n.clipNode.Path).Msg("Getattr called")
 
 	node := n.clipNode
 
@@ -49,7 +42,7 @@ func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 }
 
 func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	n.log("Lookup called with name: %s", name)
+	log.Debug().Str("path", n.clipNode.Path).Str("name", name).Msg("Lookup called")
 
 	// Create the full path of the child node
 	childPath := path.Join(n.clipNode.Path, name)
@@ -59,7 +52,7 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	entry, found := n.filesystem.lookupCache[childPath]
 	n.filesystem.cacheMutex.RUnlock()
 	if found {
-		n.log("Lookup cache hit for name: %s", childPath)
+		log.Debug().Str("path", childPath).Msg("Lookup cache hit")
 		out.Attr = entry.attr
 		return entry.inode, fs.OK
 	}
@@ -86,17 +79,17 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 }
 
 func (n *FSNode) Opendir(ctx context.Context) syscall.Errno {
-	n.log("Opendir called")
+	log.Debug().Str("path", n.clipNode.Path).Msg("Opendir called")
 	return 0
 }
 
 func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	n.log("Open called with flags: %v", flags)
+	log.Debug().Str("path", n.clipNode.Path).Uint32("flags", flags).Msg("Open called")
 	return nil, 0, fs.OK
 }
 
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	n.log("Read called with offset: %v", off)
+	log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Msg("Read called")
 
 	// Determine file size (support both legacy and v2 RemoteRef)
 	var fileSize int64
@@ -129,7 +122,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		if cacheErr == nil {
 			// Cache hit - use cached content
 			nRead = copy(dest, content)
-			n.log("Cache hit for %s (offset=%d, len=%d)", n.clipNode.Path, off, readLen)
+			log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Int64("length", readLen).Msg("Cache hit")
 		} else {
 			// Cache miss - read from storage and populate cache
 			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
@@ -141,7 +134,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			go func() {
 				n.filesystem.CacheFile(n)
 			}()
-			n.log("Cache miss for %s (offset=%d, len=%d)", n.clipNode.Path, off, readLen)
+			log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Int64("length", readLen).Msg("Cache miss")
 		}
 	} else {
 		// No cache available or local storage - read directly
@@ -161,7 +154,7 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 }
 
 func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
-	n.log("Readlink called")
+	log.Debug().Str("path", n.clipNode.Path).Msg("Readlink called")
 
 	if n.clipNode.NodeType != common.SymLinkNode {
 		// This node is not a symlink
@@ -176,33 +169,33 @@ func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 }
 
 func (n *FSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	n.log("Readdir called")
+	log.Debug().Str("path", n.clipNode.Path).Msg("Readdir called")
 
 	dirEntries := n.filesystem.storage.Metadata().ListDirectory(n.clipNode.Path)
 	return fs.NewListDirStream(dirEntries), fs.OK
 }
 
 func (n *FSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	n.log("Create called with name: %s, flags: %v, mode: %v", name, flags, mode)
+	log.Debug().Str("path", n.clipNode.Path).Str("name", name).Uint32("flags", flags).Uint32("mode", mode).Msg("Create called")
 	return nil, nil, 0, syscall.EROFS
 }
 
 func (n *FSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	n.log("Mkdir called with name: %s, mode: %v", name, mode)
+	log.Debug().Str("path", n.clipNode.Path).Str("name", name).Uint32("mode", mode).Msg("Mkdir called")
 	return nil, syscall.EROFS
 }
 
 func (n *FSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	n.log("Rmdir called with name: %s", name)
+	log.Debug().Str("path", n.clipNode.Path).Str("name", name).Msg("Rmdir called")
 	return syscall.EROFS
 }
 
 func (n *FSNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	n.log("Unlink called with name: %s", name)
+	log.Debug().Str("path", n.clipNode.Path).Str("name", name).Msg("Unlink called")
 	return syscall.EROFS
 }
 
 func (n *FSNode) Rename(ctx context.Context, oldName string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	n.log("Rename called with oldName: %s, newName: %s, flags: %v", oldName, newName, flags)
+	log.Debug().Str("path", n.clipNode.Path).Str("old_name", oldName).Str("new_name", newName).Uint32("flags", flags).Msg("Rename called")
 	return syscall.EROFS
 }
