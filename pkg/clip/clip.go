@@ -41,7 +41,7 @@ type MountOptions struct {
 	CachePath             string
 	ContentCache          ContentCache
 	ContentCacheAvailable bool
-	StorageInfo           common.ClipStorageInfo // Changed to interface to support OCI and S3
+	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
 }
 
@@ -159,6 +159,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		Metadata:    metadata,
 		Credentials: options.Credentials,
 		StorageInfo: s3Info,
+		Verbose:     options.Verbose,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)

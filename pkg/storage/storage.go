@@ -23,6 +23,7 @@ type ClipStorageOpts struct {
 	Metadata    *common.ClipArchiveMetadata
 	StorageInfo *common.S3StorageInfo
 	Credentials ClipStorageCredentials
+	Verbose     bool
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
@@ -80,6 +81,7 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 		storage, err = NewOCIClipStorage(OCIClipStorageOpts{
 			Metadata:   metadata,
 			AuthConfig: "", // TODO: pass from opts if needed
+			Verbose:    opts.Verbose,
 		})
 	case common.StorageModeLocal:
 		storage, err = NewLocalClipStorage(metadata, LocalClipStorageOpts{

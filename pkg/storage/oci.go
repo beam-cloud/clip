@@ -39,6 +39,7 @@ type OCIClipStorage struct {
 	mu                  sync.RWMutex
 	layerDecompressMu   sync.Mutex               // Prevents duplicate decompression
 	layersDecompressing map[string]chan struct{} // Tracks in-progress decompressions
+	verbose             bool
 }
 
 type OCIClipStorageOpts struct {
@@ -46,6 +47,7 @@ type OCIClipStorageOpts struct {
 	AuthConfig   string       // optional base64-encoded auth config
 	ContentCache ContentCache // optional remote content cache (blobcache)
 	DiskCacheDir string       // optional local disk cache directory
+	Verbose      bool
 }
 
 func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
@@ -80,6 +82,7 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		keychain:            authn.DefaultKeychain,
 		contentCache:        opts.ContentCache,
 		layersDecompressing: make(map[string]chan struct{}),
+		verbose:             opts.Verbose,
 	}
 
 	log.Info().Str("cache_dir", diskCacheDir).Msg("initialized OCI storage with disk cache")
@@ -157,18 +160,26 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 	// 1. Try disk cache first (fastest - local range read)
 	layerPath := s.getDiskCachePath(remote.LayerDigest)
 	if _, err := os.Stat(layerPath); err == nil {
-		log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("disk cache hit (range read)")
+		if s.verbose {
+			log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("disk cache hit")
+		}
+
 		return s.readFromDiskCache(layerPath, wantUStart, dest[:readLen])
 	}
 
 	// 2. Try remote ContentCache range read (fast - network, but only what we need!)
 	if s.contentCache != nil {
 		if data, err := s.tryRangeReadFromContentCache(remote.LayerDigest, wantUStart, readLen); err == nil {
-			log.Info().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("ContentCache range read hit")
+			if s.verbose {
+				log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("ContentCache range read hit")
+			}
+
 			copy(dest, data)
 			return len(data), nil
 		} else {
-			log.Debug().Err(err).Str("digest", remote.LayerDigest).Msg("ContentCache range read miss")
+			if s.verbose {
+				log.Debug().Err(err).Str("digest", remote.LayerDigest).Msg("ContentCache range read miss")
+			}
 		}
 	}
 
@@ -189,7 +200,9 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, error) {
 
 	// If cached on disk, use that first
 	if _, err := os.Stat(layerPath); err == nil {
-		log.Debug().Str("digest", digest).Str("path", layerPath).Msg("disk cache hit")
+		if s.verbose {
+			log.Debug().Str("digest", digest).Str("path", layerPath).Msg("disk cache hit")
+		}
 		return layerPath, nil
 	}
 
@@ -198,7 +211,11 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, error) {
 	if waitChan, inProgress := s.layersDecompressing[digest]; inProgress {
 		// Another goroutine is decompressing - wait for it
 		s.layerDecompressMu.Unlock()
-		log.Debug().Str("digest", digest).Msg("waiting for in-progress decompression")
+
+		if s.verbose {
+			log.Debug().Str("digest", digest).Msg("waiting for in-progress decompression")
+		}
+
 		<-waitChan
 
 		// Now it should be on disk
@@ -214,7 +231,10 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, error) {
 	s.layerDecompressMu.Unlock()
 
 	// Decompress and cache the layer
-	log.Info().Str("digest", digest).Msg("decompressing layer")
+	if s.verbose {
+		log.Debug().Str("digest", digest).Msg("decompressing layer")
+	}
+
 	err := s.decompressAndCacheLayer(digest, layerPath)
 
 	// Clean up in-progress tracking
