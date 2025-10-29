@@ -219,6 +219,18 @@ func (s *OCIClipStorage) getDiskCachePath(digest string) string {
 	return filepath.Join(s.diskCacheDir, safeDigest)
 }
 
+// getContentHash extracts the hex hash from a digest (e.g., "sha256:abc123..." -> "abc123...")
+// This is used for content-addressed caching in remote cache
+func (s *OCIClipStorage) getContentHash(digest string) string {
+	// Layer digests are in format "sha256:abc123..." or "sha1:def456..."
+	// Extract just the hex part for true content-addressing
+	parts := strings.SplitN(digest, ":", 2)
+	if len(parts) == 2 {
+		return parts[1] // Return just the hash (abc123...)
+	}
+	return digest // Fallback if no colon found
+}
+
 // readFromDiskCache reads data from the cached layer file
 func (s *OCIClipStorage) readFromDiskCache(layerPath string, offset int64, dest []byte) (int, error) {
 	f, err := os.Open(layerPath)
@@ -335,7 +347,9 @@ func (s *OCIClipStorage) writeToDiskCache(path string, data []byte) error {
 
 // tryGetDecompressedFromRemoteCache attempts to retrieve decompressed layer from remote cache
 func (s *OCIClipStorage) tryGetDecompressedFromRemoteCache(digest string) ([]byte, bool) {
-	cacheKey := fmt.Sprintf("clip:oci:layer:decompressed:%s", digest)
+	// Use just the content hash (hex part) for true content-addressing
+	// This allows cross-image cache sharing (same layer digest = same cache key)
+	cacheKey := s.getContentHash(digest)
 	
 	data, found, err := s.contentCache.Get(cacheKey)
 	if err != nil {
@@ -360,7 +374,9 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(digest string, diskPath 
 		return
 	}
 
-	cacheKey := fmt.Sprintf("clip:oci:layer:decompressed:%s", digest)
+	// Use just the content hash (hex part) for true content-addressing
+	// This allows cross-image cache sharing (same layer digest = same cache key)
+	cacheKey := s.getContentHash(digest)
 	
 	if err := s.contentCache.Set(cacheKey, data); err != nil {
 		log.Warn().Err(err).Str("digest", digest).Msg("failed to cache to remote")
