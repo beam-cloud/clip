@@ -41,7 +41,6 @@ func init() {
 }
 
 type ClipArchiverOptions struct {
-	Verbose     bool
 	Compress    bool
 	ArchivePath string
 	SourcePath  string
@@ -525,10 +524,7 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	// Iterate over the index and extract every node
 	index.Ascend(index.Min(), func(a interface{}) bool {
 		node := a.(*common.ClipNode)
-
-		if opts.Verbose {
-			log.Info().Msgf("Extracting... %s", node.Path)
-		}
+		log.Debug().Str("path", node.Path).Msg("Extracting")
 
 		if node.NodeType == common.FileNode {
 			// Seek to the position of the file in the archive
@@ -628,9 +624,7 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 }
 
 func (ca *ClipArchiver) processNode(node *common.ClipNode, writer *bufio.Writer, sourcePath string, pos *int64, opts ClipArchiverOptions) bool {
-	if opts.Verbose {
-		log.Info().Msgf("Archiving... %s", node.Path)
-	}
+	log.Debug().Str("path", node.Path).Msg("Archiving")
 
 	f, err := os.Open(path.Join(sourcePath, node.Path))
 	if err != nil {

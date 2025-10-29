@@ -28,7 +28,6 @@ import (
 type IndexOCIImageOptions struct {
 	ImageRef       string
 	CheckpointMiB  int64  // Checkpoint every N MiB (default 2)
-	Verbose        bool
 	AuthConfig     string // optional base64-encoded auth config
 }
 
@@ -324,10 +323,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 
 			index.Set(node)
-
-			if opts.Verbose {
-				log.Debug().Msgf("  File: %s (size=%d, uoff=%d)", cleanPath, hdr.Size, dataStart)
-			}
+			log.Debug().Str("path", cleanPath).Int64("size", hdr.Size).Int64("uoff", dataStart).Msg("File")
 
 		case tar.TypeSymlink:
 			// Get the symlink target
@@ -360,10 +356,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 
 			index.Set(node)
-
-			if opts.Verbose {
-				log.Debug().Msgf("  Symlink: %s -> %s", cleanPath, target)
-			}
+			log.Debug().Str("path", cleanPath).Str("target", target).Msg("Symlink")
 
 		case tar.TypeDir:
 			node := &common.ClipNode{
@@ -389,10 +382,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			}
 
 			index.Set(node)
-
-			if opts.Verbose {
-				log.Debug().Msgf("  Dir: %s (mode=%o, mtime=%d, nlink=2)", cleanPath, hdr.Mode, hdr.ModTime.Unix())
-			}
+			log.Debug().Str("path", cleanPath).Int64("mode", hdr.Mode).Int64("mtime", hdr.ModTime.Unix()).Msg("Dir")
 
 		case tar.TypeLink:
 			// Hard links: point to the same inode as the target

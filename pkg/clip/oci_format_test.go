@@ -27,7 +27,6 @@ func TestOCIArchiveIsMetadataOnly(t *testing.T) {
 		ImageRef:      imageRef,
 		OutputPath:    clipFile,
 		CheckpointMiB: 2,
-		Verbose:       false,
 	})
 	require.NoError(t, err, "CreateFromOCIImage should succeed")
 	
@@ -298,7 +297,6 @@ func TestOCIMountAndReadFilesLazily(t *testing.T) {
 	startServer, serverError, server, err := MountArchive(MountOptions{
 		ArchivePath: clipFile,
 		MountPoint:  mountPoint,
-		Verbose:     true,
 	})
 	require.NoError(t, err, "MountArchive should succeed")
 	

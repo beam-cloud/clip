@@ -33,7 +33,6 @@ func TestOCIIndexing(t *testing.T) {
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
 		ImageRef:      imageRef,
 		CheckpointMiB: 2,
-		Verbose:       false,
 	}, outputFile)
 	
 	require.NoError(t, err, "Failed to index OCI image")
@@ -99,7 +98,6 @@ func TestOCIMountAndRead(t *testing.T) {
 		ImageRef:      imageRef,
 		OutputPath:    clipFile,
 		CheckpointMiB: 2,
-		Verbose:       false,
 	})
 	require.NoError(t, err, "Failed to create OCI index")
 
@@ -110,7 +108,6 @@ func TestOCIMountAndRead(t *testing.T) {
 	startServer, serverError, server, err := MountArchive(MountOptions{
 		ArchivePath:           clipFile,
 		MountPoint:            mountPoint,
-		Verbose:               false,
 		ContentCacheAvailable: false,
 	})
 	require.NoError(t, err, "Failed to mount archive")
@@ -215,7 +212,6 @@ func TestOCIWithContentCache(t *testing.T) {
 	startServer, _, server, err := MountArchive(MountOptions{
 		ArchivePath:           clipFile,
 		MountPoint:            mountPoint,
-		Verbose:               false,
 		ContentCache:          mockCache,
 		ContentCacheAvailable: true,
 	})

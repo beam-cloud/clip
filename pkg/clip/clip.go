@@ -63,7 +63,6 @@ func CreateArchive(options CreateOptions) error {
 	err := a.Create(ClipArchiverOptions{
 		SourcePath: options.InputPath,
 		OutputFile: options.OutputPath,
-		Verbose:    options.Verbose,
 	})
 	if err != nil {
 		return err
@@ -87,7 +86,6 @@ func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si commo
 	err = localArchiver.Create(ClipArchiverOptions{
 		SourcePath: options.InputPath,
 		OutputFile: tempFile.Name(),
-		Verbose:    options.Verbose,
 	})
 	if err != nil {
 		return err
@@ -115,7 +113,6 @@ func ExtractArchive(options ExtractOptions) error {
 	err := a.Extract(ClipArchiverOptions{
 		ArchivePath: options.InputFile,
 		OutputPath:  options.OutputPath,
-		Verbose:     options.Verbose,
 	})
 
 	if err != nil {
@@ -159,13 +156,12 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		Metadata:    metadata,
 		Credentials: options.Credentials,
 		StorageInfo: s3Info,
-		Verbose:     options.Verbose,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
+	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
@@ -258,7 +254,6 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
 		ImageRef:      options.ImageRef,
 		CheckpointMiB: options.CheckpointMiB,
-		Verbose:       options.Verbose,
 		AuthConfig:    options.AuthConfig,
 	}, options.OutputPath)
 
