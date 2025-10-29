@@ -150,10 +150,12 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 	}
 	
 	storage := &OCIClipStorage{
-		metadata:     metadata,
-		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:   map[string]v1.Layer{digest.String(): layer},
-		contentCache: cache,
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		decompressedLayers:  make(map[string][]byte),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
 	}
 	
 	// Create node
@@ -208,10 +210,12 @@ func TestOCIStorage_CacheMiss(t *testing.T) {
 	}
 	
 	storage := &OCIClipStorage{
-		metadata:     metadata,
-		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:   map[string]v1.Layer{digest.String(): layer},
-		contentCache: cache,
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		decompressedLayers:  make(map[string][]byte),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
 	}
 	
 	// Create node
@@ -263,10 +267,12 @@ func TestOCIStorage_NoCache(t *testing.T) {
 	}
 	
 	storage := &OCIClipStorage{
-		metadata:     metadata,
-		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:   map[string]v1.Layer{digest.String(): layer},
-		contentCache: nil, // No cache
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		decompressedLayers:  make(map[string][]byte),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        nil, // No cache
 	}
 	
 	// Create node
@@ -317,10 +323,12 @@ func TestOCIStorage_PartialRead(t *testing.T) {
 	}
 	
 	storage := &OCIClipStorage{
-		metadata:     metadata,
-		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:   map[string]v1.Layer{digest.String(): layer},
-		contentCache: cache,
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		decompressedLayers:  make(map[string][]byte),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
 	}
 	
 	// Test reading from different offsets
@@ -386,10 +394,12 @@ func TestOCIStorage_CacheError(t *testing.T) {
 	}
 	
 	storage := &OCIClipStorage{
-		metadata:     metadata,
-		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:   map[string]v1.Layer{digest.String(): layer},
-		contentCache: cache,
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		decompressedLayers:  make(map[string][]byte),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
 	}
 	
 	// Create node
@@ -439,10 +449,12 @@ func TestOCIStorage_LayerFetchError(t *testing.T) {
 	}
 	
 	storage := &OCIClipStorage{
-		metadata:     metadata,
-		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:   map[string]v1.Layer{digest.String(): layer},
-		contentCache: cache,
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		decompressedLayers:  make(map[string][]byte),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
 	}
 	
 	// Create node
@@ -492,10 +504,12 @@ func TestOCIStorage_ConcurrentReads(t *testing.T) {
 	}
 	
 	storage := &OCIClipStorage{
-		metadata:     metadata,
-		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:   map[string]v1.Layer{digest.String(): layer},
-		contentCache: cache,
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		decompressedLayers:  make(map[string][]byte),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
 	}
 	
 	// Create node
