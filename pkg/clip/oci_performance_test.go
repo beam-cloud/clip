@@ -33,7 +33,6 @@ func BenchmarkOCIIndexing(b *testing.B) {
 				err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
 					ImageRef:      tc.imageRef,
 					CheckpointMiB: 2,
-					Verbose:       false,
 				}, outputFile)
 
 				if err != nil {
@@ -72,7 +71,6 @@ func TestOCIIndexingPerformance(t *testing.T) {
 			err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
 				ImageRef:      tc.imageRef,
 				CheckpointMiB: 2,
-				Verbose:       false,
 			}, outputFile)
 
 			if err != nil {
@@ -112,7 +110,6 @@ func TestOCIIndexingLargeFile(t *testing.T) {
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
 		ImageRef:      imageRef,
 		CheckpointMiB: 2,
-		Verbose:       false,
 	}, outputFile)
 
 	if err != nil {
@@ -152,7 +149,6 @@ func TestParallelIndexingCorrectness(t *testing.T) {
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
 		ImageRef:      imageRef,
 		CheckpointMiB: 2,
-		Verbose:       false,
 	}, optimizedFile)
 
 	if err != nil {
