@@ -266,6 +266,9 @@ func TestOCIMountAndReadFilesLazily(t *testing.T) {
 		t.Skip("Skipping FUSE mount test in short mode")
 	}
 	
+	// This test requires FUSE to be available
+	t.Skip("Skipping FUSE-dependent test - requires fusermount and FUSE kernel module")
+	
 	ctx := context.Background()
 	tempDir := t.TempDir()
 	
