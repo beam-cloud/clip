@@ -260,6 +260,7 @@ type CreateFromOCIImageOptions struct {
 	OutputPath    string
 	CheckpointMiB int64
 	AuthConfig    string
+	ProgressChan  chan<- OCIIndexProgress // optional channel for progress updates
 }
 
 // CreateFromOCIImage creates a metadata-only index (.clip) file from an OCI image
@@ -275,6 +276,7 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 		ImageRef:      options.ImageRef,
 		CheckpointMiB: options.CheckpointMiB,
 		AuthConfig:    options.AuthConfig,
+		ProgressChan:  options.ProgressChan,
 	}, options.OutputPath)
 
 	if err != nil {
