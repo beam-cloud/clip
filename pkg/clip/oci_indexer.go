@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -140,13 +141,27 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	layerDigests = make([]string, 0, len(layers))
 	gzipIdx = make(map[string]*common.GzipIndex)
 
-	// Create root node
+	// Create root node with complete FUSE attributes
+	now := time.Now()
 	root := &common.ClipNode{
 		Path:     "/",
 		NodeType: common.DirNode,
 		Attr: fuse.Attr{
-			Ino:  1,
-			Mode: uint32(syscall.S_IFDIR | 0755),
+			Ino:       1,
+			Size:      0,
+			Blocks:    0,
+			Atime:     uint64(now.Unix()),
+			Atimensec: uint32(now.Nanosecond()),
+			Mtime:     uint64(now.Unix()),
+			Mtimensec: uint32(now.Nanosecond()),
+			Ctime:     uint64(now.Unix()),
+			Ctimensec: uint32(now.Nanosecond()),
+			Mode:      uint32(syscall.S_IFDIR | 0755),
+			Nlink:     2, // Directories start with link count of 2 (. and ..)
+			Owner: fuse.Owner{
+				Uid: 0, // root
+				Gid: 0, // root
+			},
 		},
 	}
 	index.Set(root)

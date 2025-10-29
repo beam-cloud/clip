@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	log "github.com/rs/zerolog/log"
@@ -74,11 +75,27 @@ func (ig *InodeGenerator) Next() uint64 {
 
 // populateIndex creates a representation of the filesystem/folder being archived
 func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) error {
+	// Create root directory with complete FUSE attributes
+	now := time.Now()
 	root := &common.ClipNode{
 		Path:     "/",
 		NodeType: common.DirNode,
 		Attr: fuse.Attr{
-			Mode: uint32(os.ModeDir | 0755),
+			Ino:       1,
+			Size:      0,
+			Blocks:    0,
+			Atime:     uint64(now.Unix()),
+			Atimensec: uint32(now.Nanosecond()),
+			Mtime:     uint64(now.Unix()),
+			Mtimensec: uint32(now.Nanosecond()),
+			Ctime:     uint64(now.Unix()),
+			Ctimensec: uint32(now.Nanosecond()),
+			Mode:      uint32(syscall.S_IFDIR | 0755),
+			Nlink:     2, // Directories start with link count of 2 (. and ..)
+			Owner: fuse.Owner{
+				Uid: 0, // root
+				Gid: 0, // root
+			},
 		},
 	}
 	index.Set(root)
