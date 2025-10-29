@@ -20,10 +20,10 @@ func TestOCIIndexing(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	
+
 	// Use a small public image for testing
 	imageRef := "docker.io/library/alpine:3.18"
-	
+
 	// Create temporary output file
 	tempDir := t.TempDir()
 	outputFile := filepath.Join(tempDir, "alpine.clip")
@@ -34,45 +34,102 @@ func TestOCIIndexing(t *testing.T) {
 		ImageRef:      imageRef,
 		CheckpointMiB: 2,
 	}, outputFile)
-	
+
 	require.NoError(t, err, "Failed to index OCI image")
-	
+
 	// Verify output file exists
 	info, err := os.Stat(outputFile)
 	require.NoError(t, err, "Output file should exist")
 	assert.Greater(t, info.Size(), int64(0), "Output file should not be empty")
-	
+
 	t.Logf("Created index file: %s (size: %d bytes)", outputFile, info.Size())
-	
+
 	// Load and verify metadata
 	metadata, err := archiver.ExtractMetadata(outputFile)
 	require.NoError(t, err, "Should be able to extract metadata")
-	
+
 	assert.NotNil(t, metadata.Index, "Index should not be nil")
 	assert.Greater(t, metadata.Index.Len(), 0, "Index should contain nodes")
-	
+
 	// Verify storage info
 	require.NotNil(t, metadata.StorageInfo, "Storage info should not be nil")
-	
+
 	ociInfo, ok := metadata.StorageInfo.(common.OCIStorageInfo)
 	if !ok {
 		ociInfoPtr, ok := metadata.StorageInfo.(*common.OCIStorageInfo)
 		require.True(t, ok, "Storage info should be OCIStorageInfo")
 		ociInfo = *ociInfoPtr
 	}
-	
+
 	assert.Equal(t, "oci", ociInfo.Type(), "Storage type should be oci")
 	assert.Greater(t, len(ociInfo.Layers), 0, "Should have at least one layer")
 	assert.NotNil(t, ociInfo.GzipIdxByLayer, "Should have gzip indexes")
-	
+
 	// Verify gzip indexes exist for each layer
 	for _, layerDigest := range ociInfo.Layers {
 		idx, ok := ociInfo.GzipIdxByLayer[layerDigest]
 		assert.True(t, ok, "Should have gzip index for layer %s", layerDigest)
 		assert.Greater(t, len(idx.Checkpoints), 0, "Should have checkpoints for layer %s", layerDigest)
 	}
-	
+
 	t.Logf("Index contains %d files across %d layers", metadata.Index.Len(), len(ociInfo.Layers))
+}
+
+// BenchmarkCheckpointIntervals tests different checkpoint intervals
+func BenchmarkOCICheckpointIntervals(b *testing.B) {
+	if testing.Short() {
+		b.Skip("Skipping benchmark in short mode")
+	}
+
+	intervals := []int64{1, 2, 4, 8}
+
+	for _, interval := range intervals {
+		b.Run(string(rune(interval))+"MiB", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				ctx := context.Background()
+				tempDir := b.TempDir()
+
+				err := CreateFromOCIImage(ctx, CreateFromOCIImageOptions{
+					ImageRef:      "docker.io/library/alpine:3.18",
+					OutputPath:    tempDir + "/test.clip",
+					CheckpointMiB: interval,
+				})
+
+				if err != nil {
+					b.Fatalf("Failed to index: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestCheckpointPerformance measures performance across different intervals
+func TestOCICheckpointPerformance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping performance test in short mode")
+	}
+
+	intervals := []int64{1, 2, 4, 8}
+	ctx := context.Background()
+
+	t.Log("Testing checkpoint intervals on Alpine image:")
+	for _, interval := range intervals {
+		tempDir := t.TempDir()
+
+		start := time.Now()
+		err := CreateFromOCIImage(ctx, CreateFromOCIImageOptions{
+			ImageRef:      "docker.io/library/alpine:3.18",
+			OutputPath:    tempDir + "/test.clip",
+			CheckpointMiB: interval,
+		})
+		duration := time.Since(start)
+
+		if err != nil {
+			t.Fatalf("Failed with interval %d MiB: %v", interval, err)
+		}
+
+		t.Logf("Interval %2d MiB: %v", interval, duration)
+	}
 }
 
 // TestOCIMountAndRead tests mounting an OCI archive and reading files
@@ -80,15 +137,15 @@ func TestOCIMountAndRead(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-	
+
 	// This test requires FUSE to be available
 	t.Skip("Skipping FUSE-dependent test - requires fusermount and FUSE kernel module")
 
 	ctx := context.Background()
-	
+
 	// Use alpine for testing (small and has known files)
 	imageRef := "docker.io/library/alpine:3.18"
-	
+
 	tempDir := t.TempDir()
 	clipFile := filepath.Join(tempDir, "alpine.clip")
 	mountPoint := filepath.Join(tempDir, "mnt")
@@ -133,7 +190,7 @@ func TestOCIMountAndRead(t *testing.T) {
 		entries, err := os.ReadDir(mountPoint)
 		require.NoError(t, err, "Should be able to read root directory")
 		assert.Greater(t, len(entries), 0, "Root should contain entries")
-		
+
 		t.Logf("Root directory contains %d entries", len(entries))
 		for _, entry := range entries {
 			t.Logf("  - %s (dir=%v)", entry.Name(), entry.IsDir())
@@ -144,7 +201,7 @@ func TestOCIMountAndRead(t *testing.T) {
 		etcPath := filepath.Join(mountPoint, "etc")
 		_, err := os.Stat(etcPath)
 		require.NoError(t, err, "/etc should exist")
-		
+
 		entries, err := os.ReadDir(etcPath)
 		require.NoError(t, err, "Should be able to read /etc")
 		assert.Greater(t, len(entries), 0, "/etc should contain files")
@@ -156,7 +213,7 @@ func TestOCIMountAndRead(t *testing.T) {
 		require.NoError(t, err, "Should be able to read /etc/os-release")
 		assert.Greater(t, len(data), 0, "File should have content")
 		assert.Contains(t, string(data), "Alpine", "Should contain Alpine identifier")
-		
+
 		t.Logf("Read %d bytes from /etc/os-release", len(data))
 	})
 
@@ -165,7 +222,7 @@ func TestOCIMountAndRead(t *testing.T) {
 		entries, err := os.ReadDir(binPath)
 		require.NoError(t, err, "Should be able to read /bin")
 		assert.Greater(t, len(entries), 0, "/bin should contain executables")
-		
+
 		// Check for common executables
 		hasLs := false
 		for _, entry := range entries {
@@ -183,13 +240,13 @@ func TestOCIWithContentCache(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-	
+
 	// This test requires FUSE to be available
 	t.Skip("Skipping FUSE-dependent test - requires fusermount and FUSE kernel module")
 
 	ctx := context.Background()
 	imageRef := "docker.io/library/alpine:3.18"
-	
+
 	tempDir := t.TempDir()
 	clipFile := filepath.Join(tempDir, "alpine.clip")
 	mountPoint := filepath.Join(tempDir, "mnt")
@@ -248,15 +305,15 @@ func TestProgrammaticAPI(t *testing.T) {
 
 	t.Run("CreateFromOCIImage", func(t *testing.T) {
 		outputPath := filepath.Join(tempDir, "test-alpine.clip")
-		
+
 		err := CreateFromOCIImage(ctx, CreateFromOCIImageOptions{
 			ImageRef:      "docker.io/library/alpine:3.18",
 			OutputPath:    outputPath,
 			CheckpointMiB: 2,
 		})
-		
+
 		require.NoError(t, err, "CreateFromOCIImage should succeed")
-		
+
 		// Verify file exists
 		_, err = os.Stat(outputPath)
 		require.NoError(t, err, "Output file should exist")
