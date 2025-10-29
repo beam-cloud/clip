@@ -245,8 +245,7 @@ type CreateFromOCIImageOptions struct {
 	AuthConfig    string
 }
 
-// CreateFromOCIImage creates a metadata-only clip file from an OCI image
-// This is the programmatic API for creating lazy-loading image indexes
+// CreateFromOCIImage creates a metadata-only index (.clip) file from an OCI image
 func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) error {
 	log.Info().Msgf("creating OCI archive index from %s to %s", options.ImageRef, options.OutputPath)
 
