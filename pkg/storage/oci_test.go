@@ -152,10 +152,12 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 	}
 
 	// Setup mock cache with decompressed data already cached
-	// Use the content hash (hex part of digest) as the key
+	// Use the DiffID (uncompressed digest) for cache key
 	cache := newMockCache()
-	cacheKey := "abc123" // getContentHash extracts hex part from "sha256:abc123"
-	cache.store[cacheKey] = testData // Store decompressed data, not compressed
+	// For test, we'll use the compressed digest as DiffID (simplified)
+	// In real usage, DiffID would be different from compressed digest
+	cacheKey := "abc123" // getContentHash extracts hex part from digest
+	cache.store[cacheKey] = testData // Store decompressed data
 
 	// Create mock layer
 	layer := &mockLayer{
@@ -175,7 +177,8 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
@@ -236,7 +239,8 @@ func TestOCIStorage_CacheMiss(t *testing.T) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
@@ -295,7 +299,8 @@ func TestOCIStorage_NoCache(t *testing.T) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        nil, // No cache
@@ -351,7 +356,8 @@ func TestOCIStorage_PartialRead(t *testing.T) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
@@ -422,7 +428,8 @@ func TestOCIStorage_CacheError(t *testing.T) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
@@ -477,7 +484,8 @@ func TestOCIStorage_LayerFetchError(t *testing.T) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
@@ -532,7 +540,8 @@ func TestOCIStorage_ConcurrentReads(t *testing.T) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        t.TempDir(),
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
@@ -897,7 +906,8 @@ func TestLayerCacheEliminatesRepeatedInflates(t *testing.T) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        diskCacheDir,
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
@@ -974,7 +984,8 @@ func TestOCIStorage_CacheLookupOrder(t *testing.T) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        diskCacheDir,
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        cache,
@@ -1049,7 +1060,8 @@ func BenchmarkLayerCachePerformance(b *testing.B) {
 	storage := &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		layerCache: map[string]v1.Layer{digest.String(): layer},
+		diffIDCache: map[string]string{digest.String(): digest.String()},
 		diskCacheDir:        diskCacheDir,
 		layersDecompressing: make(map[string]chan struct{}),
 		contentCache:        nil, // No remote cache for benchmark
