@@ -113,22 +113,27 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	// Attempt to read from cache first
-	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
+	// Always attempt to read from content cache first when available
+	// Content-addressed storage should be prioritized over disk cache
+	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" {
 		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
 		if cacheErr == nil {
+			// Content cache hit - use it directly
 			nRead = copy(dest, content)
 		} else {
+			// Content cache miss - fall back to storage (disk cache or remote)
 			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 			if err != nil {
 				return nil, syscall.EIO
 			}
 
+			// Trigger background caching to store in content cache for future lookups
 			go func() {
 				n.filesystem.CacheFile(n)
 			}()
 		}
 	} else {
+		// Content cache not available - use storage directly
 		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 		if err != nil {
 			return nil, syscall.EIO

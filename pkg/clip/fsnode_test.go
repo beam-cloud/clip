@@ -125,6 +125,7 @@ type mockS3Storage struct {
 	storage.ClipStorageInterface
 	readFileCalled bool
 	readFileError  error
+	cachedLocally  bool
 	mu             sync.Mutex
 }
 
@@ -137,6 +138,18 @@ func (m *mockS3Storage) ReadFile(node *common.ClipNode, dest []byte, offset int6
 		return 0, m.readFileError
 	}
 	return m.ClipStorageInterface.ReadFile(node, dest, offset)
+}
+
+func (m *mockS3Storage) CachedLocally() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cachedLocally
+}
+
+func (m *mockS3Storage) SetCachedLocally(cached bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cachedLocally = cached
 }
 
 func (m *mockS3Storage) WasReadFileCalled() bool {
@@ -364,4 +377,196 @@ func Test_FSNodeLookupAndRead(t *testing.T) {
 	assert.True(t, mockCache.getCalled, "[Second Read] mockCache.GetContent should have been called")
 	assert.NoError(t, mockCache.getError, "[Second Read] mockCache.GetContent should not have returned an error (cache hit)")
 	assert.False(t, mockStorage.WasReadFileCalled(), "[Second Read] mockStorage.ReadFile should NOT have been called (cache hit)")
+}
+
+// Test_FSNodeReadWithDiskCache verifies that content cache is checked first
+// even when disk cache exists (CachedLocally() returns true)
+func Test_FSNodeReadWithDiskCache(t *testing.T) {
+	ctx := context.Background()
+
+	req := tc.ContainerRequest{
+		Image:        "localstack/localstack:3",
+		ExposedPorts: []string{"4566/tcp"},
+		WaitingFor:   wait.ForListeningPort("4566/tcp").WithStartupTimeout(2 * time.Minute),
+	}
+	localstackContainer, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	require.NoError(t, err, "Failed to start localstack container")
+	defer func() {
+		if err := localstackContainer.Terminate(ctx); err != nil {
+			t.Fatalf("Failed to terminate localstack container: %s", err)
+		}
+	}()
+
+	hostPort, err := localstackContainer.MappedPort(ctx, "4566/tcp")
+	require.NoError(t, err)
+	hostIP, err := localstackContainer.Host(ctx)
+	require.NoError(t, err)
+	endpoint := "http://" + hostIP + ":" + hostPort.Port()
+
+	accessKey := "test"
+	secretKey := "test"
+	region := "us-east-1"
+
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
+		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
+			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+				return aws.Endpoint{URL: endpoint, SigningRegion: region}, nil
+			})),
+	)
+	require.NoError(t, err)
+
+	s3Client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.UsePathStyle = true
+	})
+
+	bucketName := "test-clip-bucket-diskcache"
+	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil {
+		if !strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") &&
+			!strings.Contains(err.Error(), "bucket already exists") {
+			require.NoError(t, err, "Failed to create bucket")
+		}
+	}
+
+	testFileName := "testfile2.txt"
+	testFileData := []byte("Hello from Clip Test with Disk Cache!")
+	testFileHashBytes := sha256.Sum256(testFileData)
+	testFileHash := hex.EncodeToString(testFileHashBytes[:])
+	testFilePath := "/" + testFileName
+	archiveKey := "test_archive_diskcache.clip"
+
+	now := uint64(time.Now().Unix())
+	rootNode := &common.ClipNode{
+		Path:     "/",
+		NodeType: common.DirNode,
+		Attr: fuse.Attr{
+			Ino:   1,
+			Mode:  fuse.S_IFDIR | 0755,
+			Nlink: 2,
+			Atime: now,
+			Mtime: now,
+			Ctime: now,
+		},
+	}
+	testFileNode := &common.ClipNode{
+		Path:        testFilePath,
+		NodeType:    common.FileNode,
+		ContentHash: testFileHash,
+		DataLen:     int64(len(testFileData)),
+		DataPos:     0,
+		Attr: fuse.Attr{
+			Ino:   2,
+			Size:  uint64(len(testFileData)),
+			Mode:  fuse.S_IFREG | 0644,
+			Nlink: 1,
+			Atime: now,
+			Mtime: now,
+			Ctime: now,
+		},
+	}
+
+	clipNodeLess := func(a, b interface{}) bool {
+		aNode := a.(*common.ClipNode)
+		bNode := b.(*common.ClipNode)
+		return aNode.Path < bNode.Path
+	}
+	index := btree.NewOptions(clipNodeLess, btree.Options{
+		NoLocks: true,
+	})
+	index.Set(rootNode)
+	index.Set(testFileNode)
+
+	metadata := &common.ClipArchiveMetadata{
+		Header: common.ClipArchiveHeader{},
+		StorageInfo: common.S3StorageInfo{
+			Bucket: bucketName,
+			Key:    archiveKey,
+			Region: region,
+		},
+		Index: index,
+	}
+
+	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(archiveKey),
+		Body:   bytes.NewReader(testFileData),
+	})
+	require.NoError(t, err, "Failed to upload test data to S3")
+
+	mockCache := newMockContentCache()
+
+	s3StorageOpts := storage.S3ClipStorageOpts{
+		Bucket:         bucketName,
+		Key:            archiveKey,
+		Region:         region,
+		Endpoint:       endpoint,
+		AccessKey:      accessKey,
+		SecretKey:      secretKey,
+		CachePath:      "",
+		ForcePathStyle: true,
+	}
+	s3Storage, err := storage.NewS3ClipStorage(metadata, s3StorageOpts)
+	require.NoError(t, err, "Failed to create S3 clip storage")
+
+	mockStorage := &mockS3Storage{ClipStorageInterface: s3Storage}
+	mockStorage.SetCachedLocally(true)
+	require.True(t, mockStorage.CachedLocally(), "Mock storage should report cached locally")
+
+	fsOpts := ClipFileSystemOpts{
+		Verbose:               true,
+		ContentCache:          mockCache,
+		ContentCacheAvailable: true,
+	}
+	clipFS, err := NewFileSystem(mockStorage, fsOpts)
+	require.NoError(t, err, "Failed to create ClipFileSystem")
+
+	rootInodeEmbedder, err := clipFS.Root()
+	require.NoError(t, err)
+
+	_ = fs.NewNodeFS(rootInodeEmbedder, &fs.Options{})
+	rootFSNode := rootInodeEmbedder.(*FSNode)
+
+	lookupEntryOut := &fuse.EntryOut{}
+	childInode, errno := rootFSNode.Lookup(ctx, testFileName, lookupEntryOut)
+	require.Equal(t, fs.OK, errno, "Lookup failed")
+	require.NotNil(t, childInode)
+	testFileFSNode := childInode.Operations().(*FSNode)
+	require.Equal(t, testFilePath, testFileFSNode.clipNode.Path)
+
+	readDest := make([]byte, len(testFileData)+10)
+	readResult, readErrno := testFileFSNode.Read(ctx, nil, readDest, 0)
+	require.Equal(t, fs.OK, readErrno, "Read returned an error")
+
+	readData, status := readResult.Bytes(readDest)
+	require.Equal(t, fuse.OK, status, "Read returned an error")
+	assert.Equal(t, testFileData, readData[:len(testFileData)], "Read data content mismatch")
+
+	assert.True(t, mockCache.getCalled, "[Disk Cache Test] Content cache should have been checked first")
+	assert.Error(t, mockCache.getError, "[Disk Cache Test] Content cache should have missed initially")
+	assert.True(t, mockStorage.WasReadFileCalled(), "[Disk Cache Test] Storage should have been called after content cache miss")
+
+	waitTimeout := 5 * time.Second
+	err = mockCache.WaitForStore(testFileHash, waitTimeout)
+	require.NoError(t, err, "Waiting for cache store timed out")
+
+	mockCache.resetTrackingFields()
+	mockStorage.resetTrackingFields()
+
+	readResult, readErrno = testFileFSNode.Read(ctx, nil, readDest, 0)
+	require.Equal(t, fs.OK, readErrno, "[Second Read] Read returned an error")
+
+	readData, status = readResult.Bytes(readDest)
+	require.Equal(t, fuse.OK, status, "[Second Read] Read Bytes returned an error")
+	assert.Equal(t, testFileData, readData[:len(testFileData)], "[Second Read] Read data content mismatch")
+
+	assert.True(t, mockCache.getCalled, "[Second Read] Content cache should have been checked")
+	assert.NoError(t, mockCache.getError, "[Second Read] Content cache should have hit")
+	assert.False(t, mockStorage.WasReadFileCalled(), "[Second Read] Disk cache should NOT have been accessed when content cache hits")
 }
