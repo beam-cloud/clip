@@ -26,13 +26,14 @@ type ClipStorageCredentials struct {
 }
 
 type ClipStorageOpts struct {
-	ArchivePath    string
-	CachePath      string
-	Metadata       *common.ClipArchiveMetadata
-	StorageInfo    *common.S3StorageInfo
-	Credentials    ClipStorageCredentials
-	ContentCache   ContentCache // For OCI storage remote caching
-	UseCheckpoints bool         // Enable checkpoint-based partial decompression for OCI layers
+	ArchivePath           string
+	CachePath             string
+	Metadata              *common.ClipArchiveMetadata
+	StorageInfo           *common.S3StorageInfo
+	Credentials           ClipStorageCredentials
+	ContentCache          ContentCache // For OCI storage remote caching
+	ContentCacheAvailable bool
+	UseCheckpoints        bool // Enable checkpoint-based partial decompression for OCI layers
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
@@ -88,10 +89,11 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 		})
 	case common.StorageModeOCI:
 		storage, err = NewOCIClipStorage(OCIClipStorageOpts{
-			Metadata:       metadata,
-			ContentCache:   opts.ContentCache,
-			DiskCacheDir:   opts.CachePath,
-			UseCheckpoints: opts.UseCheckpoints,
+			Metadata:              metadata,
+			ContentCache:          opts.ContentCache,
+			ContentCacheAvailable: opts.ContentCacheAvailable,
+			DiskCacheDir:          opts.CachePath,
+			UseCheckpoints:        opts.UseCheckpoints,
 			// AuthConfig: opts.Credentials
 		})
 	case common.StorageModeLocal:

@@ -21,25 +21,27 @@ import (
 
 // OCIClipStorage implements lazy, range-based reading from OCI registries with disk + remote caching
 type OCIClipStorage struct {
-	metadata            *common.ClipArchiveMetadata
-	storageInfo         *common.OCIStorageInfo
-	layerCache          map[string]v1.Layer
-	diskCacheDir        string // Local disk cache directory for decompressed layers
-	httpClient          *http.Client
-	keychain            authn.Keychain
-	contentCache        ContentCache // Remote content cache (blobcache)
-	useCheckpoints      bool         // Enable checkpoint-based partial decompression
-	mu                  sync.RWMutex
-	layerDecompressMu   sync.Mutex               // Prevents duplicate decompression
-	layersDecompressing map[string]chan struct{} // Tracks in-progress decompressions
+	metadata              *common.ClipArchiveMetadata
+	storageInfo           *common.OCIStorageInfo
+	layerCache            map[string]v1.Layer
+	diskCacheDir          string // Local disk cache directory for decompressed layers
+	httpClient            *http.Client
+	keychain              authn.Keychain
+	contentCache          ContentCache // Remote content cache (blobcache)
+	contentCacheAvailable bool         // is there an available content cache for range reads?
+	useCheckpoints        bool         // Enable checkpoint-based partial decompression
+	mu                    sync.RWMutex
+	layerDecompressMu     sync.Mutex               // Prevents duplicate decompression
+	layersDecompressing   map[string]chan struct{} // Tracks in-progress decompressions
 }
 
 type OCIClipStorageOpts struct {
-	Metadata       *common.ClipArchiveMetadata
-	AuthConfig     string       // optional base64-encoded auth config
-	ContentCache   ContentCache // optional remote content cache (blobcache)
-	DiskCacheDir   string       // optional local disk cache directory
-	UseCheckpoints bool         // Enable checkpoint-based partial decompression (default: false)
+	Metadata              *common.ClipArchiveMetadata
+	AuthConfig            string       // optional base64-encoded auth config
+	ContentCache          ContentCache // optional remote content cache (blobcache)
+	ContentCacheAvailable bool         // is there an available content cache for range reads?
+	DiskCacheDir          string       // optional local disk cache directory
+	UseCheckpoints        bool         // Enable checkpoint-based partial decompression (default: false)
 }
 
 func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
@@ -66,15 +68,16 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 	}
 
 	storage := &OCIClipStorage{
-		metadata:            opts.Metadata,
-		storageInfo:         &storageInfo,
-		layerCache:          make(map[string]v1.Layer),
-		diskCacheDir:        diskCacheDir,
-		httpClient:          &http.Client{},
-		keychain:            authn.DefaultKeychain,
-		contentCache:        opts.ContentCache,
-		useCheckpoints:      opts.UseCheckpoints,
-		layersDecompressing: make(map[string]chan struct{}),
+		metadata:              opts.Metadata,
+		storageInfo:           &storageInfo,
+		layerCache:            make(map[string]v1.Layer),
+		diskCacheDir:          diskCacheDir,
+		httpClient:            &http.Client{},
+		keychain:              authn.DefaultKeychain,
+		contentCache:          opts.ContentCache,
+		contentCacheAvailable: opts.ContentCacheAvailable,
+		useCheckpoints:        opts.UseCheckpoints,
+		layersDecompressing:   make(map[string]chan struct{}),
 	}
 
 	log.Info().Str("cache_dir", diskCacheDir).Msg("initialized OCI storage with disk cache")
@@ -167,7 +170,7 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 	}
 
 	// Try remote ContentCache range read
-	if s.contentCache != nil && decompressedHash != "" {
+	if s.contentCache != nil && decompressedHash != "" && s.contentCacheAvailable {
 		if data, err := s.tryRangeReadFromContentCache(decompressedHash, wantUStart, readLen); err == nil {
 			log.Debug().
 				Str("layer_digest", remote.LayerDigest).
