@@ -365,9 +365,16 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 
 	// Store in remote cache (if configured) for other workers
 	if s.contentCache != nil {
+		cacheKey := s.getContentHash(digest)
+		log.Info().
+			Str("layer", digest).
+			Str("cache_key", cacheKey).
+			Msg("Storing decompressed layer in ContentCache (async)")
 		go s.storeDecompressedInRemoteCache(digest, diskPath)
 	} else {
-		log.Debug().Str("digest", digest).Msg("remote cache not configured, skipping remote storage")
+		log.Warn().
+			Str("layer", digest).
+			Msg("ContentCache not configured - layer will NOT be shared across cluster")
 	}
 
 	return nil
@@ -452,10 +459,21 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(digest string, diskPath 
 	// This allows cross-image cache sharing (same layer digest = same cache key)
 	cacheKey := s.getContentHash(digest)
 
+	log.Debug().
+		Str("layer", digest).
+		Str("cache_key", cacheKey).
+		Str("disk_path", diskPath).
+		Msg("storeDecompressedInRemoteCache goroutine started")
+
 	// Get file size for logging
 	fileInfo, err := os.Stat(diskPath)
 	if err != nil {
-		log.Warn().Err(err).Str("digest", digest).Msg("failed to stat disk cache for remote caching")
+		log.Error().
+			Err(err).
+			Str("layer", digest).
+			Str("cache_key", cacheKey).
+			Str("disk_path", diskPath).
+			Msg("FAILED to stat disk cache for ContentCache storage")
 		return
 	}
 	totalSize := fileInfo.Size()
@@ -467,23 +485,29 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(digest string, diskPath 
 		defer close(chunks)
 
 		if err := streamFileInChunks(diskPath, chunks); err != nil {
-			log.Warn().Err(err).Str("digest", digest).Msg("failed to stream file for remote caching")
+			log.Error().
+				Err(err).
+				Str("layer", digest).
+				Str("cache_key", cacheKey).
+				Msg("FAILED to stream file for ContentCache storage")
 		}
 	}()
 
-	_, err = s.contentCache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{})
+	storedHash, err := s.contentCache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{})
 	if err != nil {
-		log.Warn().
+		log.Error().
 			Err(err).
 			Str("layer", digest).
 			Str("cache_key", cacheKey).
-			Msg("Failed to store layer in ContentCache")
+			Int64("bytes", totalSize).
+			Msg("FAILED to store layer in ContentCache")
 	} else {
 		log.Info().
 			Str("layer", digest).
 			Str("cache_key", cacheKey).
+			Str("stored_hash", storedHash).
 			Int64("bytes", totalSize).
-			Msg("Stored decompressed layer in ContentCache for cluster-wide sharing")
+			Msg("✓ Successfully stored decompressed layer in ContentCache - available for cluster range reads")
 	}
 }
 

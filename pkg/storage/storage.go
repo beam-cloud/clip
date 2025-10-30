@@ -26,11 +26,12 @@ type ClipStorageCredentials struct {
 }
 
 type ClipStorageOpts struct {
-	ArchivePath string
-	CachePath   string
-	Metadata    *common.ClipArchiveMetadata
-	StorageInfo *common.S3StorageInfo
-	Credentials ClipStorageCredentials
+	ArchivePath  string
+	CachePath    string
+	Metadata     *common.ClipArchiveMetadata
+	StorageInfo  *common.S3StorageInfo
+	Credentials  ClipStorageCredentials
+	ContentCache ContentCache // For OCI storage remote caching
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
@@ -86,7 +87,9 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 		})
 	case common.StorageModeOCI:
 		storage, err = NewOCIClipStorage(OCIClipStorageOpts{
-			Metadata: metadata,
+			Metadata:     metadata,
+			ContentCache: opts.ContentCache,
+			DiskCacheDir: opts.CachePath,
 			// AuthConfig: opts.Credentials
 		})
 	case common.StorageModeLocal:
