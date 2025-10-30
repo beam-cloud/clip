@@ -150,18 +150,42 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 	// 1. Try disk cache first (fastest - local range read)
 	layerPath := s.getDiskCachePath(remote.LayerDigest)
 	if _, err := os.Stat(layerPath); err == nil {
-		log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("disk cache hit")
+		cacheKey := s.getContentHash(remote.LayerDigest)
+		log.Debug().
+			Str("layer", remote.LayerDigest).
+			Str("cache_key", cacheKey).
+			Int64("offset", wantUStart).
+			Int64("length", readLen).
+			Msg("DISK CACHE HIT - using local decompressed layer")
 		return s.readFromDiskCache(layerPath, wantUStart, dest[:readLen])
 	}
 
 	// 2. Try remote ContentCache range read (fast - network, but only what we need!)
 	if s.contentCache != nil {
+		cacheKey := s.getContentHash(remote.LayerDigest)
+		log.Debug().
+			Str("layer", remote.LayerDigest).
+			Str("cache_key", cacheKey).
+			Int64("offset", wantUStart).
+			Int64("length", readLen).
+			Msg("Trying ContentCache range read")
+		
 		if data, err := s.tryRangeReadFromContentCache(remote.LayerDigest, wantUStart, readLen); err == nil {
-			log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("ContentCache range read hit")
+			log.Debug().
+				Str("layer", remote.LayerDigest).
+				Str("cache_key", cacheKey).
+				Int64("offset", wantUStart).
+				Int64("length", readLen).
+				Int("bytes_read", len(data)).
+				Msg("CONTENT CACHE HIT - range read from remote")
 			copy(dest, data)
 			return len(data), nil
 		} else {
-			log.Debug().Err(err).Str("digest", remote.LayerDigest).Msg("ContentCache range read miss")
+			log.Debug().
+				Err(err).
+				Str("layer", remote.LayerDigest).
+				Str("cache_key", cacheKey).
+				Msg("ContentCache miss - will decompress from OCI")
 		}
 	}
 
@@ -207,7 +231,11 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, error) {
 	s.layerDecompressMu.Unlock()
 
 	// Decompress and cache the layer
-	log.Info().Str("digest", digest).Msg("downloading and decompressing layer")
+	cacheKey := s.getContentHash(digest)
+	log.Info().
+		Str("layer", digest).
+		Str("cache_key", cacheKey).
+		Msg("OCI CACHE MISS - downloading and decompressing layer from registry")
 	err := s.decompressAndCacheLayer(digest, layerPath)
 
 	// Clean up in-progress tracking
@@ -326,12 +354,14 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	inflateDuration := time.Since(inflateStart)
 	metrics.RecordInflateCPU(inflateDuration)
 
+	cacheKey := s.getContentHash(digest)
 	log.Info().
-		Str("digest", digest).
+		Str("layer", digest).
+		Str("cache_key", cacheKey).
 		Int64("decompressed_bytes", written).
-		Str("path", diskPath).
+		Str("disk_path", diskPath).
 		Dur("duration", inflateDuration).
-		Msg("layer decompressed and cached to disk")
+		Msg("Layer decompressed and cached to disk")
 
 	// Store in remote cache (if configured) for other workers
 	if s.contentCache != nil {
@@ -405,12 +435,12 @@ func (s *OCIClipStorage) tryRangeReadFromContentCache(digest string, offset, len
 	cacheKey := s.getContentHash(digest)
 
 	// Use GetContent for range reads (offset + length)
+	// This is the KEY optimization: we only fetch the bytes we need!
 	data, err := s.contentCache.GetContent(cacheKey, offset, length, struct{ RoutingKey string }{})
 	if err != nil {
 		return nil, fmt.Errorf("ContentCache range read failed: %w", err)
 	}
 
-	log.Debug().Str("digest", digest).Int64("offset", offset).Int64("length", length).Int("bytes", len(data)).Msg("ContentCache range read success")
 	return data, nil
 }
 
@@ -443,9 +473,17 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(digest string, diskPath 
 
 	_, err = s.contentCache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{})
 	if err != nil {
-		log.Warn().Err(err).Str("digest", digest).Msg("failed to cache to remote")
+		log.Warn().
+			Err(err).
+			Str("layer", digest).
+			Str("cache_key", cacheKey).
+			Msg("Failed to store layer in ContentCache")
 	} else {
-		log.Info().Str("digest", digest).Int64("bytes", totalSize).Msg("cached decompressed layer to remote cache")
+		log.Info().
+			Str("layer", digest).
+			Str("cache_key", cacheKey).
+			Int64("bytes", totalSize).
+			Msg("Stored decompressed layer in ContentCache for cluster-wide sharing")
 	}
 }
 

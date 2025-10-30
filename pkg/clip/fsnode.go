@@ -116,31 +116,45 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	// Attempt to read from cache first
-	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
-		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
-		if cacheErr == nil {
-			// Cache hit - use cached content
-			nRead = copy(dest, content)
-			log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Int64("length", readLen).Msg("Cache hit")
+	// For OCI images (v2 with Remote), delegate ALL caching to the storage layer
+	// The storage layer (oci.go) handles the proper 3-tier cache hierarchy:
+	//   1. Disk cache (local)
+	//   2. ContentCache with layer digest (remote)
+	//   3. OCI registry (download + decompress)
+	if n.clipNode.Remote != nil {
+		// OCI mode - storage layer handles all caching
+		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
+		if err != nil {
+			return nil, syscall.EIO
+		}
+	} else {
+		// Legacy mode - use file-level ContentCache
+		// Attempt to read from cache first for legacy archives
+		if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
+			content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
+			if cacheErr == nil {
+				// Cache hit - use cached content
+				nRead = copy(dest, content)
+				log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Int64("length", readLen).Msg("Cache hit")
+			} else {
+				// Cache miss - read from storage and populate cache
+				nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
+				if err != nil {
+					return nil, syscall.EIO
+				}
+
+				// Asynchronously cache the file for future reads
+				go func() {
+					n.filesystem.CacheFile(n)
+				}()
+				log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Int64("length", readLen).Msg("Cache miss")
+			}
 		} else {
-			// Cache miss - read from storage and populate cache
+			// No cache available or local storage - read directly
 			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 			if err != nil {
 				return nil, syscall.EIO
 			}
-
-			// Asynchronously cache the file for future reads
-			go func() {
-				n.filesystem.CacheFile(n)
-			}()
-			log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Int64("length", readLen).Msg("Cache miss")
-		}
-	} else {
-		// No cache available or local storage - read directly
-		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
-		if err != nil {
-			return nil, syscall.EIO
 		}
 	}
 

@@ -4,8 +4,6 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -321,17 +319,14 @@ func (ca *ClipArchiver) indexLayerOptimized(
 				}
 			}
 
-			// Compute content hash from the layer digest and file path
-			// This provides a stable identifier for the file
-			hash := sha256.New()
-			hash.Write([]byte(layerDigest))
-			hash.Write([]byte(cleanPath))
-			contentHash := hex.EncodeToString(hash.Sum(nil))
-
+			// For OCI images, we don't need ContentHash at the file level
+			// The Remote field with LayerDigest is used for content-addressed caching
+			// ContentHash is only used for legacy archives with file-level caching
 			node := &common.ClipNode{
-				Path:        cleanPath,
-				NodeType:    common.FileNode,
-				ContentHash: contentHash,
+				Path:     cleanPath,
+				NodeType: common.FileNode,
+				// ContentHash is intentionally not set for OCI images
+				// Caching is handled at the layer level using Remote.LayerDigest
 				Attr: fuse.Attr{
 					Ino:       ca.generateInode(layerDigest, cleanPath),
 					Size:      uint64(hdr.Size),
@@ -425,11 +420,11 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			if targetNode != nil {
 				tn := targetNode.(*common.ClipNode)
 				node := &common.ClipNode{
-					Path:        cleanPath,
-					NodeType:    common.FileNode,
-					ContentHash: tn.ContentHash,
-					Attr:        tn.Attr, // Share inode with target
-					Remote:      tn.Remote,
+					Path:     cleanPath,
+					NodeType: common.FileNode,
+					// ContentHash not needed for OCI images (layer-level caching)
+					Attr:   tn.Attr, // Share inode with target
+					Remote: tn.Remote,
 				}
 				index.Set(node)
 			}
