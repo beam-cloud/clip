@@ -453,7 +453,9 @@ func (ca *ClipArchiver) processRegularFile(
 
 	// Content-defined checkpoint: Add checkpoint before large files (>512KB)
 	// This enables instant seeking to file start without decompression
-	if hdr.Size > 512*1024 && uncompressedCounter.n > *lastCheckpoint {
+	// Only add if we haven't added a checkpoint in the last 512KB to avoid checkpoint spam
+	const minCheckpointGap = 512 * 1024
+	if hdr.Size > 512*1024 && uncompressedCounter.n > *lastCheckpoint && (uncompressedCounter.n-*lastCheckpoint) >= minCheckpointGap {
 		ca.addCheckpoint(checkpoints, compressedCounter.n, uncompressedCounter.n, lastCheckpoint)
 		log.Debug().Msgf("Added file-boundary checkpoint for large file: %s", cleanPath)
 	}
