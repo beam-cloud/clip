@@ -294,6 +294,11 @@ func TestOCIStorage_NoCache(t *testing.T) {
 		Hex:       "abc123",
 	}
 
+	// Compute decompressed hash
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	// Create mock layer
 	layer := &mockLayer{
 		digest:         digest,
@@ -305,6 +310,9 @@ func TestOCIStorage_NoCache(t *testing.T) {
 		StorageInfo: &common.OCIStorageInfo{
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
 			},
 		},
 	}
@@ -347,6 +355,11 @@ func TestOCIStorage_PartialRead(t *testing.T) {
 		Hex:       "abc123",
 	}
 
+	// Compute decompressed hash
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	// Setup cache
 	cache := newMockCache()
 
@@ -361,6 +374,9 @@ func TestOCIStorage_PartialRead(t *testing.T) {
 		StorageInfo: &common.OCIStorageInfo{
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
 			},
 		},
 	}
@@ -417,6 +433,11 @@ func TestOCIStorage_CacheError(t *testing.T) {
 		Hex:       "abc123",
 	}
 
+	// Compute decompressed hash
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	// Setup cache with error injection
 	cache := newMockCache()
 	cache.getError = errors.New("cache get error")
@@ -432,6 +453,9 @@ func TestOCIStorage_CacheError(t *testing.T) {
 		StorageInfo: &common.OCIStorageInfo{
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
 			},
 		},
 	}
@@ -473,6 +497,11 @@ func TestOCIStorage_LayerFetchError(t *testing.T) {
 		Hex:       "abc123",
 	}
 
+	// Compute decompressed hash
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	// Setup cache
 	cache := newMockCache()
 
@@ -487,6 +516,9 @@ func TestOCIStorage_LayerFetchError(t *testing.T) {
 		StorageInfo: &common.OCIStorageInfo{
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
 			},
 		},
 	}
@@ -528,6 +560,11 @@ func TestOCIStorage_ConcurrentReads(t *testing.T) {
 		Hex:       "abc123",
 	}
 
+	// Compute decompressed hash
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	// Setup cache
 	cache := newMockCache()
 
@@ -542,6 +579,9 @@ func TestOCIStorage_ConcurrentReads(t *testing.T) {
 		StorageInfo: &common.OCIStorageInfo{
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
 			},
 		},
 	}
@@ -890,6 +930,11 @@ func TestLayerCacheEliminatesRepeatedInflates(t *testing.T) {
 		Hex:       "test123",
 	}
 
+	// Compute decompressed hash
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	// Setup cache
 	cache := newMockCache()
 
@@ -904,6 +949,9 @@ func TestLayerCacheEliminatesRepeatedInflates(t *testing.T) {
 		StorageInfo: &common.OCIStorageInfo{
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
 			},
 		},
 	}

@@ -2,6 +2,7 @@ package clip
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,6 +71,17 @@ func TestOCIIndexing(t *testing.T) {
 		idx, ok := ociInfo.GzipIdxByLayer[layerDigest]
 		assert.True(t, ok, "Should have gzip index for layer %s", layerDigest)
 		assert.Greater(t, len(idx.Checkpoints), 0, "Should have checkpoints for layer %s", layerDigest)
+		t.Logf("Layer %s has %d checkpoints", layerDigest, len(idx.Checkpoints))
+	}
+
+	// Verify decompressed hashes exist for each layer (used for content-addressed caching)
+	assert.NotNil(t, ociInfo.DecompressedHashByLayer, "Should have decompressed hash map")
+	for _, layerDigest := range ociInfo.Layers {
+		hash, ok := ociInfo.DecompressedHashByLayer[layerDigest]
+		assert.True(t, ok, "Should have decompressed hash for layer %s", layerDigest)
+		assert.NotEmpty(t, hash, "Decompressed hash should not be empty")
+		assert.Len(t, hash, 64, "Decompressed hash should be SHA256 (64 hex chars)")
+		t.Logf("Layer %s decompressed_hash=%s", layerDigest, hash)
 	}
 
 	t.Logf("Index contains %d files across %d layers", metadata.Index.Len(), len(ociInfo.Layers))
@@ -84,14 +96,14 @@ func BenchmarkOCICheckpointIntervals(b *testing.B) {
 	intervals := []int64{1, 2, 4, 8}
 
 	for _, interval := range intervals {
-		b.Run(string(rune(interval))+"MiB", func(b *testing.B) {
+		b.Run(fmt.Sprintf("%dMiB", interval), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				ctx := context.Background()
 				tempDir := b.TempDir()
 
 				err := CreateFromOCIImage(ctx, CreateFromOCIImageOptions{
 					ImageRef:      "docker.io/library/alpine:3.18",
-					OutputPath:    tempDir + "/test.clip",
+					OutputPath:    filepath.Join(tempDir, "test.clip"),
 					CheckpointMiB: interval,
 				})
 
@@ -378,4 +390,87 @@ func TestOCIStorageReadFile(t *testing.T) {
 		require.NoError(t, err, "Should be able to read partial")
 		assert.Equal(t, 10, nRead, "Should read 10 bytes")
 	}
+}
+
+// TestLayerCaching verifies that layers are properly cached after first read
+func TestLayerCaching(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	clipFile := filepath.Join(tempDir, "alpine.clip")
+
+	// Create index
+	archiver := NewClipArchiver()
+	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
+		ImageRef:      "docker.io/library/alpine:3.18",
+		CheckpointMiB: 2,
+	}, clipFile)
+	require.NoError(t, err)
+
+	// Load metadata
+	metadata, err := archiver.ExtractMetadata(clipFile)
+	require.NoError(t, err)
+
+	// Verify decompressed hashes are present
+	ociInfo, ok := metadata.StorageInfo.(common.OCIStorageInfo)
+	if !ok {
+		ociInfoPtr, ok := metadata.StorageInfo.(*common.OCIStorageInfo)
+		require.True(t, ok, "Storage info should be OCIStorageInfo")
+		ociInfo = *ociInfoPtr
+	}
+
+	require.NotNil(t, ociInfo.DecompressedHashByLayer, "Should have decompressed hashes")
+	require.Greater(t, len(ociInfo.DecompressedHashByLayer), 0, "Should have at least one layer hash")
+
+	// Create OCI storage with custom cache dir
+	cacheDir := filepath.Join(tempDir, "cache")
+	ociStorage, err := storage.NewOCIClipStorage(storage.OCIClipStorageOpts{
+		Metadata:     metadata,
+		DiskCacheDir: cacheDir,
+	})
+	require.NoError(t, err)
+	defer ociStorage.Cleanup()
+
+	// Find a file to read
+	var testNode *common.ClipNode
+	metadata.Index.Ascend(metadata.Index.Min(), func(item interface{}) bool {
+		node := item.(*common.ClipNode)
+		if node.NodeType == common.FileNode && node.Remote != nil && node.Remote.ULength > 100 {
+			testNode = node
+			return false
+		}
+		return true
+	})
+
+	require.NotNil(t, testNode, "Should find a file to test")
+	layerDigest := testNode.Remote.LayerDigest
+	decompressedHash, ok := ociInfo.DecompressedHashByLayer[layerDigest]
+	require.True(t, ok, "Should have decompressed hash for layer")
+
+	// Verify cache doesn't exist yet
+	cachePath := filepath.Join(cacheDir, decompressedHash)
+	_, err = os.Stat(cachePath)
+	assert.True(t, os.IsNotExist(err), "Cache file should not exist before first read")
+
+	// First read - should decompress and cache
+	dest := make([]byte, testNode.Remote.ULength)
+	_, err = ociStorage.ReadFile(testNode, dest, 0)
+	require.NoError(t, err, "First read should succeed")
+
+	// Verify cache now exists
+	info, err := os.Stat(cachePath)
+	require.NoError(t, err, "Cache file should exist after first read")
+	assert.Greater(t, info.Size(), int64(0), "Cache file should not be empty")
+	t.Logf("Layer cached at: %s (size: %d bytes)", cachePath, info.Size())
+
+	// Second read - should use cache
+	dest2 := make([]byte, testNode.Remote.ULength)
+	_, err = ociStorage.ReadFile(testNode, dest2, 0)
+	require.NoError(t, err, "Second read should succeed")
+
+	// Verify data is identical
+	assert.Equal(t, dest, dest2, "Data from cache should match original")
 }

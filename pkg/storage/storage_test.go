@@ -108,6 +108,11 @@ func TestContentCacheRangeRead(t *testing.T) {
 		Hex:       "rangetest123",
 	}
 
+	// Compute decompressed hash for content-addressed caching
+	hasher := sha256.New()
+	hasher.Write(layerData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	// Setup cache
 	cache := newMockCache()
 
@@ -122,6 +127,9 @@ func TestContentCacheRangeRead(t *testing.T) {
 		StorageInfo: &common.OCIStorageInfo{
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
 			},
 		},
 	}
@@ -192,6 +200,11 @@ func TestDiskCacheThenContentCache(t *testing.T) {
 		Hex:       "hierarchy123",
 	}
 
+	// Compute decompressed hash for content-addressed caching
+	hasher := sha256.New()
+	hasher.Write(layerData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	cache := newMockCache()
 	cacheKey := digest.Hex
 
@@ -204,6 +217,9 @@ func TestDiskCacheThenContentCache(t *testing.T) {
 		StorageInfo: &common.OCIStorageInfo{
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
 			},
 		},
 	}
