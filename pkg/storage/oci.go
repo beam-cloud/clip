@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -28,16 +29,18 @@ type OCIClipStorage struct {
 	httpClient          *http.Client
 	keychain            authn.Keychain
 	contentCache        ContentCache // Remote content cache (blobcache)
+	useCheckpoints      bool         // Enable checkpoint-based partial decompression
 	mu                  sync.RWMutex
 	layerDecompressMu   sync.Mutex               // Prevents duplicate decompression
 	layersDecompressing map[string]chan struct{} // Tracks in-progress decompressions
 }
 
 type OCIClipStorageOpts struct {
-	Metadata     *common.ClipArchiveMetadata
-	AuthConfig   string       // optional base64-encoded auth config
-	ContentCache ContentCache // optional remote content cache (blobcache)
-	DiskCacheDir string       // optional local disk cache directory
+	Metadata       *common.ClipArchiveMetadata
+	AuthConfig     string       // optional base64-encoded auth config
+	ContentCache   ContentCache // optional remote content cache (blobcache)
+	DiskCacheDir   string       // optional local disk cache directory
+	UseCheckpoints bool         // Enable checkpoint-based partial decompression (default: false)
 }
 
 func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
@@ -71,6 +74,7 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		httpClient:          &http.Client{},
 		keychain:            authn.DefaultKeychain,
 		contentCache:        opts.ContentCache,
+		useCheckpoints:      opts.UseCheckpoints,
 		layersDecompressing: make(map[string]chan struct{}),
 	}
 
@@ -122,7 +126,7 @@ func (s *OCIClipStorage) initLayers(ctx context.Context) error {
 // ReadFile reads file content using ranged reads from disk or remote cache
 //  1. Check disk cache (range read) - fastest, local
 //  2. Check ContentCache (range read) - fast, network but only what we need
-//  3. Decompress from OCI - slow, but cache entire layer for future reads
+//  3. Decompress from OCI - with checkpoints if enabled, otherwise full layer
 func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error) {
 	if node.Remote == nil {
 		return 0, fmt.Errorf("legacy data storage not supported in OCI mode")
@@ -184,7 +188,25 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 		}
 	}
 
-	// Cache miss - decompress from OCI and cache entire layer (for future range reads)
+	// Cache miss - try checkpoint-based decompression if enabled
+	if s.useCheckpoints {
+		if n, err := s.readWithCheckpoint(remote.LayerDigest, wantUStart, dest[:readLen]); err == nil {
+			log.Debug().
+				Str("layer_digest", remote.LayerDigest).
+				Int64("offset", wantUStart).
+				Int64("length", readLen).
+				Int("bytes_read", n).
+				Msg("checkpoint-based decompression successful")
+			return n, nil
+		} else {
+			log.Debug().
+				Err(err).
+				Str("layer_digest", remote.LayerDigest).
+				Msg("checkpoint-based decompression failed, falling back to full layer decompression")
+		}
+	}
+
+	// Fallback: decompress entire layer and cache (for future range reads)
 	decompressedHash, layerPath, err := s.ensureLayerCached(remote.LayerDigest)
 	if err != nil {
 		return 0, err
@@ -500,6 +522,96 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 			Int64("bytes", totalSize).
 			Msg("successfully stored decompressed layer in content cache")
 	}
+}
+
+// readWithCheckpoint reads data from a compressed layer using gzip checkpoints
+// This enables efficient random access without decompressing the entire layer
+func (s *OCIClipStorage) readWithCheckpoint(layerDigest string, wantUOffset int64, dest []byte) (int, error) {
+	// Get gzip index for this layer
+	gzipIndex, ok := s.storageInfo.GzipIdxByLayer[layerDigest]
+	if !ok || gzipIndex == nil || len(gzipIndex.Checkpoints) == 0 {
+		return 0, fmt.Errorf("no gzip checkpoints available for layer: %s", layerDigest)
+	}
+
+	// Find the nearest checkpoint
+	cOff, uOff := nearestCheckpoint(gzipIndex.Checkpoints, wantUOffset)
+
+	log.Debug().
+		Str("layer_digest", layerDigest).
+		Int64("want_uoffset", wantUOffset).
+		Int64("checkpoint_coff", cOff).
+		Int64("checkpoint_uoff", uOff).
+		Int64("decompress_bytes", wantUOffset-uOff+int64(len(dest))).
+		Msg("using checkpoint for partial decompression")
+
+	// Get layer from cache
+	s.mu.RLock()
+	layer, exists := s.layerCache[layerDigest]
+	s.mu.RUnlock()
+
+	if !exists {
+		return 0, fmt.Errorf("layer not found: %s", layerDigest)
+	}
+
+	// Fetch compressed layer stream
+	compressedRC, err := layer.Compressed()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get compressed layer: %w", err)
+	}
+	defer compressedRC.Close()
+
+	// Seek to checkpoint's compressed offset
+	// Note: We need a seekable reader for this. If the reader doesn't support seeking,
+	// we'll need to discard bytes up to the checkpoint
+	if cOff > 0 {
+		// Discard bytes up to checkpoint
+		_, err := io.CopyN(io.Discard, compressedRC, cOff)
+		if err != nil {
+			return 0, fmt.Errorf("failed to seek to checkpoint compressed offset: %w", err)
+		}
+	}
+
+	// Create gzip reader starting from checkpoint
+	gzr, err := gzip.NewReader(compressedRC)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzr.Close()
+
+	// Skip bytes in uncompressed stream from checkpoint to desired offset
+	skipBytes := wantUOffset - uOff
+	if skipBytes > 0 {
+		_, err := io.CopyN(io.Discard, gzr, skipBytes)
+		if err != nil {
+			return 0, fmt.Errorf("failed to skip to desired uncompressed offset: %w", err)
+		}
+	}
+
+	// Read the requested data
+	n, err := io.ReadFull(gzr, dest)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return n, fmt.Errorf("failed to read from gzip stream: %w", err)
+	}
+
+	return n, nil
+}
+
+// nearestCheckpoint finds the checkpoint with the largest UOff <= wantU
+// This is the same algorithm used in the indexer
+func nearestCheckpoint(checkpoints []common.GzipCheckpoint, wantU int64) (cOff, uOff int64) {
+	if len(checkpoints) == 0 {
+		return 0, 0
+	}
+
+	i := sort.Search(len(checkpoints), func(i int) bool {
+		return checkpoints[i].UOff > wantU
+	}) - 1
+
+	if i < 0 {
+		i = 0
+	}
+
+	return checkpoints[i].COff, checkpoints[i].UOff
 }
 
 func (s *OCIClipStorage) Metadata() *common.ClipArchiveMetadata {

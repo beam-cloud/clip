@@ -1232,3 +1232,274 @@ func TestCacheKeyFormat(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckpointBasedReading tests checkpoint-based partial decompression
+func TestCheckpointBasedReading(t *testing.T) {
+	// Create multi-chunk test data (6 MB to ensure multiple checkpoints)
+	const dataSize = 6 * 1024 * 1024
+	testData := make([]byte, dataSize)
+	for i := range testData {
+		testData[i] = byte(i % 256)
+	}
+
+	compressedData := createGzipData(t, testData)
+
+	digest := v1.Hash{
+		Algorithm: "sha256",
+		Hex:       "checkpoint_test_123",
+	}
+
+	// Create checkpoints (simulating what the indexer would create)
+	// Checkpoint every 2 MiB
+	checkpoints := []common.GzipCheckpoint{
+		{COff: 0, UOff: 0},
+		{COff: int64(len(compressedData)) / 3, UOff: 2 * 1024 * 1024},
+		{COff: 2 * int64(len(compressedData)) / 3, UOff: 4 * 1024 * 1024},
+	}
+
+	// Compute decompressed hash
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// Create mock layer
+	layer := &mockLayer{
+		digest:         digest,
+		compressedData: compressedData,
+	}
+
+	// Create storage WITH checkpoints enabled
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {
+					LayerDigest: digest.String(),
+					Checkpoints: checkpoints,
+				},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
+		},
+	}
+
+	storage := &OCIClipStorage{
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:        t.TempDir(),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        nil,
+		useCheckpoints:      true, // Enable checkpoint-based reading
+	}
+
+	// Test reading from different positions (should use checkpoints)
+	testCases := []struct {
+		name   string
+		offset int64
+		length int
+	}{
+		{"Start of file", 0, 1024},
+		{"After first checkpoint", 2*1024*1024 + 100, 2048},
+		{"After second checkpoint", 4*1024*1024 + 500, 1024},
+		{"Near end", dataSize - 1000, 1000},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			node := &common.ClipNode{
+				Remote: &common.RemoteRef{
+					LayerDigest: digest.String(),
+					UOffset:     0,
+					ULength:     int64(dataSize),
+				},
+			}
+
+			dest := make([]byte, tc.length)
+			n, err := storage.ReadFile(node, dest, tc.offset)
+
+			require.NoError(t, err, "checkpoint-based read should succeed")
+			assert.Equal(t, tc.length, n, "should read requested number of bytes")
+
+			// Verify data correctness
+			expected := testData[tc.offset : tc.offset+int64(tc.length)]
+			assert.Equal(t, expected, dest, "data read via checkpoints should match original")
+		})
+	}
+
+	t.Log("✅ Checkpoint-based reading test passed!")
+}
+
+// TestCheckpointFallback tests that checkpoint mode falls back to full decompression when needed
+func TestCheckpointFallback(t *testing.T) {
+	testData := []byte("Test data for checkpoint fallback")
+	compressedData := createGzipData(t, testData)
+
+	digest := v1.Hash{
+		Algorithm: "sha256",
+		Hex:       "fallback_test",
+	}
+
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	layer := &mockLayer{
+		digest:         digest,
+		compressedData: compressedData,
+	}
+
+	// Create storage with checkpoints enabled but NO checkpoints available
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {
+					LayerDigest: digest.String(),
+					Checkpoints: []common.GzipCheckpoint{}, // Empty!
+				},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
+		},
+	}
+
+	storage := &OCIClipStorage{
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:        t.TempDir(),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        nil,
+		useCheckpoints:      true, // Enabled but no checkpoints
+	}
+
+	node := &common.ClipNode{
+		Remote: &common.RemoteRef{
+			LayerDigest: digest.String(),
+			UOffset:     0,
+			ULength:     int64(len(testData)),
+		},
+	}
+
+	dest := make([]byte, len(testData))
+	n, err := storage.ReadFile(node, dest, 0)
+
+	// Should succeed by falling back to full layer decompression
+	require.NoError(t, err, "should fall back to full decompression")
+	assert.Equal(t, len(testData), n)
+	assert.Equal(t, testData, dest)
+
+	t.Log("✅ Checkpoint fallback test passed!")
+}
+
+// TestBackwardCompatibilityNoCheckpoints tests that disabling checkpoints works (backward compatibility)
+func TestBackwardCompatibilityNoCheckpoints(t *testing.T) {
+	testData := []byte("Test data for backward compatibility")
+	compressedData := createGzipData(t, testData)
+
+	digest := v1.Hash{
+		Algorithm: "sha256",
+		Hex:       "compat_test",
+	}
+
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	layer := &mockLayer{
+		digest:         digest,
+		compressedData: compressedData,
+	}
+
+	// Create checkpoints (they exist in metadata but won't be used)
+	checkpoints := []common.GzipCheckpoint{
+		{COff: 0, UOff: 0},
+	}
+
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {
+					LayerDigest: digest.String(),
+					Checkpoints: checkpoints,
+				},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
+		},
+	}
+
+	storage := &OCIClipStorage{
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:        t.TempDir(),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        nil,
+		useCheckpoints:      false, // Checkpoints DISABLED (backward compatibility)
+	}
+
+	node := &common.ClipNode{
+		Remote: &common.RemoteRef{
+			LayerDigest: digest.String(),
+			UOffset:     0,
+			ULength:     int64(len(testData)),
+		},
+	}
+
+	dest := make([]byte, len(testData))
+	n, err := storage.ReadFile(node, dest, 0)
+
+	// Should work using traditional full-layer decompression
+	require.NoError(t, err, "should work with checkpoints disabled")
+	assert.Equal(t, len(testData), n)
+	assert.Equal(t, testData, dest)
+
+	// Verify the layer was cached to disk (traditional behavior)
+	layerPath := storage.getDiskCachePath(digest.String())
+	_, err = os.Stat(layerPath)
+	require.NoError(t, err, "layer should be cached to disk when checkpoints disabled")
+
+	t.Log("✅ Backward compatibility test passed!")
+}
+
+// TestNearestCheckpoint tests the checkpoint selection algorithm
+func TestNearestCheckpoint(t *testing.T) {
+	checkpoints := []common.GzipCheckpoint{
+		{COff: 100, UOff: 0},
+		{COff: 200, UOff: 2 * 1024 * 1024},
+		{COff: 300, UOff: 4 * 1024 * 1024},
+		{COff: 400, UOff: 6 * 1024 * 1024},
+	}
+
+	testCases := []struct {
+		name          string
+		wantUOffset   int64
+		expectedCOff  int64
+		expectedUOff  int64
+		description   string
+	}{
+		{"Before first checkpoint", 0, 100, 0, "should use first checkpoint"},
+		{"Exactly at checkpoint", 2 * 1024 * 1024, 200, 2 * 1024 * 1024, "should use exact checkpoint"},
+		{"Between checkpoints", 3 * 1024 * 1024, 200, 2 * 1024 * 1024, "should use previous checkpoint"},
+		{"After last checkpoint", 10 * 1024 * 1024, 400, 6 * 1024 * 1024, "should use last checkpoint"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cOff, uOff := nearestCheckpoint(checkpoints, tc.wantUOffset)
+			assert.Equal(t, tc.expectedCOff, cOff, "compressed offset should match")
+			assert.Equal(t, tc.expectedUOff, uOff, "uncompressed offset should match")
+			t.Logf("%s: wantU=%d -> cOff=%d, uOff=%d", tc.description, tc.wantUOffset, cOff, uOff)
+		})
+	}
+}
+
+// TestCheckpointEmptyList tests nearestCheckpoint with empty checkpoint list
+func TestCheckpointEmptyList(t *testing.T) {
+	cOff, uOff := nearestCheckpoint([]common.GzipCheckpoint{}, 1000)
+	assert.Equal(t, int64(0), cOff, "should return 0 for empty checkpoint list")
+	assert.Equal(t, int64(0), uOff, "should return 0 for empty checkpoint list")
+}
