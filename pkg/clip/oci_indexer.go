@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -112,6 +114,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	index *btree.BTree,
 	layerDigests []string,
 	gzipIdx map[string]*common.GzipIndex,
+	decompressedHashes map[string]string,
 	registryURL string,
 	repository string,
 	reference string,
@@ -124,7 +127,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	// Parse image reference
 	ref, err := name.ParseReference(opts.ImageRef)
 	if err != nil {
-		return nil, nil, nil, "", "", "", fmt.Errorf("failed to parse image reference: %w", err)
+		return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to parse image reference: %w", err)
 	}
 
 	// Extract registry and repository info
@@ -135,19 +138,20 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	// Fetch image
 	img, err := remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithContext(ctx))
 	if err != nil {
-		return nil, nil, nil, "", "", "", fmt.Errorf("failed to fetch image: %w", err)
+		return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to fetch image: %w", err)
 	}
 
 	// Get image layers
 	layers, err := img.Layers()
 	if err != nil {
-		return nil, nil, nil, "", "", "", fmt.Errorf("failed to get layers: %w", err)
+		return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to get layers: %w", err)
 	}
 
 	// Initialize index and maps
 	index = ca.newIndex()
 	layerDigests = make([]string, 0, len(layers))
 	gzipIdx = make(map[string]*common.GzipIndex)
+	decompressedHashes = make(map[string]string)
 
 	// Create root node with complete FUSE attributes
 	now := time.Now()
@@ -180,7 +184,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	for i, layer := range layers {
 		digest, err := layer.Digest()
 		if err != nil {
-			return nil, nil, nil, "", "", "", fmt.Errorf("failed to get layer digest: %w", err)
+			return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to get layer digest: %w", err)
 		}
 
 		layerDigestStr := digest.String()
@@ -202,17 +206,20 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		// Get compressed layer stream
 		compressedRC, err := layer.Compressed()
 		if err != nil {
-			return nil, nil, nil, "", "", "", fmt.Errorf("failed to get compressed layer: %w", err)
+			return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to get compressed layer: %w", err)
 		}
 
 		// Index this layer with optimizations
-		gzipIndex, err := ca.indexLayerOptimized(ctx, compressedRC, layerDigestStr, index, opts)
+		gzipIndex, decompressedHash, err := ca.indexLayerOptimized(ctx, compressedRC, layerDigestStr, index, opts)
 		compressedRC.Close()
 		if err != nil {
-			return nil, nil, nil, "", "", "", fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
+			return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
 		}
 
 		gzipIdx[layerDigestStr] = gzipIndex
+		decompressedHashes[layerDigestStr] = decompressedHash
+		
+		log.Info().Msgf("Layer %s: decompressed_hash=%s", layerDigestStr, decompressedHash)
 
 		// Send progress update: completed layer
 		if opts.ProgressChan != nil {
@@ -229,29 +236,34 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 
 	log.Info().Msgf("Successfully indexed image with %d files", index.Len())
 
-	return index, layerDigests, gzipIdx, registryURL, repository, reference, nil
+	return index, layerDigests, gzipIdx, decompressedHashes, registryURL, repository, reference, nil
 }
 
 // indexLayerOptimized processes a single layer with optimizations
+// Returns gzip index and SHA256 hash of decompressed data
 func (ca *ClipArchiver) indexLayerOptimized(
 	ctx context.Context,
 	compressedRC io.ReadCloser,
 	layerDigest string,
 	index *btree.BTree,
 	opts IndexOCIImageOptions,
-) (*common.GzipIndex, error) {
+) (*common.GzipIndex, string, error) {
 	// Wrap compressed stream with counting reader
 	compressedCounter := &countingReader{r: compressedRC}
 
 	// Create gzip reader
 	gzr, err := gzip.NewReader(compressedCounter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		return nil, "", fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer gzr.Close()
 
+	// Hash the decompressed data as we read it
+	hasher := sha256.New()
+	hashingReader := io.TeeReader(gzr, hasher)
+
 	// Wrap uncompressed stream with counting reader
-	uncompressedCounter := &countingReader{r: gzr}
+	uncompressedCounter := &countingReader{r: hashingReader}
 
 	// Create tar reader
 	tr := tar.NewReader(uncompressedCounter)
@@ -268,7 +280,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to read tar header: %w", err)
+			return nil, "", fmt.Errorf("failed to read tar header: %w", err)
 		}
 
 		// Record checkpoint periodically (before processing file data)
@@ -309,13 +321,14 @@ func (ca *ClipArchiver) indexLayerOptimized(
 
 			// OPTIMIZATION: Skip file content efficiently
 			// Use CopyN with exact size instead of Copy which reads until EOF
+			// Note: tr.Read() still hashes the data via the TeeReader
 			if hdr.Size > 0 {
 				n, err := io.CopyN(io.Discard, tr, hdr.Size)
 				if err != nil && err != io.EOF {
-					return nil, fmt.Errorf("failed to skip file content: %w", err)
+					return nil, "", fmt.Errorf("failed to skip file content: %w", err)
 				}
 				if n != hdr.Size {
-					return nil, fmt.Errorf("failed to skip complete file (wanted %d, got %d)", hdr.Size, n)
+					return nil, "", fmt.Errorf("failed to skip complete file (wanted %d, got %d)", hdr.Size, n)
 				}
 			}
 
@@ -441,11 +454,17 @@ func (ca *ClipArchiver) indexLayerOptimized(
 		log.Debug().Msgf("Added final checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
 	}
 
-	// Return gzip index
+	// Compute final hash of all decompressed data
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+	
+	// Log summary
+	log.Info().Msgf("Layer indexed with %d checkpoints, decompressed_hash=%s", len(checkpoints), decompressedHash)
+
+	// Return gzip index and decompressed hash
 	return &common.GzipIndex{
 		LayerDigest: layerDigest,
 		Checkpoints: checkpoints,
-	}, nil
+	}, decompressedHash, nil
 }
 
 // handleWhiteout processes OCI whiteout files
@@ -555,20 +574,21 @@ func (ca *ClipArchiver) generateInode(digest string, path string) uint64 {
 // CreateFromOCI creates a metadata-only .clip file from an OCI image
 func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOptions, clipOut string) error {
 	// Index the OCI image
-	index, layers, gzipIdx, registryURL, repository, reference, err := ca.IndexOCIImage(ctx, opts)
+	index, layers, gzipIdx, decompressedHashes, registryURL, repository, reference, err := ca.IndexOCIImage(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to index OCI image: %w", err)
 	}
 
 	// Create OCIStorageInfo
 	storageInfo := &common.OCIStorageInfo{
-		RegistryURL:    registryURL,
-		Repository:     repository,
-		Reference:      reference,
-		Layers:         layers,
-		GzipIdxByLayer: gzipIdx,
-		ZstdIdxByLayer: nil, // P1 feature
-		AuthConfig:     opts.AuthConfig,
+		RegistryURL:             registryURL,
+		Repository:              repository,
+		Reference:               reference,
+		Layers:                  layers,
+		GzipIdxByLayer:          gzipIdx,
+		ZstdIdxByLayer:          nil, // P1 feature
+		DecompressedHashByLayer: decompressedHashes,
+		AuthConfig:              opts.AuthConfig,
 	}
 
 	// Create metadata

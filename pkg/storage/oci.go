@@ -3,8 +3,6 @@ package storage
 import (
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,18 +21,16 @@ import (
 
 // OCIClipStorage implements lazy, range-based reading from OCI registries with disk + remote caching
 type OCIClipStorage struct {
-	metadata              *common.ClipArchiveMetadata
-	storageInfo           *common.OCIStorageInfo
-	layerCache            map[string]v1.Layer
-	diskCacheDir          string // Local disk cache directory for decompressed layers
-	httpClient            *http.Client
-	keychain              authn.Keychain
-	contentCache          ContentCache // Remote content cache (blobcache)
-	mu                    sync.RWMutex
-	layerDecompressMu     sync.Mutex               // Prevents duplicate decompression
-	layersDecompressing   map[string]chan struct{} // Tracks in-progress decompressions
-	decompressedHashCache map[string]string        // Maps layer digest -> decompressed hash
-	decompressedHashMu    sync.RWMutex
+	metadata            *common.ClipArchiveMetadata
+	storageInfo         *common.OCIStorageInfo
+	layerCache          map[string]v1.Layer
+	diskCacheDir        string // Local disk cache directory for decompressed layers
+	httpClient          *http.Client
+	keychain            authn.Keychain
+	contentCache        ContentCache // Remote content cache (blobcache)
+	mu                  sync.RWMutex
+	layerDecompressMu   sync.Mutex               // Prevents duplicate decompression
+	layersDecompressing map[string]chan struct{} // Tracks in-progress decompressions
 }
 
 type OCIClipStorageOpts struct {
@@ -68,15 +64,14 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 	}
 
 	storage := &OCIClipStorage{
-		metadata:              opts.Metadata,
-		storageInfo:           &storageInfo,
-		layerCache:            make(map[string]v1.Layer),
-		diskCacheDir:          diskCacheDir,
-		httpClient:            &http.Client{},
-		keychain:              authn.DefaultKeychain,
-		contentCache:          opts.ContentCache,
-		layersDecompressing:   make(map[string]chan struct{}),
-		decompressedHashCache: make(map[string]string),
+		metadata:            opts.Metadata,
+		storageInfo:         &storageInfo,
+		layerCache:          make(map[string]v1.Layer),
+		diskCacheDir:        diskCacheDir,
+		httpClient:          &http.Client{},
+		keychain:            authn.DefaultKeychain,
+		contentCache:        opts.ContentCache,
+		layersDecompressing: make(map[string]chan struct{}),
 	}
 
 	log.Info().Str("cache_dir", diskCacheDir).Msg("initialized OCI storage with disk cache")
@@ -209,14 +204,18 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 // ensureLayerCached ensures the decompressed layer is available on disk
 // Returns decompressed hash and path
 func (s *OCIClipStorage) ensureLayerCached(digest string) (string, string, error) {
-	// Check if we already know the decompressed hash
+	// Get pre-computed decompressed hash from metadata
 	decompressedHash := s.getDecompressedHash(digest)
-	if decompressedHash != "" {
-		layerPath := s.getDecompressedCachePath(decompressedHash)
-		if _, err := os.Stat(layerPath); err == nil {
-			log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit")
-			return decompressedHash, layerPath, nil
-		}
+	if decompressedHash == "" {
+		return "", "", fmt.Errorf("no decompressed hash in metadata for layer: %s", digest)
+	}
+
+	layerPath := s.getDecompressedCachePath(decompressedHash)
+
+	// Check if already cached on disk
+	if _, err := os.Stat(layerPath); err == nil {
+		log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit")
+		return decompressedHash, layerPath, nil
 	}
 
 	// Check if another goroutine is already decompressing this layer
@@ -227,13 +226,9 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, string, error
 		log.Debug().Str("digest", digest).Msg("waiting for in-progress decompression")
 		<-waitChan
 
-		// Now get the decompressed hash and path
-		decompressedHash = s.getDecompressedHash(digest)
-		if decompressedHash != "" {
-			layerPath := s.getDecompressedCachePath(decompressedHash)
-			if _, err := os.Stat(layerPath); err == nil {
-				return decompressedHash, layerPath, nil
-			}
+		// Now it should be on disk
+		if _, err := os.Stat(layerPath); err == nil {
+			return decompressedHash, layerPath, nil
 		}
 		return "", "", fmt.Errorf("decompression failed for layer: %s", digest)
 	}
@@ -246,11 +241,10 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, string, error
 	// Decompress and cache the layer
 	log.Info().
 		Str("layer_digest", digest).
+		Str("decompressed_hash", decompressedHash).
 		Msg("OCI CACHE MISS - downloading and decompressing layer from registry")
 	
-	// Use temp path, will be renamed to final path inside decompressAndCacheLayer
-	tempPath := filepath.Join(s.diskCacheDir, digest+".tmp")
-	decompressedHash, err := s.decompressAndCacheLayer(digest, tempPath)
+	err := s.decompressAndCacheLayer(digest, layerPath)
 
 	// Clean up in-progress tracking
 	s.layerDecompressMu.Lock()
@@ -262,7 +256,6 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, string, error
 		return "", "", err
 	}
 
-	layerPath := s.getDecompressedCachePath(decompressedHash)
 	return decompressedHash, layerPath, nil
 }
 
@@ -271,38 +264,27 @@ func (s *OCIClipStorage) getDecompressedCachePath(decompressedHash string) strin
 	return filepath.Join(s.diskCacheDir, decompressedHash)
 }
 
-// getDecompressedHash retrieves the cached decompressed hash for a layer digest
+// getDecompressedHash retrieves the pre-computed decompressed hash for a layer digest from metadata
 func (s *OCIClipStorage) getDecompressedHash(layerDigest string) string {
-	s.decompressedHashMu.RLock()
-	defer s.decompressedHashMu.RUnlock()
-	return s.decompressedHashCache[layerDigest]
-}
-
-// storeDecompressedHashMapping stores the mapping from layer digest to decompressed hash
-func (s *OCIClipStorage) storeDecompressedHashMapping(layerDigest, decompressedHash string) {
-	s.decompressedHashMu.Lock()
-	defer s.decompressedHashMu.Unlock()
-	s.decompressedHashCache[layerDigest] = decompressedHash
-	log.Debug().
-		Str("layer_digest", layerDigest).
-		Str("decompressed_hash", decompressedHash).
-		Msg("Stored layer digest -> decompressed hash mapping")
+	if s.storageInfo.DecompressedHashByLayer == nil {
+		return ""
+	}
+	return s.storageInfo.DecompressedHashByLayer[layerDigest]
 }
 
 // Helper methods for tests (backward compatibility)
 
-// getDiskCachePath returns cache path for a decompressed hash
-// For tests: if we have a layer digest, look up its decompressed hash first
-func (s *OCIClipStorage) getDiskCachePath(digestOrHash string) string {
-	// Check if this is a layer digest that we have a mapping for
-	if decompHash := s.getDecompressedHash(digestOrHash); decompHash != "" {
+// getDiskCachePath returns cache path for a layer digest (looks up decompressed hash from metadata)
+func (s *OCIClipStorage) getDiskCachePath(layerDigest string) string {
+	decompHash := s.getDecompressedHash(layerDigest)
+	if decompHash != "" {
 		return s.getDecompressedCachePath(decompHash)
 	}
-	// Otherwise treat it as already a hash
-	return s.getDecompressedCachePath(digestOrHash)
+	// Fallback for tests without metadata
+	return s.getDecompressedCachePath(layerDigest)
 }
 
-// getContentHash for test compatibility - returns decompressed hash if known, otherwise empty
+// getContentHash for test compatibility - returns decompressed hash from metadata
 func (s *OCIClipStorage) getContentHash(layerDigest string) string {
 	return s.getDecompressedHash(layerDigest)
 }
@@ -332,8 +314,7 @@ func (s *OCIClipStorage) readFromDiskCache(layerPath string, offset int64, dest 
 // decompressAndCacheLayer decompresses a layer from OCI registry and caches it
 // This is called when both disk cache and ContentCache miss
 // The entire layer is cached so subsequent reads (on this or other nodes) can do range reads
-// Returns the hash of the decompressed data
-func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string) (string, error) {
+func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string) error {
 	metrics := common.GetGlobalMetrics()
 
 	// Fetch from OCI registry and decompress
@@ -342,7 +323,7 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	s.mu.RUnlock()
 
 	if !exists {
-		return "", fmt.Errorf("layer not found: %s", digest)
+		return fmt.Errorf("layer not found: %s", digest)
 	}
 
 	inflateStart := time.Now()
@@ -350,7 +331,7 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	// Fetch compressed layer from OCI registry
 	compressedRC, err := layer.Compressed()
 	if err != nil {
-		return "", fmt.Errorf("failed to get compressed layer: %w", err)
+		return fmt.Errorf("failed to get compressed layer: %w", err)
 	}
 	defer compressedRC.Close()
 
@@ -358,37 +339,28 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	tempPath := diskPath + ".tmp"
 	tempFile, err := os.Create(tempPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp cache file: %w", err)
+		return fmt.Errorf("failed to create temp cache file: %w", err)
 	}
 	defer os.Remove(tempPath) // Clean up on error
 
 	// Decompress directly to disk (streaming, low memory!)
-	// Also compute hash of decompressed data as we write
 	gzr, err := gzip.NewReader(compressedRC)
 	if err != nil {
 		tempFile.Close()
-		return "", fmt.Errorf("failed to create gzip reader: %w", err)
+		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer gzr.Close()
 
-	// Hash the decompressed data as we write it
-	hasher := sha256.New()
-	multiWriter := io.MultiWriter(tempFile, hasher)
-
-	written, err := io.Copy(multiWriter, gzr)
+	written, err := io.Copy(tempFile, gzr)
 	tempFile.Close()
 
 	if err != nil {
-		return "", fmt.Errorf("failed to decompress layer to disk: %w", err)
+		return fmt.Errorf("failed to decompress layer to disk: %w", err)
 	}
 
-	// Get the hash of the decompressed data
-	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
-
-	// Rename temp file to use decompressed hash as filename
-	finalDiskPath := s.getDecompressedCachePath(decompressedHash)
-	if err := os.Rename(tempPath, finalDiskPath); err != nil {
-		return "", fmt.Errorf("failed to rename temp file: %w", err)
+	// Atomic rename
+	if err := os.Rename(tempPath, diskPath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
 	inflateDuration := time.Since(inflateStart)
@@ -396,29 +368,26 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 
 	log.Info().
 		Str("layer_digest", digest).
-		Str("decompressed_hash", decompressedHash).
 		Int64("decompressed_bytes", written).
-		Str("disk_path", finalDiskPath).
+		Str("disk_path", diskPath).
 		Dur("duration", inflateDuration).
 		Msg("Layer decompressed and cached to disk")
 
-	// Store mapping from layer digest to decompressed hash
-	s.storeDecompressedHashMapping(digest, decompressedHash)
-
 	// Store in remote cache (if configured) for other workers
 	if s.contentCache != nil {
+		decompressedHash := s.getDecompressedHash(digest)
 		log.Info().
 			Str("layer_digest", digest).
 			Str("decompressed_hash", decompressedHash).
 			Msg("Storing decompressed layer in ContentCache (async)")
-		go s.storeDecompressedInRemoteCache(decompressedHash, finalDiskPath)
+		go s.storeDecompressedInRemoteCache(decompressedHash, diskPath)
 	} else {
 		log.Warn().
 			Str("layer_digest", digest).
 			Msg("ContentCache not configured - layer will NOT be shared across cluster")
 	}
 
-	return decompressedHash, nil
+	return nil
 }
 
 // writeToDiskCache writes data to disk cache

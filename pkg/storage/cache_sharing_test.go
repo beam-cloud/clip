@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"testing"
 
@@ -21,6 +23,11 @@ func TestCrossImageCacheSharing(t *testing.T) {
 		Hex:       "shared_ubuntu_base_layer_abc123def456",
 	}
 	
+	// Compute decompressed hash (as would be done during indexing)
+	hasher := sha256.New()
+	hasher.Write(sharedLayerData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	// Shared disk cache directory (simulating same worker)
 	diskCacheDir := t.TempDir()
 	
@@ -35,17 +42,19 @@ func TestCrossImageCacheSharing(t *testing.T) {
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				sharedDigest.String(): {},
 			},
+			DecompressedHashByLayer: map[string]string{
+				sharedDigest.String(): decompressedHash,
+			},
 		},
 	}
 	
 	storage1 := &OCIClipStorage{
-		metadata:              metadata1,
-		storageInfo:           metadata1.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:            map[string]v1.Layer{sharedDigest.String(): image1Layer},
-		diskCacheDir:          diskCacheDir,
-		layersDecompressing:   make(map[string]chan struct{}),
-		contentCache:          nil, // No remote cache for this test
-		decompressedHashCache: make(map[string]string),
+		metadata:            metadata1,
+		storageInfo:         metadata1.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{sharedDigest.String(): image1Layer},
+		diskCacheDir:        diskCacheDir,
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        nil, // No remote cache for this test
 	}
 	
 	node1 := &common.ClipNode{
@@ -81,17 +90,19 @@ func TestCrossImageCacheSharing(t *testing.T) {
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				sharedDigest.String(): {},
 			},
+			DecompressedHashByLayer: map[string]string{
+				sharedDigest.String(): decompressedHash,
+			},
 		},
 	}
 	
 	storage2 := &OCIClipStorage{
-		metadata:              metadata2,
-		storageInfo:           metadata2.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:            map[string]v1.Layer{sharedDigest.String(): image2Layer},
-		diskCacheDir:          diskCacheDir, // SAME disk cache directory!
-		layersDecompressing:   make(map[string]chan struct{}),
-		contentCache:          nil,
-		decompressedHashCache: make(map[string]string),
+		metadata:            metadata2,
+		storageInfo:         metadata2.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{sharedDigest.String(): image2Layer},
+		diskCacheDir:        diskCacheDir, // SAME disk cache directory!
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        nil,
 	}
 	
 	node2 := &common.ClipNode{
@@ -141,9 +152,15 @@ func TestCacheKeyFormat(t *testing.T) {
 	
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Create storage with metadata containing decompressed hash
+			storageInfo := &common.OCIStorageInfo{
+				DecompressedHashByLayer: map[string]string{
+					tc.digest: tc.expectedSuffix,
+				},
+			}
 			storage := &OCIClipStorage{
-				diskCacheDir:          diskCacheDir,
-				decompressedHashCache: make(map[string]string),
+				diskCacheDir: diskCacheDir,
+				storageInfo:  storageInfo,
 			}
 			
 			path := storage.getDiskCachePath(tc.digest)

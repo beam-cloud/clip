@@ -12,10 +12,6 @@ import (
 
 // TestDecompressedHashMapping verifies that layer digest to decompressed hash mapping works
 func TestDecompressedHashMapping(t *testing.T) {
-	storage := &OCIClipStorage{
-		decompressedHashCache: make(map[string]string),
-	}
-
 	tests := []struct {
 		name              string
 		layerDigest       string
@@ -35,8 +31,15 @@ func TestDecompressedHashMapping(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Store mapping
-			storage.storeDecompressedHashMapping(tc.layerDigest, tc.decompressedHash)
+			// Create storage with metadata containing decompressed hash
+			storageInfo := &common.OCIStorageInfo{
+				DecompressedHashByLayer: map[string]string{
+					tc.layerDigest: tc.decompressedHash,
+				},
+			}
+			storage := &OCIClipStorage{
+				storageInfo: storageInfo,
+			}
 			
 			// Retrieve and verify
 			result := storage.getDecompressedHash(tc.layerDigest)
@@ -67,16 +70,19 @@ func TestRemoteCacheKeyFormat(t *testing.T) {
 
 // TestContentAddressedCaching verifies decompressed hash enables cross-image sharing
 func TestContentAddressedCaching(t *testing.T) {
-	storage := &OCIClipStorage{
-		decompressedHashCache: make(map[string]string),
-	}
-
 	// Same layer used in multiple images
 	sharedLayerDigest := "sha256:44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885"
 	decompressedHash := "239fb06d94222b78c6bf9f52b4ef8a0a92dd49e66d7f1ea0a9ea0450a0ba738c"
 
-	// Store the mapping (would happen during decompression)
-	storage.storeDecompressedHashMapping(sharedLayerDigest, decompressedHash)
+	// Create storage with metadata containing decompressed hash (from indexing)
+	storageInfo := &common.OCIStorageInfo{
+		DecompressedHashByLayer: map[string]string{
+			sharedLayerDigest: decompressedHash,
+		},
+	}
+	storage := &OCIClipStorage{
+		storageInfo: storageInfo,
+	}
 
 	// Both images should produce the SAME cache key
 	cacheKey := storage.getContentHash(sharedLayerDigest)
@@ -129,7 +135,6 @@ func TestContentCacheRangeRead(t *testing.T) {
 		diskCacheDir:          diskCacheDir,
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
 	}
 
 	// Test: First read triggers decompression and caching
@@ -212,7 +217,6 @@ func TestDiskCacheThenContentCache(t *testing.T) {
 		diskCacheDir:          diskCacheDir,
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
 	}
 
 	node := &common.ClipNode{
@@ -296,18 +300,21 @@ func TestRangeReadOnlyFetchesNeededBytes(t *testing.T) {
 
 	diskCacheDir := t.TempDir()
 
-	storage := &OCIClipStorage{
-		metadata:              metadata,
-		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:            map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:          diskCacheDir,
-		layersDecompressing:   make(map[string]chan struct{}),
-		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
+	// Add decompressed hash to metadata (as would be done during indexing)
+	storageInfo := metadata.StorageInfo.(*common.OCIStorageInfo)
+	if storageInfo.DecompressedHashByLayer == nil {
+		storageInfo.DecompressedHashByLayer = make(map[string]string)
 	}
+	storageInfo.DecompressedHashByLayer[digest.String()] = decompressedHash
 
-	// Pre-populate the decompressed hash mapping
-	storage.storeDecompressedHashMapping(digest.String(), decompressedHash)
+	storage := &OCIClipStorage{
+		metadata:            metadata,
+		storageInfo:         storageInfo,
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:        diskCacheDir,
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
+	}
 
 	// Read only a small portion (1 KB from a 10 MB layer)
 	node := &common.ClipNode{

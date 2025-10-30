@@ -177,18 +177,21 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 		},
 	}
 
-	storage := &OCIClipStorage{
-		metadata:              metadata,
-		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:            map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:          t.TempDir(),
-		layersDecompressing:   make(map[string]chan struct{}),
-		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
+	// Add decompressed hash to metadata (as would be done during indexing)
+	storageInfo := metadata.StorageInfo.(*common.OCIStorageInfo)
+	if storageInfo.DecompressedHashByLayer == nil {
+		storageInfo.DecompressedHashByLayer = make(map[string]string)
 	}
+	storageInfo.DecompressedHashByLayer[digest.String()] = decompressedHash
 
-	// Pre-populate the decompressed hash mapping (as would happen after first decompression)
-	storage.storeDecompressedHashMapping(digest.String(), decompressedHash)
+	storage := &OCIClipStorage{
+		metadata:            metadata,
+		storageInfo:         storageInfo,
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:        t.TempDir(),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
+	}
 
 	// Create node
 	node := &common.ClipNode{
@@ -223,6 +226,11 @@ func TestOCIStorage_CacheMiss(t *testing.T) {
 		Hex:       "abc123",
 	}
 
+	// Compute decompressed hash
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
 	// Setup empty cache
 	cache := newMockCache()
 
@@ -238,17 +246,19 @@ func TestOCIStorage_CacheMiss(t *testing.T) {
 			GzipIdxByLayer: map[string]*common.GzipIndex{
 				digest.String(): {},
 			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
 		},
 	}
 
 	storage := &OCIClipStorage{
-		metadata:              metadata,
-		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:            map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:          t.TempDir(),
-		layersDecompressing:   make(map[string]chan struct{}),
-		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:        t.TempDir(),
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
 	}
 
 	// Create node
@@ -269,17 +279,9 @@ func TestOCIStorage_CacheMiss(t *testing.T) {
 	assert.Equal(t, len(testData), n)
 	assert.Equal(t, testData, dest)
 
-	// On first access without decompressed hash mapping, we decompress directly
-	// ContentCache is only used when we already know the decompressed hash
-	// So getCalls should be 0 on first access
-	assert.Equal(t, 0, cache.getCalls, "cache.Get should not be called on first access")
-	
-	// Verify decompressed hash was stored for future lookups
-	hasher := sha256.New()
-	hasher.Write(testData)
-	expectedHash := hex.EncodeToString(hasher.Sum(nil))
-	actualHash := storage.getDecompressedHash(digest.String())
-	assert.Equal(t, expectedHash, actualHash, "decompressed hash should be stored after decompression")
+	// Cache miss scenario: we try ContentCache with the decompressed hash, but it's not there
+	// Then we decompress and store (async, so can't reliably assert it here)
+	assert.Equal(t, 1, cache.getCalls, "cache.Get should be called once to check ContentCache")
 }
 
 func TestOCIStorage_NoCache(t *testing.T) {
@@ -314,7 +316,6 @@ func TestOCIStorage_NoCache(t *testing.T) {
 		diskCacheDir:          t.TempDir(),
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          nil, // No cache
-		decompressedHashCache: make(map[string]string),
 	}
 
 	// Create node
@@ -371,7 +372,6 @@ func TestOCIStorage_PartialRead(t *testing.T) {
 		diskCacheDir:          t.TempDir(),
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
 	}
 
 	// Test reading from different offsets
@@ -443,7 +443,6 @@ func TestOCIStorage_CacheError(t *testing.T) {
 		diskCacheDir:          t.TempDir(),
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
 	}
 
 	// Create node
@@ -499,7 +498,6 @@ func TestOCIStorage_LayerFetchError(t *testing.T) {
 		diskCacheDir:          t.TempDir(),
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
 	}
 
 	// Create node
@@ -555,7 +553,6 @@ func TestOCIStorage_ConcurrentReads(t *testing.T) {
 		diskCacheDir:          t.TempDir(),
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
 	}
 
 	// Create node
@@ -920,7 +917,6 @@ func TestLayerCacheEliminatesRepeatedInflates(t *testing.T) {
 		diskCacheDir:          diskCacheDir,
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
-		decompressedHashCache: make(map[string]string),
 	}
 
 	// Create node
@@ -995,7 +991,6 @@ func BenchmarkLayerCachePerformance(b *testing.B) {
 		diskCacheDir:          diskCacheDir,
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          nil, // No remote cache for benchmark
-		decompressedHashCache: make(map[string]string),
 	}
 
 	node := &common.ClipNode{
