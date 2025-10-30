@@ -64,6 +64,7 @@ type MountOptions struct {
 	ContentCacheAvailable bool
 	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
+	UseCheckpoints        bool // Enable checkpoint-based partial decompression for OCI layers
 }
 
 type StoreS3Options struct {
@@ -172,12 +173,13 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 	}
 
 	storage, err := storage.NewClipStorage(storage.ClipStorageOpts{
-		ArchivePath:  options.ArchivePath,
-		CachePath:    options.CachePath,
-		Metadata:     metadata,
-		Credentials:  options.Credentials,
-		StorageInfo:  s3Info,
-		ContentCache: options.ContentCache,
+		ArchivePath:    options.ArchivePath,
+		CachePath:      options.CachePath,
+		Metadata:       metadata,
+		Credentials:    options.Credentials,
+		StorageInfo:    s3Info,
+		ContentCache:   options.ContentCache,
+		UseCheckpoints: options.UseCheckpoints,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)

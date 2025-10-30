@@ -1,6 +1,7 @@
 package common
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -142,4 +143,25 @@ type ZstdFrame struct {
 type ZstdIndex struct {
 	LayerDigest string
 	Frames      []ZstdFrame
+}
+
+// NearestCheckpoint finds the checkpoint with the largest UOff <= wantU
+// This enables efficient seeking by finding the best checkpoint to decompress from
+// Uses binary search for O(log n) performance
+func NearestCheckpoint(checkpoints []GzipCheckpoint, wantU int64) (cOff, uOff int64) {
+	if len(checkpoints) == 0 {
+		return 0, 0
+	}
+
+	// Binary search: find the first checkpoint with UOff > wantU, then go back one
+	i := sort.Search(len(checkpoints), func(i int) bool {
+		return checkpoints[i].UOff > wantU
+	}) - 1
+
+	// If all checkpoints are after wantU, use the first one
+	if i < 0 {
+		i = 0
+	}
+
+	return checkpoints[i].COff, checkpoints[i].UOff
 }
