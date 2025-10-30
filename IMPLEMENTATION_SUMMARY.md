@@ -43,23 +43,26 @@ Successfully implemented checkpoint-based seeking for gzip-compressed OCI layers
 
 ### 3. Files Modified
 
-1. **`pkg/storage/oci.go`** (Primary implementation)
+1. **`pkg/common/types.go`** (Shared utility)
+   - Added `NearestCheckpoint()` function (DRY - single implementation)
+   - Uses binary search for O(log n) checkpoint lookup
+
+2. **`pkg/storage/oci.go`** (Primary implementation)
    - Added `useCheckpoints` field to `OCIClipStorage`
    - Added `UseCheckpoints` to `OCIClipStorageOpts`
    - Modified `ReadFile()` to try checkpoint-based reading
    - Added `readWithCheckpoint()` method
-   - Added `nearestCheckpoint()` helper function
 
-2. **`pkg/storage/oci_test.go`** (Comprehensive tests)
+3. **`pkg/storage/oci_test.go`** (Comprehensive tests)
    - Added 5 new test functions
    - ~250 lines of test code
    - Tests both checkpoint mode and backward compatibility
 
-3. **`pkg/storage/storage.go`** (Mid-level API)
+4. **`pkg/storage/storage.go`** (Mid-level API)
    - Added `UseCheckpoints` to `ClipStorageOpts`
    - Passed flag through to `NewOCIClipStorage`
 
-4. **`pkg/clip/clip.go`** (High-level API)
+5. **`pkg/clip/clip.go`** (High-level API)
    - Added `UseCheckpoints` to `MountOptions`
    - Passed flag through mount chain
 

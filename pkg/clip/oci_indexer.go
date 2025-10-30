@@ -10,7 +10,6 @@ import (
 	"hash/fnv"
 	"io"
 	"path"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -581,19 +580,3 @@ func (ca *ClipArchiver) processHardLink(index *btree.BTree, hdr *tar.Header, cle
 	}
 }
 
-// nearestCheckpoint finds the checkpoint with the largest UOff <= wantU
-func nearestCheckpoint(checkpoints []common.GzipCheckpoint, wantU int64) (cOff, uOff int64) {
-	if len(checkpoints) == 0 {
-		return 0, 0
-	}
-
-	i := sort.Search(len(checkpoints), func(i int) bool {
-		return checkpoints[i].UOff > wantU
-	}) - 1
-
-	if i < 0 {
-		i = 0
-	}
-
-	return checkpoints[i].COff, checkpoints[i].UOff
-}

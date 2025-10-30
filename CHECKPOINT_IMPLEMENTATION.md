@@ -207,19 +207,24 @@ go test -v -run TestBackwardCompatibility ./pkg/storage/
 
 ### Key Files Modified
 
-1. **`pkg/storage/oci.go`**:
+1. **`pkg/common/types.go`**:
+   - Added `NearestCheckpoint()` function (shared utility)
+
+2. **`pkg/storage/oci.go`**:
    - Added `useCheckpoints` field to `OCIClipStorage`
    - Added `UseCheckpoints` option to `OCIClipStorageOpts`
    - Modified `ReadFile()` to try checkpoint-based reading
    - Added `readWithCheckpoint()` method
-   - Added `nearestCheckpoint()` helper function
 
-2. **`pkg/storage/oci_test.go`**:
+3. **`pkg/storage/oci_test.go`**:
    - Added `TestCheckpointBasedReading`
    - Added `TestCheckpointFallback`
    - Added `TestBackwardCompatibilityNoCheckpoints`
    - Added `TestNearestCheckpoint`
    - Added `TestCheckpointEmptyList`
+
+4. **`pkg/storage/storage.go`** & **`pkg/clip/clip.go`**:
+   - Added `UseCheckpoints` to plumb through APIs
 
 ### Code Quality
 

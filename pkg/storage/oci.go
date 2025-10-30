@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"time"
 
@@ -534,7 +533,7 @@ func (s *OCIClipStorage) readWithCheckpoint(layerDigest string, wantUOffset int6
 	}
 
 	// Find the nearest checkpoint
-	cOff, uOff := nearestCheckpoint(gzipIndex.Checkpoints, wantUOffset)
+	cOff, uOff := common.NearestCheckpoint(gzipIndex.Checkpoints, wantUOffset)
 
 	log.Debug().
 		Str("layer_digest", layerDigest).
@@ -594,24 +593,6 @@ func (s *OCIClipStorage) readWithCheckpoint(layerDigest string, wantUOffset int6
 	}
 
 	return n, nil
-}
-
-// nearestCheckpoint finds the checkpoint with the largest UOff <= wantU
-// This is the same algorithm used in the indexer
-func nearestCheckpoint(checkpoints []common.GzipCheckpoint, wantU int64) (cOff, uOff int64) {
-	if len(checkpoints) == 0 {
-		return 0, 0
-	}
-
-	i := sort.Search(len(checkpoints), func(i int) bool {
-		return checkpoints[i].UOff > wantU
-	}) - 1
-
-	if i < 0 {
-		i = 0
-	}
-
-	return checkpoints[i].COff, checkpoints[i].UOff
 }
 
 func (s *OCIClipStorage) Metadata() *common.ClipArchiveMetadata {

@@ -1489,7 +1489,7 @@ func TestNearestCheckpoint(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			cOff, uOff := nearestCheckpoint(checkpoints, tc.wantUOffset)
+			cOff, uOff := common.NearestCheckpoint(checkpoints, tc.wantUOffset)
 			assert.Equal(t, tc.expectedCOff, cOff, "compressed offset should match")
 			assert.Equal(t, tc.expectedUOff, uOff, "uncompressed offset should match")
 			t.Logf("%s: wantU=%d -> cOff=%d, uOff=%d", tc.description, tc.wantUOffset, cOff, uOff)
@@ -1497,9 +1497,9 @@ func TestNearestCheckpoint(t *testing.T) {
 	}
 }
 
-// TestCheckpointEmptyList tests nearestCheckpoint with empty checkpoint list
+// TestCheckpointEmptyList tests NearestCheckpoint with empty checkpoint list
 func TestCheckpointEmptyList(t *testing.T) {
-	cOff, uOff := nearestCheckpoint([]common.GzipCheckpoint{}, 1000)
+	cOff, uOff := common.NearestCheckpoint([]common.GzipCheckpoint{}, 1000)
 	assert.Equal(t, int64(0), cOff, "should return 0 for empty checkpoint list")
 	assert.Equal(t, int64(0), uOff, "should return 0 for empty checkpoint list")
 }
