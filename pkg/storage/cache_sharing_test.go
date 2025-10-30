@@ -128,12 +128,12 @@ func TestCacheKeyFormat(t *testing.T) {
 		{
 			name:           "Standard sha256 digest",
 			digest:         "sha256:abc123def456",
-			expectedSuffix: "sha256_abc123def456",
+			expectedSuffix: "abc123def456", // Just the hex hash
 		},
 		{
 			name:           "Long sha256 digest",
 			digest:         "sha256:44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885",
-			expectedSuffix: "sha256_44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885",
+			expectedSuffix: "44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", // Just the hex hash
 		},
 	}
 	

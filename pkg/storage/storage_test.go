@@ -20,17 +20,17 @@ func TestGetContentHash(t *testing.T) {
 		{
 			name:     "SHA256 digest",
 			digest:   "sha256:abc123def456",
-			expected: "sha256_abc123def456", // Now keeps algorithm prefix with underscore
+			expected: "abc123def456", // Just the hex hash
 		},
 		{
 			name:     "SHA1 digest",
 			digest:   "sha1:fedcba987654",
-			expected: "sha1_fedcba987654", // Now keeps algorithm prefix with underscore
+			expected: "fedcba987654", // Just the hex hash
 		},
 		{
 			name:     "Long SHA256",
 			digest:   "sha256:44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885",
-			expected: "sha256_44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", // Full format
+			expected: "44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", // Just the hex hash
 		},
 		{
 			name:     "No algorithm prefix (fallback)",
@@ -73,9 +73,10 @@ func TestContentAddressedCaching(t *testing.T) {
 	// Both images should produce the SAME cache key
 	cacheKey := storage.getContentHash(sharedLayerDigest)
 
-	// Cache key should use filesystem-safe format with underscore
-	require.Equal(t, "sha256_44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", cacheKey)
-	require.NotContains(t, cacheKey, ":", "Cache key should use underscore instead of colon")
+	// Cache key should be just the hex hash (pure content-addressing)
+	require.Equal(t, "44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", cacheKey)
+	require.NotContains(t, cacheKey, ":", "Cache key should not contain colon")
+	require.NotContains(t, cacheKey, "sha256", "Cache key should not contain algorithm prefix")
 	require.NotContains(t, cacheKey, "clip:", "Cache key should not contain namespace prefix")
 	require.NotContains(t, cacheKey, "decompressed", "Cache key should not contain type suffix")
 

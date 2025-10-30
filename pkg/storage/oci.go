@@ -252,22 +252,31 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, error) {
 }
 
 // getDiskCachePath returns the local disk cache path for a layer
-// Uses the layer digest directly for cross-image cache sharing
+// Uses just the hex hash for true content-addressed storage
 func (s *OCIClipStorage) getDiskCachePath(digest string) string {
 	// Layer digests are in format "sha256:abc123..."
-	// Use the hex part after the colon (filesystem-safe)
+	// Extract just the hex hash for content-addressing
 	// This allows multiple CLIP images to share the same cached layer
-	safeDigest := strings.ReplaceAll(digest, ":", "_")
-	return filepath.Join(s.diskCacheDir, safeDigest)
+	hashOnly := s.getContentHash(digest)
+	return filepath.Join(s.diskCacheDir, hashOnly)
 }
 
-// getContentHash converts a digest to a cache key format
-// For ContentCache, we use the same format as disk cache for consistency
-// This ensures lookups match what was stored
+// getContentHash extracts the hex hash from a layer digest for content-addressed caching
+// Input: "sha256:239fb06d94222b78c6bf9f52b4ef8a0a92dd49e66d7f1ea0a9ea0450a0ba738c"
+// Output: "239fb06d94222b78c6bf9f52b4ef8a0a92dd49e66d7f1ea0a9ea0450a0ba738c"
+//
+// We use the layer digest (hash of compressed layer) as the cache key because:
+// 1. It's the canonical identifier in OCI spec
+// 2. Same layer in different images = same digest = automatic deduplication
+// 3. We don't need to rehash the decompressed data
+// 4. Mapping is clear: "decompressed version of layer sha256:abc123"
 func (s *OCIClipStorage) getContentHash(digest string) string {
-	// Convert "sha256:abc123..." to "sha256_abc123..." to match disk cache format
-	// This allows ContentCache and disk cache to use the same key format
-	return strings.ReplaceAll(digest, ":", "_")
+	// Extract just the hex part after the colon
+	parts := strings.SplitN(digest, ":", 2)
+	if len(parts) == 2 {
+		return parts[1] // Just the hash: "239fb06d..."
+	}
+	return digest // Fallback if no colon
 }
 
 // readFromDiskCache reads data from the cached layer file
