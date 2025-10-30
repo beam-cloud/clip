@@ -54,61 +54,6 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 	return k, err
 }
 
-// gzipIndexBuilder builds a decompression index while inflating gzip
-type gzipIndexBuilder struct {
-	compressedReader   *countingReader // tracks compressed offset
-	uncompressedOffset int64           // tracks uncompressed offset
-	checkpoints        []common.GzipCheckpoint
-	checkpointInterval int64 // in bytes
-	lastCheckpoint     int64 // uncompressed offset of last checkpoint
-}
-
-func newGzipIndexBuilder(cr *countingReader, checkpointMiB int64) *gzipIndexBuilder {
-	return &gzipIndexBuilder{
-		compressedReader:   cr,
-		uncompressedOffset: 0,
-		checkpoints:        make([]common.GzipCheckpoint, 0),
-		checkpointInterval: checkpointMiB * 1024 * 1024,
-		lastCheckpoint:     0,
-	}
-}
-
-func (gib *gzipIndexBuilder) Read(p []byte) (int, error) {
-	// Read from the wrapped reader (this will be the decompressed stream)
-	// Note: This is called by tar.Reader, so it's already decompressed
-	n := len(p)
-	
-	// Check if we should add a checkpoint
-	if gib.uncompressedOffset-gib.lastCheckpoint >= gib.checkpointInterval {
-		gib.addCheckpoint()
-	}
-	
-	gib.uncompressedOffset += int64(n)
-	return n, nil
-}
-
-func (gib *gzipIndexBuilder) addCheckpoint() {
-	cp := common.GzipCheckpoint{
-		COff: gib.compressedReader.n,
-		UOff: gib.uncompressedOffset,
-	}
-	gib.checkpoints = append(gib.checkpoints, cp)
-	gib.lastCheckpoint = gib.uncompressedOffset
-	log.Debug().Msgf("Added checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
-}
-
-func (gib *gzipIndexBuilder) finalizeIndex(layerDigest string) *common.GzipIndex {
-	// Add final checkpoint if needed
-	if gib.uncompressedOffset > gib.lastCheckpoint {
-		gib.addCheckpoint()
-	}
-	
-	return &common.GzipIndex{
-		LayerDigest: layerDigest,
-		Checkpoints: gib.checkpoints,
-	}
-}
-
 // IndexOCIImage creates a metadata-only index from an OCI image
 func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOptions) (
 	index *btree.BTree,
@@ -285,13 +230,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 
 		// Record checkpoint periodically (before processing file data)
 		if uncompressedCounter.n-lastCheckpoint >= checkpointInterval {
-			cp := common.GzipCheckpoint{
-				COff: compressedCounter.n,
-				UOff: uncompressedCounter.n,
-			}
-			checkpoints = append(checkpoints, cp)
-			lastCheckpoint = uncompressedCounter.n
-			log.Debug().Msgf("Added interval checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
+			ca.addCheckpoint(&checkpoints, compressedCounter.n, uncompressedCounter.n, &lastCheckpoint)
 		}
 
 		// Clean path
@@ -305,153 +244,24 @@ func (ca *ClipArchiver) indexLayerOptimized(
 		// Process based on type
 		switch hdr.Typeflag {
 		case tar.TypeReg, tar.TypeRegA:
-			dataStart := uncompressedCounter.n
-			
-			// Content-defined checkpoint: Add checkpoint before large files
-			// This enables instant seeking to file start without decompression
-			if hdr.Size > 512*1024 && uncompressedCounter.n > lastCheckpoint {
-				cp := common.GzipCheckpoint{
-					COff: compressedCounter.n,
-					UOff: uncompressedCounter.n,
-				}
-				checkpoints = append(checkpoints, cp)
-				lastCheckpoint = uncompressedCounter.n
-				log.Debug().Msgf("Added file-boundary checkpoint: COff=%d, UOff=%d, file=%s", cp.COff, cp.UOff, cleanPath)
+			if err := ca.processRegularFile(index, tr, hdr, cleanPath, layerDigest, compressedCounter, uncompressedCounter, &checkpoints, &lastCheckpoint); err != nil {
+				return nil, "", err
 			}
-
-			// OPTIMIZATION: Skip file content efficiently
-			// Use CopyN with exact size instead of Copy which reads until EOF
-			// Note: tr.Read() still hashes the data via the TeeReader
-			if hdr.Size > 0 {
-				n, err := io.CopyN(io.Discard, tr, hdr.Size)
-				if err != nil && err != io.EOF {
-					return nil, "", fmt.Errorf("failed to skip file content: %w", err)
-				}
-				if n != hdr.Size {
-					return nil, "", fmt.Errorf("failed to skip complete file (wanted %d, got %d)", hdr.Size, n)
-				}
-			}
-
-			// For OCI images, we don't need ContentHash at the file level
-			// The Remote field with LayerDigest is used for content-addressed caching
-			// ContentHash is only used for legacy archives with file-level caching
-			node := &common.ClipNode{
-				Path:     cleanPath,
-				NodeType: common.FileNode,
-				// ContentHash is intentionally not set for OCI images
-				// Caching is handled at the layer level using Remote.LayerDigest
-				Attr: fuse.Attr{
-					Ino:       ca.generateInode(layerDigest, cleanPath),
-					Size:      uint64(hdr.Size),
-					Blocks:    (uint64(hdr.Size) + 511) / 512, // Number of 512-byte blocks
-					Atime:     uint64(hdr.AccessTime.Unix()),
-					Atimensec: uint32(hdr.AccessTime.Nanosecond()),
-					Mtime:     uint64(hdr.ModTime.Unix()),
-					Mtimensec: uint32(hdr.ModTime.Nanosecond()),
-					Ctime:     uint64(hdr.ChangeTime.Unix()),
-					Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
-					Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeReg),
-					Nlink:     1, // Regular files have link count of 1
-					Owner: fuse.Owner{
-						Uid: uint32(hdr.Uid),
-						Gid: uint32(hdr.Gid),
-					},
-				},
-				Remote: &common.RemoteRef{
-					LayerDigest: layerDigest,
-					UOffset:     dataStart,
-					ULength:     hdr.Size,
-				},
-			}
-
-			index.Set(node)
-			log.Debug().Str("path", cleanPath).Int64("size", hdr.Size).Int64("uoff", dataStart).Msg("File")
 
 		case tar.TypeSymlink:
-			// Get the symlink target
-			target := hdr.Linkname
-			if target == "" {
-				log.Warn().Msgf("Empty symlink target for %s", cleanPath)
-			}
-			
-			node := &common.ClipNode{
-				Path:     cleanPath,
-				NodeType: common.SymLinkNode,
-				Target:   target,
-				Attr: fuse.Attr{
-					Ino:       ca.generateInode(layerDigest, cleanPath),
-					Size:      uint64(len(target)), // Symlink size is length of target
-					Blocks:    0,                    // Symlinks don't use disk blocks
-					Atime:     uint64(hdr.AccessTime.Unix()),
-					Atimensec: uint32(hdr.AccessTime.Nanosecond()),
-					Mtime:     uint64(hdr.ModTime.Unix()),
-					Mtimensec: uint32(hdr.ModTime.Nanosecond()),
-					Ctime:     uint64(hdr.ChangeTime.Unix()),
-					Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
-					Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeSymlink),
-					Nlink:     1, // Symlinks have link count of 1
-					Owner: fuse.Owner{
-						Uid: uint32(hdr.Uid),
-						Gid: uint32(hdr.Gid),
-					},
-				},
-			}
-
-			index.Set(node)
-			log.Debug().Str("path", cleanPath).Str("target", target).Msg("Symlink")
+			ca.processSymlink(index, hdr, cleanPath, layerDigest)
 
 		case tar.TypeDir:
-			node := &common.ClipNode{
-				Path:     cleanPath,
-				NodeType: common.DirNode,
-				Attr: fuse.Attr{
-					Ino:       ca.generateInode(layerDigest, cleanPath),
-					Size:      0,    // Directories have size 0 (or 4096, but 0 is standard for FUSE)
-					Blocks:    0,    // Directories don't report blocks in FUSE
-					Atime:     uint64(hdr.AccessTime.Unix()),
-					Atimensec: uint32(hdr.AccessTime.Nanosecond()),
-					Mtime:     uint64(hdr.ModTime.Unix()),
-					Mtimensec: uint32(hdr.ModTime.Nanosecond()),
-					Ctime:     uint64(hdr.ChangeTime.Unix()),
-					Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
-					Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeDir),
-					Nlink:     2, // Directories start with link count of 2 (. and ..)
-					Owner: fuse.Owner{
-						Uid: uint32(hdr.Uid),
-						Gid: uint32(hdr.Gid),
-					},
-				},
-			}
-
-			index.Set(node)
-			log.Debug().Str("path", cleanPath).Int64("mode", hdr.Mode).Int64("mtime", hdr.ModTime.Unix()).Msg("Dir")
+			ca.processDirectory(index, hdr, cleanPath, layerDigest)
 
 		case tar.TypeLink:
-			// Hard links: point to the same inode as the target
-			targetPath := path.Clean("/" + strings.TrimPrefix(hdr.Linkname, "./"))
-			targetNode := index.Get(&common.ClipNode{Path: targetPath})
-			if targetNode != nil {
-				tn := targetNode.(*common.ClipNode)
-				node := &common.ClipNode{
-					Path:     cleanPath,
-					NodeType: common.FileNode,
-					// ContentHash not needed for OCI images (layer-level caching)
-					Attr:   tn.Attr, // Share inode with target
-					Remote: tn.Remote,
-				}
-				index.Set(node)
-			}
+			ca.processHardLink(index, hdr, cleanPath)
 		}
 	}
 
 	// Add final checkpoint if needed
 	if uncompressedCounter.n > lastCheckpoint {
-		cp := common.GzipCheckpoint{
-			COff: compressedCounter.n,
-			UOff: uncompressedCounter.n,
-		}
-		checkpoints = append(checkpoints, cp)
-		log.Debug().Msgf("Added final checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
+		ca.addCheckpoint(&checkpoints, compressedCounter.n, uncompressedCounter.n, &lastCheckpoint)
 	}
 
 	// Compute final hash of all decompressed data
@@ -617,19 +427,172 @@ func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOpt
 	return nil
 }
 
+// addCheckpoint adds a gzip checkpoint and updates lastCheckpoint
+func (ca *ClipArchiver) addCheckpoint(checkpoints *[]common.GzipCheckpoint, cOff, uOff int64, lastCheckpoint *int64) {
+	cp := common.GzipCheckpoint{
+		COff: cOff,
+		UOff: uOff,
+	}
+	*checkpoints = append(*checkpoints, cp)
+	*lastCheckpoint = uOff
+	log.Debug().Msgf("Added checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
+}
+
+// processRegularFile processes a regular file entry from tar
+func (ca *ClipArchiver) processRegularFile(
+	index *btree.BTree,
+	tr *tar.Reader,
+	hdr *tar.Header,
+	cleanPath string,
+	layerDigest string,
+	compressedCounter *countingReader,
+	uncompressedCounter *countingReader,
+	checkpoints *[]common.GzipCheckpoint,
+	lastCheckpoint *int64,
+) error {
+	dataStart := uncompressedCounter.n
+
+	// Content-defined checkpoint: Add checkpoint before large files (>512KB)
+	// This enables instant seeking to file start without decompression
+	if hdr.Size > 512*1024 && uncompressedCounter.n > *lastCheckpoint {
+		ca.addCheckpoint(checkpoints, compressedCounter.n, uncompressedCounter.n, lastCheckpoint)
+		log.Debug().Msgf("Added file-boundary checkpoint for large file: %s", cleanPath)
+	}
+
+	// Skip file content efficiently using CopyN
+	if hdr.Size > 0 {
+		n, err := io.CopyN(io.Discard, tr, hdr.Size)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to skip file content: %w", err)
+		}
+		if n != hdr.Size {
+			return fmt.Errorf("failed to skip complete file (wanted %d, got %d)", hdr.Size, n)
+		}
+	}
+
+	node := &common.ClipNode{
+		Path:     cleanPath,
+		NodeType: common.FileNode,
+		Attr: fuse.Attr{
+			Ino:       ca.generateInode(layerDigest, cleanPath),
+			Size:      uint64(hdr.Size),
+			Blocks:    (uint64(hdr.Size) + 511) / 512,
+			Atime:     uint64(hdr.AccessTime.Unix()),
+			Atimensec: uint32(hdr.AccessTime.Nanosecond()),
+			Mtime:     uint64(hdr.ModTime.Unix()),
+			Mtimensec: uint32(hdr.ModTime.Nanosecond()),
+			Ctime:     uint64(hdr.ChangeTime.Unix()),
+			Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+			Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeReg),
+			Nlink:     1,
+			Owner: fuse.Owner{
+				Uid: uint32(hdr.Uid),
+				Gid: uint32(hdr.Gid),
+			},
+		},
+		Remote: &common.RemoteRef{
+			LayerDigest: layerDigest,
+			UOffset:     dataStart,
+			ULength:     hdr.Size,
+		},
+	}
+
+	index.Set(node)
+	log.Debug().Str("path", cleanPath).Int64("size", hdr.Size).Int64("uoff", dataStart).Msg("File")
+	return nil
+}
+
+// processSymlink processes a symlink entry from tar
+func (ca *ClipArchiver) processSymlink(index *btree.BTree, hdr *tar.Header, cleanPath, layerDigest string) {
+	target := hdr.Linkname
+	if target == "" {
+		log.Warn().Msgf("Empty symlink target for %s", cleanPath)
+	}
+
+	node := &common.ClipNode{
+		Path:     cleanPath,
+		NodeType: common.SymLinkNode,
+		Target:   target,
+		Attr: fuse.Attr{
+			Ino:       ca.generateInode(layerDigest, cleanPath),
+			Size:      uint64(len(target)),
+			Blocks:    0,
+			Atime:     uint64(hdr.AccessTime.Unix()),
+			Atimensec: uint32(hdr.AccessTime.Nanosecond()),
+			Mtime:     uint64(hdr.ModTime.Unix()),
+			Mtimensec: uint32(hdr.ModTime.Nanosecond()),
+			Ctime:     uint64(hdr.ChangeTime.Unix()),
+			Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+			Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeSymlink),
+			Nlink:     1,
+			Owner: fuse.Owner{
+				Uid: uint32(hdr.Uid),
+				Gid: uint32(hdr.Gid),
+			},
+		},
+	}
+
+	index.Set(node)
+	log.Debug().Str("path", cleanPath).Str("target", target).Msg("Symlink")
+}
+
+// processDirectory processes a directory entry from tar
+func (ca *ClipArchiver) processDirectory(index *btree.BTree, hdr *tar.Header, cleanPath, layerDigest string) {
+	node := &common.ClipNode{
+		Path:     cleanPath,
+		NodeType: common.DirNode,
+		Attr: fuse.Attr{
+			Ino:       ca.generateInode(layerDigest, cleanPath),
+			Size:      0,
+			Blocks:    0,
+			Atime:     uint64(hdr.AccessTime.Unix()),
+			Atimensec: uint32(hdr.AccessTime.Nanosecond()),
+			Mtime:     uint64(hdr.ModTime.Unix()),
+			Mtimensec: uint32(hdr.ModTime.Nanosecond()),
+			Ctime:     uint64(hdr.ChangeTime.Unix()),
+			Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+			Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeDir),
+			Nlink:     2,
+			Owner: fuse.Owner{
+				Uid: uint32(hdr.Uid),
+				Gid: uint32(hdr.Gid),
+			},
+		},
+	}
+
+	index.Set(node)
+	log.Debug().Str("path", cleanPath).Int64("mode", hdr.Mode).Int64("mtime", hdr.ModTime.Unix()).Msg("Dir")
+}
+
+// processHardLink processes a hard link entry from tar
+func (ca *ClipArchiver) processHardLink(index *btree.BTree, hdr *tar.Header, cleanPath string) {
+	targetPath := path.Clean("/" + strings.TrimPrefix(hdr.Linkname, "./"))
+	targetNode := index.Get(&common.ClipNode{Path: targetPath})
+	if targetNode != nil {
+		tn := targetNode.(*common.ClipNode)
+		node := &common.ClipNode{
+			Path:     cleanPath,
+			NodeType: common.FileNode,
+			Attr:     tn.Attr,
+			Remote:   tn.Remote,
+		}
+		index.Set(node)
+	}
+}
+
 // nearestCheckpoint finds the checkpoint with the largest UOff <= wantU
 func nearestCheckpoint(checkpoints []common.GzipCheckpoint, wantU int64) (cOff, uOff int64) {
 	if len(checkpoints) == 0 {
 		return 0, 0
 	}
-	
+
 	i := sort.Search(len(checkpoints), func(i int) bool {
 		return checkpoints[i].UOff > wantU
 	}) - 1
-	
+
 	if i < 0 {
 		i = 0
 	}
-	
+
 	return checkpoints[i].COff, checkpoints[i].UOff
 }
