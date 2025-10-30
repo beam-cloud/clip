@@ -158,7 +158,7 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 				Str("decompressed_hash", decompressedHash).
 				Int64("offset", wantUStart).
 				Int64("length", readLen).
-				Msg("DISK CACHE HIT - using local decompressed layer")
+				Msg("disk cache hit - using local decompressed layer")
 			return s.readFromDiskCache(layerPath, wantUStart, dest[:readLen])
 		}
 	}
@@ -235,7 +235,7 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, string, error
 	log.Info().
 		Str("layer_digest", digest).
 		Str("decompressed_hash", decompressedHash).
-		Msg("OCI CACHE MISS - downloading and decompressing layer from registry")
+		Msg("oci cache miss - downloading and decompressing layer from registry")
 
 	err := s.decompressAndCacheLayer(digest, layerPath)
 
