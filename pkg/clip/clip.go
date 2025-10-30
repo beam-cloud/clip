@@ -172,11 +172,12 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 	}
 
 	storage, err := storage.NewClipStorage(storage.ClipStorageOpts{
-		ArchivePath: options.ArchivePath,
-		CachePath:   options.CachePath,
-		Metadata:    metadata,
-		Credentials: options.Credentials,
-		StorageInfo: s3Info,
+		ArchivePath:  options.ArchivePath,
+		CachePath:    options.CachePath,
+		Metadata:     metadata,
+		Credentials:  options.Credentials,
+		StorageInfo:  s3Info,
+		ContentCache: options.ContentCache,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
