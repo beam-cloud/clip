@@ -261,16 +261,13 @@ func (s *OCIClipStorage) getDiskCachePath(digest string) string {
 	return filepath.Join(s.diskCacheDir, safeDigest)
 }
 
-// getContentHash extracts the hex hash from a digest (e.g., "sha256:abc123..." -> "abc123...")
-// This is used for content-addressed caching in remote cache
+// getContentHash converts a digest to a cache key format
+// For ContentCache, we use the same format as disk cache for consistency
+// This ensures lookups match what was stored
 func (s *OCIClipStorage) getContentHash(digest string) string {
-	// Layer digests are in format "sha256:abc123..." or "sha1:def456..."
-	// Extract just the hex part for true content-addressing
-	parts := strings.SplitN(digest, ":", 2)
-	if len(parts) == 2 {
-		return parts[1] // Return just the hash (abc123...)
-	}
-	return digest // Fallback if no colon found
+	// Convert "sha256:abc123..." to "sha256_abc123..." to match disk cache format
+	// This allows ContentCache and disk cache to use the same key format
+	return strings.ReplaceAll(digest, ":", "_")
 }
 
 // readFromDiskCache reads data from the cached layer file

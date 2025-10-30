@@ -20,22 +20,22 @@ func TestGetContentHash(t *testing.T) {
 		{
 			name:     "SHA256 digest",
 			digest:   "sha256:abc123def456",
-			expected: "abc123def456",
+			expected: "sha256_abc123def456", // Now keeps algorithm prefix with underscore
 		},
 		{
 			name:     "SHA1 digest",
 			digest:   "sha1:fedcba987654",
-			expected: "fedcba987654",
+			expected: "sha1_fedcba987654", // Now keeps algorithm prefix with underscore
 		},
 		{
 			name:     "Long SHA256",
 			digest:   "sha256:44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885",
-			expected: "44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885",
+			expected: "sha256_44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", // Full format
 		},
 		{
 			name:     "No algorithm prefix (fallback)",
 			digest:   "justahash123",
-			expected: "justahash123",
+			expected: "justahash123", // No colon, stays the same
 		},
 	}
 
@@ -73,9 +73,9 @@ func TestContentAddressedCaching(t *testing.T) {
 	// Both images should produce the SAME cache key
 	cacheKey := storage.getContentHash(sharedLayerDigest)
 
-	// Cache key should be just the hex hash (content-addressed)
-	require.Equal(t, "44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", cacheKey)
-	require.NotContains(t, cacheKey, "sha256:", "Cache key should not contain algorithm prefix")
+	// Cache key should use filesystem-safe format with underscore
+	require.Equal(t, "sha256_44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", cacheKey)
+	require.NotContains(t, cacheKey, ":", "Cache key should use underscore instead of colon")
 	require.NotContains(t, cacheKey, "clip:", "Cache key should not contain namespace prefix")
 	require.NotContains(t, cacheKey, "decompressed", "Cache key should not contain type suffix")
 
@@ -99,7 +99,8 @@ func TestContentCacheRangeRead(t *testing.T) {
 	cache := newMockCache()
 
 	// Pre-populate cache with the entire layer (simulating Node A caching it)
-	cacheKey := digest.Hex // Just the hex part (content-addressed)
+	storage := &OCIClipStorage{}
+	cacheKey := storage.getContentHash(digest.String()) // Use proper cache key format
 	chunks := make(chan []byte, 1)
 	chunks <- layerData
 	close(chunks)
@@ -112,7 +113,7 @@ func TestContentCacheRangeRead(t *testing.T) {
 		compressedData: compressedData,
 	}
 
-	// Create storage
+	// Create storage with metadata
 	metadata := &common.ClipArchiveMetadata{
 		StorageInfo: &common.OCIStorageInfo{
 			GzipIdxByLayer: map[string]*common.GzipIndex{
@@ -123,7 +124,7 @@ func TestContentCacheRangeRead(t *testing.T) {
 
 	diskCacheDir := t.TempDir()
 
-	storage := &OCIClipStorage{
+	storage = &OCIClipStorage{
 		metadata:            metadata,
 		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:          map[string]v1.Layer{digest.String(): layer},

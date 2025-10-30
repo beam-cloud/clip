@@ -853,9 +853,10 @@ func TestStoreDecompressedInRemoteCache_SmallFile(t *testing.T) {
 	assert.Equal(t, 1, len(cache.chunksReceived), "small file should be single chunk")
 	assert.Equal(t, len(testData), cache.chunksReceived[0], "chunk size should match file size")
 
-	// Verify content
-	cacheKey := "small123" // getContentHash strips "sha256:" prefix
-	assert.Equal(t, testData, cache.store[cacheKey], "cached content should match original")
+	// Verify content with proper key format
+	tempStorage := &OCIClipStorage{}
+	cacheKey := tempStorage.getContentHash(digest) // Use proper format: sha256_small123
+	assert.Equal(t, testData, cache.store[cacheKey], "cached content should match original with key: "+cacheKey)
 }
 
 // TestLayerCacheEliminatesRepeatedInflates verifies that accessing the same layer
