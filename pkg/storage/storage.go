@@ -11,6 +11,10 @@ type ClipStorageInterface interface {
 	Metadata() *common.ClipArchiveMetadata
 	CachedLocally() bool
 	Cleanup() error
+	// HandlesContentCache returns true if this storage implementation handles
+	// ContentCache internally (e.g., OCI storage). If false, the filesystem
+	// layer will handle ContentCache caching.
+	HandlesContentCache() bool
 }
 
 type ClipStorageCredentials struct {

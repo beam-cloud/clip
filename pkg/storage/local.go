@@ -42,6 +42,11 @@ func (s *LocalClipStorage) CachedLocally() bool {
 	return true
 }
 
+func (s *LocalClipStorage) HandlesContentCache() bool {
+	// Local storage does not handle ContentCache internally - filesystem layer handles it
+	return false
+}
+
 func (s *LocalClipStorage) Metadata() *common.ClipArchiveMetadata {
 	return s.metadata
 }

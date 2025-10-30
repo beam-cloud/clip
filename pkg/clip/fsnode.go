@@ -113,9 +113,15 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	// Always attempt to read from content cache first when available
-	// Content-addressed storage should be prioritized over disk cache
-	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" {
+	// Check if storage handles ContentCache internally (e.g., OCI storage)
+	// If storage handles it, we should NOT check ContentCache here to avoid duplication
+	// If storage doesn't handle it (V1 CLIP: S3/Local), filesystem layer handles ContentCache
+	storageHandlesContentCache := n.filesystem.storage.HandlesContentCache()
+
+	if !storageHandlesContentCache && n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" {
+		// V1 CLIP path: filesystem layer handles ContentCache
+		// Always attempt to read from content cache first when available
+		// Content-addressed storage should be prioritized over disk cache
 		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
 		if cacheErr == nil {
 			// Content cache hit - use it directly
@@ -133,7 +139,9 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			}()
 		}
 	} else {
-		// Content cache not available - use storage directly
+		// OCI storage path OR content cache not available
+		// Storage layer handles its own caching (including ContentCache for OCI)
+		// Just call storage.ReadFile directly
 		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 		if err != nil {
 			return nil, syscall.EIO

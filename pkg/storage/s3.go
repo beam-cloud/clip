@@ -292,6 +292,11 @@ func (s3c *S3ClipStorage) CachedLocally() bool {
 	return s3c.cachedLocally
 }
 
+func (s3c *S3ClipStorage) HandlesContentCache() bool {
+	// S3 storage does not handle ContentCache internally - filesystem layer handles it
+	return false
+}
+
 func (s3c *S3ClipStorage) getFileSize() (int64, error) {
 	input := &s3.HeadObjectInput{
 		Bucket: aws.String(s3c.bucket),
