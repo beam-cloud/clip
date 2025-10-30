@@ -147,14 +147,8 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 	metrics := common.GetGlobalMetrics()
 	metrics.RecordLayerAccess(remote.LayerDigest)
 
-	// 1. Try disk cache first (fastest - local range read)
-	layerPath := s.getDiskCachePath(remote.LayerDigest)
-	if _, err := os.Stat(layerPath); err == nil {
-		log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("disk cache hit")
-		return s.readFromDiskCache(layerPath, wantUStart, dest[:readLen])
-	}
-
-	// 2. Try remote ContentCache range read (fast - network, but only what we need!)
+	// 1. Try remote ContentCache range read FIRST (content-addressed storage - preferred)
+	// This allows cross-image layer sharing and avoids disk I/O
 	if s.contentCache != nil {
 		if data, err := s.tryRangeReadFromContentCache(remote.LayerDigest, wantUStart, readLen); err == nil {
 			log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("ContentCache range read hit")
@@ -163,6 +157,13 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 		} else {
 			log.Debug().Err(err).Str("digest", remote.LayerDigest).Msg("ContentCache range read miss")
 		}
+	}
+
+	// 2. Try disk cache (fast - local range read, but only if content cache missed)
+	layerPath := s.getDiskCachePath(remote.LayerDigest)
+	if _, err := os.Stat(layerPath); err == nil {
+		log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("disk cache hit")
+		return s.readFromDiskCache(layerPath, wantUStart, dest[:readLen])
 	}
 
 	// 3. Cache miss - decompress from OCI and cache entire layer (for future range reads)
@@ -180,7 +181,30 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, error) {
 	// Generate cache file path
 	layerPath := s.getDiskCachePath(digest)
 
-	// If cached on disk, use that first
+	// Check content cache first - try to download entire decompressed layer if available
+	// Note: This is a fallback - ReadFile already tried range reads from content cache first
+	// This ensures the layer is on disk for efficient future range reads
+	if s.contentCache != nil {
+		cacheKey := s.getContentHash(digest)
+		// Probe with a small read to check if layer exists in content cache
+		// If it exists, we'll populate disk cache for faster future access
+		if probeData, err := s.contentCache.GetContent(cacheKey, 0, 1024, struct{ RoutingKey string }{}); err == nil && len(probeData) > 0 {
+			log.Debug().Str("digest", digest).Msg("layer found in content cache, populating disk cache")
+			// Try to get the full layer (read in chunks would be better, but GetContent supports large reads)
+			// Read with a large max size - the cache should return what's available
+			if fullData, err := s.contentCache.GetContent(cacheKey, 0, 10<<30, struct{ RoutingKey string }{}); err == nil && len(fullData) > 0 {
+				// Write to disk cache for faster future access
+				if err := s.writeToDiskCache(layerPath, fullData); err != nil {
+					log.Warn().Err(err).Str("digest", digest).Msg("failed to write content cache data to disk cache")
+				} else {
+					log.Debug().Str("digest", digest).Int("size", len(fullData)).Msg("populated disk cache from content cache")
+					return layerPath, nil
+				}
+			}
+		}
+	}
+
+	// If cached on disk, use that
 	if _, err := os.Stat(layerPath); err == nil {
 		log.Debug().Str("digest", digest).Str("path", layerPath).Msg("disk cache hit")
 		return layerPath, nil

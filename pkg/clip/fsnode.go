@@ -116,8 +116,16 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	var nRead int
 	var err error
 
-	// Attempt to read from cache first
-	if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
+	// For OCI v2 images (with Remote), caching is handled at the layer level in oci.go storage
+	// For legacy images (without Remote), use file-level caching
+	if n.clipNode.Remote != nil {
+		// OCI v2: Delegate to storage layer which handles content cache -> disk cache -> decompress
+		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
+		if err != nil {
+			return nil, syscall.EIO
+		}
+	} else if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
+		// Legacy: File-level caching for non-OCI images
 		content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
 		if cacheErr == nil {
 			// Cache hit - use cached content

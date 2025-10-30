@@ -151,10 +151,11 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 		Hex:       "abc123",
 	}
 
-	// Setup mock cache with data already cached
+	// Setup mock cache with decompressed data already cached
+	// Use the content hash (hex part of digest) as the key
 	cache := newMockCache()
-	cacheKey := "clip:oci:layer:" + digest.String()
-	cache.store[cacheKey] = compressedData
+	cacheKey := "abc123" // getContentHash extracts hex part from "sha256:abc123"
+	cache.store[cacheKey] = testData // Store decompressed data, not compressed
 
 	// Create mock layer
 	layer := &mockLayer{
@@ -199,7 +200,8 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 	assert.Equal(t, testData, dest)
 
 	// Verify cache was hit (Get called, Set not called)
-	assert.Equal(t, 1, cache.getCalls, "cache.Get should be called once")
+	// Content cache should be checked BEFORE disk cache
+	assert.Equal(t, 1, cache.getCalls, "cache.Get should be called once (content cache checked first)")
 	assert.Equal(t, 0, cache.setCalls, "cache.Set should not be called on cache hit")
 }
 
@@ -258,8 +260,10 @@ func TestOCIStorage_CacheMiss(t *testing.T) {
 	assert.Equal(t, len(testData), n)
 	assert.Equal(t, testData, dest)
 
-	// Verify cache miss flow (Get called, Set called asynchronously)
-	assert.Equal(t, 1, cache.getCalls, "cache.Get should be called once")
+	// Verify cache miss flow
+	// Get is called in ReadFile (range read attempt) and possibly in ensureLayerCached (probe)
+	// Both are checking content cache FIRST before falling back to disk/decompression
+	assert.GreaterOrEqual(t, cache.getCalls, 1, "cache.Get should be called at least once (content cache checked first)")
 	// Note: Set is async, so we can't reliably assert it here
 }
 
@@ -933,6 +937,84 @@ func TestLayerCacheEliminatesRepeatedInflates(t *testing.T) {
 	}
 
 	t.Logf("✅ SUCCESS: %d reads completed - layer decompressed once and cached to disk!", numReads)
+}
+
+// TestOCIStorage_CacheLookupOrder verifies that content cache is checked before disk cache
+func TestOCIStorage_CacheLookupOrder(t *testing.T) {
+	// Create test data
+	testData := []byte("Test data for cache lookup order verification")
+	compressedData := createGzipData(t, testData)
+
+	digest := v1.Hash{
+		Algorithm: "sha256",
+		Hex:       "order123",
+	}
+
+	// Setup cache with decompressed data
+	cache := newMockCache()
+	cacheKey := "order123" // getContentHash extracts hex part
+	cache.store[cacheKey] = testData
+
+	// Create mock layer
+	layer := &mockLayer{
+		digest:         digest,
+		compressedData: compressedData,
+	}
+
+	// Create storage
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {},
+			},
+		},
+	}
+
+	diskCacheDir := t.TempDir()
+	storage := &OCIClipStorage{
+		metadata:            metadata,
+		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:          map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:        diskCacheDir,
+		layersDecompressing: make(map[string]chan struct{}),
+		contentCache:        cache,
+	}
+
+	// Create node
+	node := &common.ClipNode{
+		Remote: &common.RemoteRef{
+			LayerDigest: digest.String(),
+			UOffset:     0,
+			ULength:     int64(len(testData)),
+		},
+	}
+
+	// Reset only call counters, NOT the store (we want the data to remain cached)
+	cache.mu.Lock()
+	cache.getCalls = 0
+	cache.setCalls = 0
+	cache.mu.Unlock()
+
+	// Read data - should hit content cache FIRST (before checking disk cache)
+	dest := make([]byte, len(testData))
+	n, err := storage.ReadFile(node, dest, 0)
+
+	// Assertions
+	require.NoError(t, err)
+	assert.Equal(t, len(testData), n)
+	assert.Equal(t, testData, dest)
+
+	// Verify content cache was checked FIRST (should be called before disk cache check)
+	// Content cache hit means we returned early without checking disk cache
+	assert.Equal(t, 1, cache.getCalls, "content cache.Get should be called once (checked first)")
+	
+	// Verify disk cache was NOT populated (content cache hit, so no need to decompress/cache)
+	layerPath := storage.getDiskCachePath(digest.String())
+	_, err = os.Stat(layerPath)
+	assert.Error(t, err, "disk cache should not exist - content cache was used first")
+	
+	// Verify layer was NOT decompressed (content cache hit means no need to decompress)
+	assert.Equal(t, 0, cache.setCalls, "cache.Set should not be called when content cache hits on range read")
 }
 
 // BenchmarkLayerCachePerformance benchmarks the performance difference
