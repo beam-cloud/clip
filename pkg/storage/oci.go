@@ -207,7 +207,7 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, error) {
 	s.layerDecompressMu.Unlock()
 
 	// Decompress and cache the layer
-	log.Debug().Str("digest", digest).Msg("decompressing layer")
+	log.Info().Str("digest", digest).Msg("downloading and decompressing layer")
 	err := s.decompressAndCacheLayer(digest, layerPath)
 
 	// Clean up in-progress tracking

@@ -22,6 +22,7 @@ type ClipStorageInterface interface {
 
 type ClipStorageCredentials struct {
 	S3 *S3ClipStorageCredentials
+	// OCI *OCIClipStorageCredentials
 }
 
 type ClipStorageOpts struct {
@@ -85,8 +86,8 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 		})
 	case common.StorageModeOCI:
 		storage, err = NewOCIClipStorage(OCIClipStorageOpts{
-			Metadata:   metadata,
-			AuthConfig: "", // TODO: pass from opts if needed
+			Metadata: metadata,
+			// AuthConfig: opts.Credentials
 		})
 	case common.StorageModeLocal:
 		storage, err = NewLocalClipStorage(metadata, LocalClipStorageOpts{
