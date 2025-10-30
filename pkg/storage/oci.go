@@ -149,7 +149,7 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 	// Get or compute the decompressed hash
 	decompressedHash := s.getDecompressedHash(remote.LayerDigest)
 
-	// 1. Try disk cache first (fastest - local range read)
+	// Try disk cache first
 	if decompressedHash != "" {
 		layerPath := s.getDecompressedCachePath(decompressedHash)
 		if _, err := os.Stat(layerPath); err == nil {
@@ -163,15 +163,8 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 		}
 	}
 
-	// 2. Try remote ContentCache range read (fast - network, but only what we need!)
+	// Try remote ContentCache range read
 	if s.contentCache != nil && decompressedHash != "" {
-		log.Debug().
-			Str("layer_digest", remote.LayerDigest).
-			Str("decompressed_hash", decompressedHash).
-			Int64("offset", wantUStart).
-			Int64("length", readLen).
-			Msg("Trying ContentCache range read")
-		
 		if data, err := s.tryRangeReadFromContentCache(decompressedHash, wantUStart, readLen); err == nil {
 			log.Debug().
 				Str("layer_digest", remote.LayerDigest).
@@ -179,7 +172,7 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 				Int64("offset", wantUStart).
 				Int64("length", readLen).
 				Int("bytes_read", len(data)).
-				Msg("CONTENT CACHE HIT - range read from remote")
+				Msg("content cache hit - range read from remote")
 			copy(dest, data)
 			return len(data), nil
 		} else {
@@ -187,11 +180,11 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 				Err(err).
 				Str("layer_digest", remote.LayerDigest).
 				Str("decompressed_hash", decompressedHash).
-				Msg("ContentCache miss - will decompress from OCI")
+				Msg("content cache miss - will decompress from OCI")
 		}
 	}
 
-	// 3. Cache miss - decompress from OCI and cache entire layer (for future range reads)
+	// Cache miss - decompress from OCI and cache entire layer (for future range reads)
 	decompressedHash, layerPath, err := s.ensureLayerCached(remote.LayerDigest)
 	if err != nil {
 		return 0, err
@@ -243,7 +236,7 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, string, error
 		Str("layer_digest", digest).
 		Str("decompressed_hash", decompressedHash).
 		Msg("OCI CACHE MISS - downloading and decompressing layer from registry")
-	
+
 	err := s.decompressAndCacheLayer(digest, layerPath)
 
 	// Clean up in-progress tracking
@@ -272,14 +265,13 @@ func (s *OCIClipStorage) getDecompressedHash(layerDigest string) string {
 	return s.storageInfo.DecompressedHashByLayer[layerDigest]
 }
 
-// Helper methods for tests (backward compatibility)
-
 // getDiskCachePath returns cache path for a layer digest (looks up decompressed hash from metadata)
 func (s *OCIClipStorage) getDiskCachePath(layerDigest string) string {
 	decompHash := s.getDecompressedHash(layerDigest)
 	if decompHash != "" {
 		return s.getDecompressedCachePath(decompHash)
 	}
+
 	// Fallback for tests without metadata
 	return s.getDecompressedCachePath(layerDigest)
 }
@@ -379,12 +371,12 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 		log.Info().
 			Str("layer_digest", digest).
 			Str("decompressed_hash", decompressedHash).
-			Msg("Storing decompressed layer in ContentCache (async)")
+			Msg("storing decompressed layer in content cache")
 		go s.storeDecompressedInRemoteCache(decompressedHash, diskPath)
 	} else {
 		log.Warn().
 			Str("layer_digest", digest).
-			Msg("ContentCache not configured - layer will NOT be shared across cluster")
+			Msg("content cache not configured - layer will NOT be shared across cluster")
 	}
 
 	return nil
@@ -452,7 +444,7 @@ func (s *OCIClipStorage) tryRangeReadFromContentCache(decompressedHash string, o
 	// This is the KEY optimization: we only fetch the bytes we need!
 	data, err := s.contentCache.GetContent(decompressedHash, offset, length, struct{ RoutingKey string }{})
 	if err != nil {
-		return nil, fmt.Errorf("ContentCache range read failed: %w", err)
+		return nil, fmt.Errorf("content cache range read failed: %w", err)
 	}
 
 	return data, nil
@@ -475,7 +467,7 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 			Err(err).
 			Str("decompressed_hash", decompressedHash).
 			Str("disk_path", diskPath).
-			Msg("FAILED to stat disk cache for ContentCache storage")
+			Msg("failed to stat disk cache for content cache storage")
 		return
 	}
 	totalSize := fileInfo.Size()
@@ -490,7 +482,7 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 			log.Error().
 				Err(err).
 				Str("decompressed_hash", decompressedHash).
-				Msg("FAILED to stream file for ContentCache storage")
+				Msg("failed to stream file for content cache storage")
 		}
 	}()
 
@@ -500,13 +492,13 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 			Err(err).
 			Str("decompressed_hash", decompressedHash).
 			Int64("bytes", totalSize).
-			Msg("FAILED to store layer in ContentCache")
+			Msg("failed to store layer in content cache")
 	} else {
 		log.Info().
 			Str("decompressed_hash", decompressedHash).
 			Str("stored_hash", storedHash).
 			Int64("bytes", totalSize).
-			Msg("✓ Successfully stored decompressed layer in ContentCache - available for cluster range reads")
+			Msg("successfully stored decompressed layer in content cache")
 	}
 }
 

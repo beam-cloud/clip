@@ -26,20 +26,20 @@ import (
 
 // OCIIndexProgress represents a progress update during OCI image indexing
 type OCIIndexProgress struct {
-	LayerIndex    int    // Current layer being processed (1-based)
-	TotalLayers   int    // Total number of layers
-	LayerDigest   string // Digest of current layer
-	Stage         string // "starting" or "completed"
-	FilesIndexed  int    // Number of files indexed so far (only for "completed")
-	Message       string // Human-readable message
+	LayerIndex   int    // Current layer being processed (1-based)
+	TotalLayers  int    // Total number of layers
+	LayerDigest  string // Digest of current layer
+	Stage        string // "starting" or "completed"
+	FilesIndexed int    // Number of files indexed so far (only for "completed")
+	Message      string // Human-readable message
 }
 
 // IndexOCIImageOptions configures the OCI indexer
 type IndexOCIImageOptions struct {
-	ImageRef       string
-	CheckpointMiB  int64                   // Checkpoint every N MiB (default 2)
-	AuthConfig     string                  // optional base64-encoded auth config
-	ProgressChan   chan<- OCIIndexProgress // optional channel for progress updates
+	ImageRef      string
+	CheckpointMiB int64                   // Checkpoint every N MiB (default 2)
+	AuthConfig    string                  // optional base64-encoded auth config
+	ProgressChan  chan<- OCIIndexProgress // optional channel for progress updates
 }
 
 // countingReader tracks bytes read from an io.Reader
@@ -163,7 +163,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 
 		gzipIdx[layerDigestStr] = gzipIndex
 		decompressedHashes[layerDigestStr] = decompressedHash
-		
+
 		log.Info().Msgf("Layer %s: decompressed_hash=%s", layerDigestStr, decompressedHash)
 
 		// Send progress update: completed layer
@@ -266,7 +266,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 
 	// Compute final hash of all decompressed data
 	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
-	
+
 	// Log summary
 	log.Info().Msgf("Layer indexed with %d checkpoints, decompressed_hash=%s", len(checkpoints), decompressedHash)
 
@@ -305,7 +305,7 @@ func (ca *ClipArchiver) handleWhiteout(index *btree.BTree, fullPath string) bool
 func (ca *ClipArchiver) deleteNode(index *btree.BTree, nodePath string) {
 	// Remove the node itself
 	index.Delete(&common.ClipNode{Path: nodePath})
-	
+
 	// Remove all children (for directories)
 	ca.deleteRange(index, nodePath+"/")
 }
@@ -313,7 +313,7 @@ func (ca *ClipArchiver) deleteNode(index *btree.BTree, nodePath string) {
 // deleteRange removes all nodes with paths starting with prefix
 func (ca *ClipArchiver) deleteRange(index *btree.BTree, prefix string) {
 	var toDelete []*common.ClipNode
-	
+
 	pivot := &common.ClipNode{Path: prefix}
 	index.Ascend(pivot, func(a interface{}) bool {
 		node := a.(*common.ClipNode)
@@ -323,12 +323,11 @@ func (ca *ClipArchiver) deleteRange(index *btree.BTree, prefix string) {
 		}
 		return false // stop iteration once we're past the prefix
 	})
-	
+
 	for _, node := range toDelete {
 		index.Delete(node)
 	}
 }
-
 
 // isRuntimeDirectory checks if a path is a special runtime directory
 // that should be mounted by the container runtime, not included in the image
@@ -338,20 +337,20 @@ func (ca *ClipArchiver) isRuntimeDirectory(path string) bool {
 		"/sys",
 		"/dev",
 	}
-	
+
 	for _, dir := range runtimeDirs {
 		if path == dir {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
 // tarModeToFuse converts tar mode to FUSE mode
 func (ca *ClipArchiver) tarModeToFuse(tarMode int64, typeflag byte) uint32 {
 	mode := uint32(tarMode & 0777) // permission bits
-	
+
 	switch typeflag {
 	case tar.TypeDir:
 		mode |= syscall.S_IFDIR
@@ -362,7 +361,7 @@ func (ca *ClipArchiver) tarModeToFuse(tarMode int64, typeflag byte) uint32 {
 	default:
 		mode |= syscall.S_IFREG
 	}
-	
+
 	return mode
 }
 
@@ -372,12 +371,12 @@ func (ca *ClipArchiver) generateInode(digest string, path string) uint64 {
 	h.Write([]byte(digest))
 	h.Write([]byte(path))
 	inode := h.Sum64()
-	
+
 	// Ensure inode is never 0 (reserved for errors) or 1 (reserved for root)
 	if inode <= 1 {
 		inode = 2
 	}
-	
+
 	return inode
 }
 
@@ -416,7 +415,7 @@ func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOpt
 	log.Info().Msgf("Created metadata-only clip file: %s", clipOut)
 	log.Info().Msgf("  Files indexed: %d", index.Len())
 	log.Info().Msgf("  Layers: %d", len(layers))
-	
+
 	// Calculate total checkpoint size
 	totalCheckpoints := 0
 	for _, idx := range gzipIdx {
