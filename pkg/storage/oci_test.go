@@ -30,6 +30,9 @@ type mockCache struct {
 	// Call tracking
 	getCalls int
 	setCalls int
+
+	lastGetRoutingKey string
+	lastSetRoutingKey string
 }
 
 func newMockCache() *mockCache {
@@ -43,6 +46,7 @@ func (m *mockCache) GetContent(hash string, offset int64, length int64, opts str
 	defer m.mu.Unlock()
 
 	m.getCalls++
+	m.lastGetRoutingKey = opts.RoutingKey
 
 	if m.getError != nil {
 		return nil, m.getError
@@ -71,6 +75,7 @@ func (m *mockCache) StoreContent(chunks chan []byte, hash string, opts struct{ R
 	defer m.mu.Unlock()
 
 	m.setCalls++
+	m.lastSetRoutingKey = opts.RoutingKey
 
 	if m.setError != nil {
 		return "", m.setError
@@ -95,6 +100,8 @@ func (m *mockCache) reset() {
 	m.setCalls = 0
 	m.getError = nil
 	m.setError = nil
+	m.lastGetRoutingKey = ""
+	m.lastSetRoutingKey = ""
 }
 
 // Mock Layer for testing
@@ -151,10 +158,10 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 		Hex:       "abc123",
 	}
 
-	// Setup mock cache with data already cached
+	// Setup mock cache with decompressed data already cached
 	cache := newMockCache()
-	cacheKey := "clip:oci:layer:" + digest.String()
-	cache.store[cacheKey] = compressedData
+	cacheKey := digest.String()
+	cache.store[cacheKey] = testData
 
 	// Create mock layer
 	layer := &mockLayer{
@@ -201,6 +208,8 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 	// Verify cache was hit (Get called, Set not called)
 	assert.Equal(t, 1, cache.getCalls, "cache.Get should be called once")
 	assert.Equal(t, 0, cache.setCalls, "cache.Set should not be called on cache hit")
+	assert.Equal(t, cacheKey, cache.lastGetRoutingKey, "routing key should match layer digest")
+	assert.Equal(t, testData, cache.store[cacheKey], "cache should store decompressed data")
 }
 
 func TestOCIStorage_CacheMiss(t *testing.T) {
@@ -260,6 +269,7 @@ func TestOCIStorage_CacheMiss(t *testing.T) {
 
 	// Verify cache miss flow (Get called, Set called asynchronously)
 	assert.Equal(t, 1, cache.getCalls, "cache.Get should be called once")
+	assert.Equal(t, digest.String(), cache.lastGetRoutingKey, "routing key should match layer digest")
 	// Note: Set is async, so we can't reliably assert it here
 }
 
@@ -742,6 +752,7 @@ func (c *chunkTrackingCache) StoreContent(chunks chan []byte, hash string, opts 
 	defer c.mu.Unlock()
 
 	c.setCalls++
+	c.lastSetRoutingKey = opts.RoutingKey
 
 	// Track chunk sizes
 	var data []byte
@@ -797,7 +808,8 @@ func TestStoreDecompressedInRemoteCache_StreamsInChunks(t *testing.T) {
 
 	// Verify chunking behavior
 	cache.mu.Lock()
-	chunksReceived := cache.chunksReceived
+	chunksReceived := append([]int(nil), cache.chunksReceived...)
+	routingKey := cache.lastSetRoutingKey
 	cache.mu.Unlock()
 
 	assert.Greater(t, len(chunksReceived), 1, "should receive multiple chunks for large file")
@@ -814,6 +826,7 @@ func TestStoreDecompressedInRemoteCache_StreamsInChunks(t *testing.T) {
 		totalSize += size
 	}
 	assert.Equal(t, int(fileSize), totalSize, "total size should match file size")
+	assert.Equal(t, digest, routingKey, "routing key should match digest")
 }
 
 func TestStoreDecompressedInRemoteCache_SmallFile(t *testing.T) {
@@ -854,8 +867,9 @@ func TestStoreDecompressedInRemoteCache_SmallFile(t *testing.T) {
 	assert.Equal(t, len(testData), cache.chunksReceived[0], "chunk size should match file size")
 
 	// Verify content
-	cacheKey := "small123" // getContentHash strips "sha256:" prefix
+	cacheKey := digest
 	assert.Equal(t, testData, cache.store[cacheKey], "cached content should match original")
+	assert.Equal(t, digest, cache.lastSetRoutingKey, "routing key should match digest")
 }
 
 // TestLayerCacheEliminatesRepeatedInflates verifies that accessing the same layer

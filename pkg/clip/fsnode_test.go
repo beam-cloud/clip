@@ -151,15 +151,129 @@ func (m *mockS3Storage) resetTrackingFields() {
 	m.mu.Unlock()
 }
 
+type stubOCIStorage struct {
+	metadata   *common.ClipArchiveMetadata
+	data       []byte
+	readCalls  int
+	lastOffset int64
+	lastLength int
+}
+
+func (s *stubOCIStorage) ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error) {
+	s.readCalls++
+	s.lastOffset = offset
+	if offset >= int64(len(s.data)) {
+		return 0, nil
+	}
+	max := int64(len(dest))
+	remaining := int64(len(s.data)) - offset
+	if max > remaining {
+		max = remaining
+	}
+	n := copy(dest, s.data[offset:offset+max])
+	s.lastLength = n
+	return n, nil
+}
+
+func (s *stubOCIStorage) Metadata() *common.ClipArchiveMetadata {
+	return s.metadata
+}
+
+func (s *stubOCIStorage) CachedLocally() bool {
+	return false
+}
+
+func (s *stubOCIStorage) Cleanup() error {
+	return nil
+}
+
+func TestFSNodeRead_OCIRemoteSkipsContentCache(t *testing.T) {
+	ctx := context.Background()
+	fileData := []byte("layer-backed remote file data")
+
+	clipNodeLess := func(a, b interface{}) bool {
+		aNode := a.(*common.ClipNode)
+		bNode := b.(*common.ClipNode)
+		return aNode.Path < bNode.Path
+	}
+
+	index := btree.NewOptions(clipNodeLess, btree.Options{NoLocks: true})
+
+	now := uint64(time.Now().Unix())
+	rootNode := &common.ClipNode{
+		Path:     "/",
+		NodeType: common.DirNode,
+		Attr: fuse.Attr{
+			Ino:   1,
+			Mode:  fuse.S_IFDIR | 0755,
+			Nlink: 2,
+			Atime: now,
+			Mtime: now,
+			Ctime: now,
+		},
+	}
+	fileNode := &common.ClipNode{
+		Path:        "/remote.txt",
+		NodeType:    common.FileNode,
+		ContentHash: "unused",
+		Attr: fuse.Attr{
+			Ino:   2,
+			Mode:  fuse.S_IFREG | 0644,
+			Nlink: 1,
+			Size:  uint64(len(fileData)),
+			Atime: now,
+			Mtime: now,
+			Ctime: now,
+		},
+		Remote: &common.RemoteRef{
+			LayerDigest: "sha256:layerdigest",
+			UOffset:     0,
+			ULength:     int64(len(fileData)),
+		},
+	}
+
+	index.Set(rootNode)
+	index.Set(fileNode)
+
+	metadata := &common.ClipArchiveMetadata{
+		Index: index,
+	}
+
+	storage := &stubOCIStorage{
+		metadata: metadata,
+		data:     fileData,
+	}
+
+	mockCache := newMockContentCache()
+
+	clipFS, err := NewFileSystem(storage, ClipFileSystemOpts{
+		ContentCache:          mockCache,
+		ContentCacheAvailable: true,
+	})
+	require.NoError(t, err)
+	defer close(clipFS.cacheEventChan)
+
+	remoteNode := &FSNode{filesystem: clipFS, clipNode: fileNode, attr: fileNode.Attr}
+	dest := make([]byte, len(fileData))
+	result, errno := remoteNode.Read(ctx, nil, dest, 0)
+	require.Equal(t, fs.OK, errno)
+
+	readData, status := result.Bytes(dest)
+	require.Equal(t, fuse.OK, status)
+	assert.Equal(t, fileData, readData[:len(fileData)])
+	assert.False(t, mockCache.getCalled, "content cache should not be queried for OCI remote nodes")
+	assert.Equal(t, 1, storage.readCalls, "storage ReadFile should be invoked exactly once")
+}
+
 func Test_FSNodeLookupAndRead(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping Docker-dependent test in short mode")
 	}
-	
+
 	// This test requires Docker to be running (testcontainers)
 	// Skip in all environments to avoid CI failures
 	t.Skip("Skipping Docker-dependent integration test - requires Docker daemon")
-	
+
 	ctx := context.Background()
 
 	req := tc.ContainerRequest{

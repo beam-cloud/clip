@@ -147,22 +147,22 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 	metrics := common.GetGlobalMetrics()
 	metrics.RecordLayerAccess(remote.LayerDigest)
 
-	// 1. Try disk cache first (fastest - local range read)
+	// 1. Try remote ContentCache range read (fast - network, but only what we need!)
+	if s.contentCache != nil {
+		if data, err := s.tryRangeReadFromContentCache(remote.LayerDigest, wantUStart, readLen); err == nil {
+			log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("content cache range hit")
+			copy(dest, data)
+			return len(data), nil
+		} else {
+			log.Debug().Err(err).Str("digest", remote.LayerDigest).Msg("content cache range miss")
+		}
+	}
+
+	// 2. Try disk cache (fastest local range read)
 	layerPath := s.getDiskCachePath(remote.LayerDigest)
 	if _, err := os.Stat(layerPath); err == nil {
 		log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("disk cache hit")
 		return s.readFromDiskCache(layerPath, wantUStart, dest[:readLen])
-	}
-
-	// 2. Try remote ContentCache range read (fast - network, but only what we need!)
-	if s.contentCache != nil {
-		if data, err := s.tryRangeReadFromContentCache(remote.LayerDigest, wantUStart, readLen); err == nil {
-			log.Debug().Str("digest", remote.LayerDigest).Int64("offset", wantUStart).Int64("length", readLen).Msg("ContentCache range read hit")
-			copy(dest, data)
-			return len(data), nil
-		} else {
-			log.Debug().Err(err).Str("digest", remote.LayerDigest).Msg("ContentCache range read miss")
-		}
 	}
 
 	// 3. Cache miss - decompress from OCI and cache entire layer (for future range reads)
@@ -233,16 +233,10 @@ func (s *OCIClipStorage) getDiskCachePath(digest string) string {
 	return filepath.Join(s.diskCacheDir, safeDigest)
 }
 
-// getContentHash extracts the hex hash from a digest (e.g., "sha256:abc123..." -> "abc123...")
-// This is used for content-addressed caching in remote cache
-func (s *OCIClipStorage) getContentHash(digest string) string {
-	// Layer digests are in format "sha256:abc123..." or "sha1:def456..."
-	// Extract just the hex part for true content-addressing
-	parts := strings.SplitN(digest, ":", 2)
-	if len(parts) == 2 {
-		return parts[1] // Return just the hash (abc123...)
-	}
-	return digest // Fallback if no colon found
+// getLayerContentKey returns the canonical cache key used for content cache lookups
+// We use the full layer digest (e.g., "sha256:abc123...") to preserve algorithm context
+func (s *OCIClipStorage) getLayerContentKey(digest string) string {
+	return digest
 }
 
 // readFromDiskCache reads data from the cached layer file
@@ -400,17 +394,14 @@ func streamFileInChunks(filePath string, chunks chan []byte) error {
 // tryRangeReadFromContentCache attempts a ranged read from remote ContentCache
 // This enables lazy loading: we fetch only the bytes we need, not the entire layer
 func (s *OCIClipStorage) tryRangeReadFromContentCache(digest string, offset, length int64) ([]byte, error) {
-	// Use just the content hash (hex part) for true content-addressing
-	// This allows cross-image cache sharing (same layer digest = same cache key)
-	cacheKey := s.getContentHash(digest)
+	cacheKey := s.getLayerContentKey(digest)
 
-	// Use GetContent for range reads (offset + length)
-	data, err := s.contentCache.GetContent(cacheKey, offset, length, struct{ RoutingKey string }{})
+	data, err := s.contentCache.GetContent(cacheKey, offset, length, struct{ RoutingKey string }{RoutingKey: cacheKey})
 	if err != nil {
 		return nil, fmt.Errorf("ContentCache range read failed: %w", err)
 	}
 
-	log.Debug().Str("digest", digest).Int64("offset", offset).Int64("length", length).Int("bytes", len(data)).Msg("ContentCache range read success")
+	log.Debug().Str("digest", digest).Str("cache_key", cacheKey).Int64("offset", offset).Int64("length", length).Int("bytes", len(data)).Msg("content cache range success")
 	return data, nil
 }
 
@@ -418,9 +409,7 @@ func (s *OCIClipStorage) tryRangeReadFromContentCache(digest string, offset, len
 // Stores the ENTIRE layer so other nodes can do range reads from it
 // Streams content in chunks to avoid loading the entire layer into memory
 func (s *OCIClipStorage) storeDecompressedInRemoteCache(digest string, diskPath string) {
-	// Use just the content hash (hex part) for true content-addressing
-	// This allows cross-image cache sharing (same layer digest = same cache key)
-	cacheKey := s.getContentHash(digest)
+	cacheKey := s.getLayerContentKey(digest)
 
 	// Get file size for logging
 	fileInfo, err := os.Stat(diskPath)
@@ -441,7 +430,7 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(digest string, diskPath 
 		}
 	}()
 
-	_, err = s.contentCache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{})
+	_, err = s.contentCache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{RoutingKey: cacheKey})
 	if err != nil {
 		log.Warn().Err(err).Str("digest", digest).Msg("failed to cache to remote")
 	} else {
