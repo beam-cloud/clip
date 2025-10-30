@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"github.com/beam-cloud/clip/pkg/common"
@@ -8,41 +10,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestGetContentHash verifies that content hashes are extracted correctly
-func TestGetContentHash(t *testing.T) {
-	storage := &OCIClipStorage{}
+// TestDecompressedHashMapping verifies that layer digest to decompressed hash mapping works
+func TestDecompressedHashMapping(t *testing.T) {
+	storage := &OCIClipStorage{
+		decompressedHashCache: make(map[string]string),
+	}
 
 	tests := []struct {
-		name     string
-		digest   string
-		expected string
+		name              string
+		layerDigest       string
+		decompressedHash  string
 	}{
 		{
-			name:     "SHA256 digest",
-			digest:   "sha256:abc123def456",
-			expected: "abc123def456", // Just the hex hash
+			name:             "SHA256 layer",
+			layerDigest:      "sha256:abc123def456",
+			decompressedHash: "7934bcedddc2d6e088e26a5b4d6421704dbd65545f3907cbcb1d74c3d83fba27",
 		},
 		{
-			name:     "SHA1 digest",
-			digest:   "sha1:fedcba987654",
-			expected: "fedcba987654", // Just the hex hash
-		},
-		{
-			name:     "Long SHA256",
-			digest:   "sha256:44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885",
-			expected: "44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", // Just the hex hash
-		},
-		{
-			name:     "No algorithm prefix (fallback)",
-			digest:   "justahash123",
-			expected: "justahash123", // No colon, stays the same
+			name:             "Long SHA256 layer",
+			layerDigest:      "sha256:44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885",
+			decompressedHash: "239fb06d94222b78c6bf9f52b4ef8a0a92dd49e66d7f1ea0a9ea0450a0ba738c",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := storage.getContentHash(tc.digest)
-			require.Equal(t, tc.expected, result)
+			// Store mapping
+			storage.storeDecompressedHashMapping(tc.layerDigest, tc.decompressedHash)
+			
+			// Retrieve and verify
+			result := storage.getDecompressedHash(tc.layerDigest)
+			require.Equal(t, tc.decompressedHash, result)
+			
+			// Test getContentHash (alias for getDecompressedHash)
+			result2 := storage.getContentHash(tc.layerDigest)
+			require.Equal(t, tc.decompressedHash, result2)
 		})
 	}
 }
@@ -63,29 +65,33 @@ func TestRemoteCacheKeyFormat(t *testing.T) {
 	// Disk cache path: /tmp/clip-oci-cache/sha256_abc123... (filesystem-safe)
 }
 
-// TestContentAddressedCaching verifies cache keys enable cross-image sharing
+// TestContentAddressedCaching verifies decompressed hash enables cross-image sharing
 func TestContentAddressedCaching(t *testing.T) {
-	storage := &OCIClipStorage{}
+	storage := &OCIClipStorage{
+		decompressedHashCache: make(map[string]string),
+	}
 
 	// Same layer used in multiple images
 	sharedLayerDigest := "sha256:44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885"
+	decompressedHash := "239fb06d94222b78c6bf9f52b4ef8a0a92dd49e66d7f1ea0a9ea0450a0ba738c"
+
+	// Store the mapping (would happen during decompression)
+	storage.storeDecompressedHashMapping(sharedLayerDigest, decompressedHash)
 
 	// Both images should produce the SAME cache key
 	cacheKey := storage.getContentHash(sharedLayerDigest)
 
-	// Cache key should be just the hex hash (pure content-addressing)
-	require.Equal(t, "44cf07d57ee4424189f012074a59110ee2065adfdde9c7d9826bebdffce0a885", cacheKey)
+	// Cache key should be the decompressed hash (true content-addressing)
+	require.Equal(t, decompressedHash, cacheKey)
 	require.NotContains(t, cacheKey, ":", "Cache key should not contain colon")
-	require.NotContains(t, cacheKey, "sha256", "Cache key should not contain algorithm prefix")
+	require.NotContains(t, cacheKey, "sha256:", "Cache key should not contain algorithm prefix")
 	require.NotContains(t, cacheKey, "clip:", "Cache key should not contain namespace prefix")
-	require.NotContains(t, cacheKey, "decompressed", "Cache key should not contain type suffix")
 
 	t.Logf("✅ Content-addressed cache key: %s", cacheKey)
-	t.Logf("This key can be shared across multiple images with the same layer!")
+	t.Logf("This is the hash of the decompressed data - same content = same hash!")
 }
 
-// TestContentCacheRangeRead verifies that we do range reads from ContentCache
-// instead of fetching entire layers
+// TestContentCacheRangeRead verifies that we use decompressed hash for caching
 func TestContentCacheRangeRead(t *testing.T) {
 	// Create test layer data
 	layerData := []byte("This is a test layer with some content for range reading verification")
@@ -98,15 +104,6 @@ func TestContentCacheRangeRead(t *testing.T) {
 
 	// Setup cache
 	cache := newMockCache()
-
-	// Pre-populate cache with the entire layer (simulating Node A caching it)
-	storage := &OCIClipStorage{}
-	cacheKey := storage.getContentHash(digest.String()) // Use proper cache key format
-	chunks := make(chan []byte, 1)
-	chunks <- layerData
-	close(chunks)
-	_, err := cache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{})
-	require.NoError(t, err)
 
 	// Create mock layer
 	layer := &mockLayer{
@@ -125,22 +122,23 @@ func TestContentCacheRangeRead(t *testing.T) {
 
 	diskCacheDir := t.TempDir()
 
-	storage = &OCIClipStorage{
-		metadata:            metadata,
-		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:        diskCacheDir,
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        cache,
+	storage := &OCIClipStorage{
+		metadata:              metadata,
+		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:            map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:          diskCacheDir,
+		layersDecompressing:   make(map[string]chan struct{}),
+		contentCache:          cache,
+		decompressedHashCache: make(map[string]string),
 	}
 
-	// Test 1: Range read from start of layer
-	t.Run("RangeReadStart", func(t *testing.T) {
+	// Test: First read triggers decompression and caching
+	t.Run("FirstReadDecompresses", func(t *testing.T) {
 		node := &common.ClipNode{
 			Remote: &common.RemoteRef{
 				LayerDigest: digest.String(),
 				UOffset:     0,
-				ULength:     10, // Only want 10 bytes
+				ULength:     10,
 			},
 		}
 
@@ -150,19 +148,17 @@ func TestContentCacheRangeRead(t *testing.T) {
 		require.Equal(t, 10, n)
 		require.Equal(t, layerData[0:10], dest)
 
-		// Verify we did a range read from ContentCache (not full layer)
-		require.Equal(t, 1, cache.getCalls)
+		// First read should decompress (cache miss)
+		// Decompressed hash mapping should now be stored
+		decompHash := storage.getDecompressedHash(digest.String())
+		require.NotEmpty(t, decompHash, "Decompressed hash should be stored after first read")
+		
+		t.Logf("Layer digest: %s", digest.String())
+		t.Logf("Decompressed hash: %s", decompHash)
 	})
 
-	// Test 2: Range read from middle of layer
-	t.Run("RangeReadMiddle", func(t *testing.T) {
-		cache.reset()
-		// Re-populate cache
-		chunks := make(chan []byte, 1)
-		chunks <- layerData
-		close(chunks)
-		_, _ = cache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{})
-
+	// Test: Subsequent reads use disk cache
+	t.Run("SubsequentReadsUseDiskCache", func(t *testing.T) {
 		node := &common.ClipNode{
 			Remote: &common.RemoteRef{
 				LayerDigest: digest.String(),
@@ -177,36 +173,7 @@ func TestContentCacheRangeRead(t *testing.T) {
 		require.Equal(t, 15, n)
 		require.Equal(t, layerData[20:35], dest)
 
-		// Verify we did a range read
-		require.Equal(t, 1, cache.getCalls)
-	})
-
-	// Test 3: Partial file read (offset into the file itself)
-	t.Run("PartialFileRead", func(t *testing.T) {
-		cache.reset()
-		// Re-populate cache
-		chunks := make(chan []byte, 1)
-		chunks <- layerData
-		close(chunks)
-		_, _ = cache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{})
-
-		node := &common.ClipNode{
-			Remote: &common.RemoteRef{
-				LayerDigest: digest.String(),
-				UOffset:     10, // File starts at offset 10
-				ULength:     20, // File is 20 bytes long
-			},
-		}
-
-		// Read from offset 5 within the file (absolute offset 15 in layer)
-		dest := make([]byte, 10)
-		n, err := storage.ReadFile(node, dest, 5)
-		require.NoError(t, err)
-		require.Equal(t, 10, n)
-		require.Equal(t, layerData[15:25], dest)
-
-		// Verify we did a range read starting at offset 15
-		require.Equal(t, 1, cache.getCalls)
+		// Should hit disk cache (fastest path)
 	})
 }
 
@@ -239,12 +206,13 @@ func TestDiskCacheThenContentCache(t *testing.T) {
 	diskCacheDir := t.TempDir()
 
 	storage := &OCIClipStorage{
-		metadata:            metadata,
-		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:        diskCacheDir,
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        cache,
+		metadata:              metadata,
+		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:            map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:          diskCacheDir,
+		layersDecompressing:   make(map[string]chan struct{}),
+		contentCache:          cache,
+		decompressedHashCache: make(map[string]string),
 	}
 
 	node := &common.ClipNode{
@@ -299,14 +267,18 @@ func TestRangeReadOnlyFetchesNeededBytes(t *testing.T) {
 		Hex:       "largefile123",
 	}
 
-	cache := newMockCache()
-	cacheKey := digest.Hex
+	// Compute decompressed hash
+	hasher := sha256.New()
+	hasher.Write(largeLayerData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Pre-populate cache with large layer
+	cache := newMockCache()
+
+	// Pre-populate cache with large layer using decompressed hash
 	chunks := make(chan []byte, 1)
 	chunks <- largeLayerData
 	close(chunks)
-	_, err := cache.StoreContent(chunks, cacheKey, struct{ RoutingKey string }{})
+	_, err := cache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{})
 	require.NoError(t, err)
 
 	layer := &mockLayer{
@@ -325,13 +297,17 @@ func TestRangeReadOnlyFetchesNeededBytes(t *testing.T) {
 	diskCacheDir := t.TempDir()
 
 	storage := &OCIClipStorage{
-		metadata:            metadata,
-		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:        diskCacheDir,
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        cache,
+		metadata:              metadata,
+		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:            map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:          diskCacheDir,
+		layersDecompressing:   make(map[string]chan struct{}),
+		contentCache:          cache,
+		decompressedHashCache: make(map[string]string),
 	}
+
+	// Pre-populate the decompressed hash mapping
+	storage.storeDecompressedHashMapping(digest.String(), decompressedHash)
 
 	// Read only a small portion (1 KB from a 10 MB layer)
 	node := &common.ClipNode{

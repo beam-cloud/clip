@@ -39,12 +39,13 @@ func TestCrossImageCacheSharing(t *testing.T) {
 	}
 	
 	storage1 := &OCIClipStorage{
-		metadata:            metadata1,
-		storageInfo:         metadata1.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{sharedDigest.String(): image1Layer},
-		diskCacheDir:        diskCacheDir,
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        nil, // No remote cache for this test
+		metadata:              metadata1,
+		storageInfo:           metadata1.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:            map[string]v1.Layer{sharedDigest.String(): image1Layer},
+		diskCacheDir:          diskCacheDir,
+		layersDecompressing:   make(map[string]chan struct{}),
+		contentCache:          nil, // No remote cache for this test
+		decompressedHashCache: make(map[string]string),
 	}
 	
 	node1 := &common.ClipNode{
@@ -84,12 +85,13 @@ func TestCrossImageCacheSharing(t *testing.T) {
 	}
 	
 	storage2 := &OCIClipStorage{
-		metadata:            metadata2,
-		storageInfo:         metadata2.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{sharedDigest.String(): image2Layer},
-		diskCacheDir:        diskCacheDir, // SAME disk cache directory!
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        nil,
+		metadata:              metadata2,
+		storageInfo:           metadata2.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:            map[string]v1.Layer{sharedDigest.String(): image2Layer},
+		diskCacheDir:          diskCacheDir, // SAME disk cache directory!
+		layersDecompressing:   make(map[string]chan struct{}),
+		contentCache:          nil,
+		decompressedHashCache: make(map[string]string),
 	}
 	
 	node2 := &common.ClipNode{
@@ -140,7 +142,8 @@ func TestCacheKeyFormat(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			storage := &OCIClipStorage{
-				diskCacheDir: diskCacheDir,
+				diskCacheDir:          diskCacheDir,
+				decompressedHashCache: make(map[string]string),
 			}
 			
 			path := storage.getDiskCachePath(tc.digest)
