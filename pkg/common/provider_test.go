@@ -605,7 +605,7 @@ func TestCreateProviderFromCredentials(t *testing.T) {
 		assert.Equal(t, "testpass", authConfig.Password)
 	})
 
-	t.Run("token auth", func(t *testing.T) {
+	t.Run("NGC token auth", func(t *testing.T) {
 		creds := map[string]string{
 			"NGC_API_KEY": "api-key-value",
 		}
@@ -614,8 +614,63 @@ func TestCreateProviderFromCredentials(t *testing.T) {
 		
 		authConfig, err := provider.GetCredentials(ctx, "nvcr.io", "")
 		require.NoError(t, err)
-		assert.Equal(t, "oauth2accesstoken", authConfig.Username)
+		assert.Equal(t, "$oauthtoken", authConfig.Username)
 		assert.Equal(t, "api-key-value", authConfig.Password)
+	})
+
+	t.Run("GHCR token auth with username", func(t *testing.T) {
+		creds := map[string]string{
+			"GITHUB_USERNAME": "testuser",
+			"GITHUB_TOKEN":    "ghp_token123",
+		}
+		provider := CreateProviderFromCredentials(ctx, "ghcr.io", CredTypeToken, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
+		require.NoError(t, err)
+		assert.Equal(t, "testuser", authConfig.Username)
+		assert.Equal(t, "ghp_token123", authConfig.Password)
+	})
+
+	t.Run("GHCR token auth without username", func(t *testing.T) {
+		creds := map[string]string{
+			"GITHUB_TOKEN": "ghp_token123",
+		}
+		provider := CreateProviderFromCredentials(ctx, "ghcr.io", CredTypeToken, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
+		require.NoError(t, err)
+		// Should use token as username when no username provided
+		assert.Equal(t, "ghp_token123", authConfig.Username)
+		assert.Equal(t, "ghp_token123", authConfig.Password)
+	})
+
+	t.Run("Docker Hub with username/password", func(t *testing.T) {
+		creds := map[string]string{
+			"DOCKERHUB_USERNAME": "dockeruser",
+			"DOCKERHUB_PASSWORD": "dockerpass",
+		}
+		provider := CreateProviderFromCredentials(ctx, "docker.io", CredTypeToken, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "docker.io", "")
+		require.NoError(t, err)
+		assert.Equal(t, "dockeruser", authConfig.Username)
+		assert.Equal(t, "dockerpass", authConfig.Password)
+	})
+
+	t.Run("GCP with access token", func(t *testing.T) {
+		creds := map[string]string{
+			"GCP_ACCESS_TOKEN": "ya29.token123",
+		}
+		provider := CreateProviderFromCredentials(ctx, "gcr.io", CredTypeGCP, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "gcr.io", "")
+		require.NoError(t, err)
+		assert.Equal(t, "oauth2accesstoken", authConfig.Username)
+		assert.Equal(t, "ya29.token123", authConfig.Password)
 	})
 
 	t.Run("no credentials", func(t *testing.T) {
@@ -625,6 +680,23 @@ func TestCreateProviderFromCredentials(t *testing.T) {
 		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
 		assert.Equal(t, ErrNoCredentials, err)
 		assert.Nil(t, authConfig)
+	})
+
+	t.Run("registry-specific username keys", func(t *testing.T) {
+		creds := map[string]string{
+			"REGISTRY_USERNAME": "registry-user",
+			"DOCKER_USERNAME":   "docker-user",
+			"USERNAME":          "generic-user",
+			"PASSWORD":          "pass123",
+		}
+		provider := CreateProviderFromCredentials(ctx, "example.com", CredTypeBasic, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "example.com", "")
+		require.NoError(t, err)
+		// Should prefer REGISTRY_USERNAME over others
+		assert.Equal(t, "registry-user", authConfig.Username)
+		assert.Equal(t, "pass123", authConfig.Password)
 	})
 }
 
@@ -653,7 +725,8 @@ func TestCredentialsToProvider(t *testing.T) {
 		
 		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
 		require.NoError(t, err)
-		assert.Equal(t, "oauth2accesstoken", authConfig.Username)
+		// For GHCR without explicit username, token is used as both username and password
+		assert.Equal(t, "ghp_token", authConfig.Username)
 		assert.Equal(t, "ghp_token", authConfig.Password)
 	})
 

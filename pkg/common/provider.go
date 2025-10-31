@@ -858,6 +858,7 @@ func CreateProviderFromCredentials(ctx context.Context, registry string, credTyp
 	}
 
 	providerName := fmt.Sprintf("creds-%s", registry)
+	registryLower := strings.ToLower(registry)
 
 	switch credType {
 	case CredTypeBasic:
@@ -865,14 +866,33 @@ func CreateProviderFromCredentials(ctx context.Context, registry string, credTyp
 		username := ""
 		password := ""
 
-		// Try different username keys
-		for key, value := range creds {
-			keyUpper := strings.ToUpper(key)
-			if strings.Contains(keyUpper, "USERNAME") {
-				username = value
+		// Try different username keys (in order of specificity)
+		usernameKeys := []string{"REGISTRY_USERNAME", "DOCKER_USERNAME", "USERNAME"}
+		passwordKeys := []string{"REGISTRY_PASSWORD", "DOCKER_PASSWORD", "PASSWORD"}
+
+		for _, key := range usernameKeys {
+			if val, ok := creds[key]; ok && val != "" {
+				username = val
+				break
 			}
-			if strings.Contains(keyUpper, "PASSWORD") {
-				password = value
+		}
+		for _, key := range passwordKeys {
+			if val, ok := creds[key]; ok && val != "" {
+				password = val
+				break
+			}
+		}
+
+		// Fallback: scan for any key containing USERNAME/PASSWORD
+		if username == "" || password == "" {
+			for key, value := range creds {
+				keyUpper := strings.ToUpper(key)
+				if username == "" && strings.Contains(keyUpper, "USERNAME") {
+					username = value
+				}
+				if password == "" && strings.Contains(keyUpper, "PASSWORD") {
+					password = value
+				}
 			}
 		}
 
@@ -909,8 +929,19 @@ func CreateProviderFromCredentials(ctx context.Context, registry string, credTyp
 		}
 		return NewPublicOnlyProvider()
 
-	case CredTypeGCP, CredTypeAzure:
-		// For cloud providers that require env vars, create a callback provider
+	case CredTypeGCP:
+		// For GCP, check if we have an access token (simpler path)
+		if token, ok := creds["GCP_ACCESS_TOKEN"]; ok && token != "" {
+			// GCP uses oauth2accesstoken as username
+			return NewStaticProviderWithName(providerName, map[string]*authn.AuthConfig{
+				registry: {
+					Username: "oauth2accesstoken",
+					Password: token,
+				},
+			})
+		}
+
+		// Otherwise use keychain provider with env vars
 		callback := func(ctx context.Context, reg string, scope string) (*authn.AuthConfig, error) {
 			if reg != registry {
 				return nil, ErrNoCredentials
@@ -930,7 +961,35 @@ func CreateProviderFromCredentials(ctx context.Context, registry string, credTyp
 				}
 			}()
 
-			// Use keychain provider which handles GCP/Azure
+			// Use keychain provider which handles GCR
+			keychain := NewKeychainProvider()
+			return keychain.GetCredentials(ctx, reg, scope)
+		}
+
+		return NewCallbackProviderWithName(providerName, callback)
+
+	case CredTypeAzure:
+		// For Azure, use keychain provider with env vars
+		callback := func(ctx context.Context, reg string, scope string) (*authn.AuthConfig, error) {
+			if reg != registry {
+				return nil, ErrNoCredentials
+			}
+
+			// Set environment variables temporarily
+			oldEnv := make(map[string]string)
+			for key, value := range creds {
+				oldEnv[key] = os.Getenv(key)
+				os.Setenv(key, value)
+			}
+
+			// Restore environment after getting credentials
+			defer func() {
+				for key, oldValue := range oldEnv {
+					os.Setenv(key, oldValue)
+				}
+			}()
+
+			// Use keychain provider which handles ACR
 			keychain := NewKeychainProvider()
 			return keychain.GetCredentials(ctx, reg, scope)
 		}
@@ -938,18 +997,125 @@ func CreateProviderFromCredentials(ctx context.Context, registry string, credTyp
 		return NewCallbackProviderWithName(providerName, callback)
 
 	case CredTypeToken:
-		// For token-based auth, use token as password with oauth2accesstoken username
-		tokenKeys := []string{"NGC_API_KEY", "GITHUB_TOKEN", "DOCKERHUB_TOKEN"}
-		for _, key := range tokenKeys {
-			if token, ok := creds[key]; ok && token != "" {
+		// Handle registry-specific token formats
+		
+		// NGC (nvcr.io) - uses $oauthtoken as username
+		if strings.Contains(registryLower, "nvcr.io") {
+			if apiKey, ok := creds["NGC_API_KEY"]; ok && apiKey != "" {
+				log.Debug().
+					Str("registry", registry).
+					Msg("creating NGC token provider")
 				return NewStaticProviderWithName(providerName, map[string]*authn.AuthConfig{
 					registry: {
-						Username: "oauth2accesstoken",
+						Username: "$oauthtoken",
+						Password: apiKey,
+					},
+				})
+			}
+		}
+
+		// GHCR (ghcr.io) - uses GitHub username and token
+		if strings.Contains(registryLower, "ghcr.io") {
+			githubUsername := creds["GITHUB_USERNAME"]
+			githubToken := creds["GITHUB_TOKEN"]
+			
+			if githubToken != "" {
+				// If no username provided, try common alternatives or use token as username
+				if githubUsername == "" {
+					githubUsername = creds["USERNAME"]
+				}
+				if githubUsername == "" {
+					// Some setups use the token itself as username
+					githubUsername = githubToken
+				}
+				
+				log.Debug().
+					Str("registry", registry).
+					Bool("has_username", githubUsername != "").
+					Msg("creating GHCR token provider")
+				
+				return NewStaticProviderWithName(providerName, map[string]*authn.AuthConfig{
+					registry: {
+						Username: githubUsername,
+						Password: githubToken,
+					},
+				})
+			}
+		}
+
+		// Docker Hub - uses DOCKERHUB_USERNAME and DOCKERHUB_PASSWORD or DOCKERHUB_TOKEN
+		if strings.Contains(registryLower, "docker.io") || registry == "index.docker.io" || registry == "registry-1.docker.io" {
+			dockerUsername := creds["DOCKERHUB_USERNAME"]
+			dockerPassword := creds["DOCKERHUB_PASSWORD"]
+			dockerToken := creds["DOCKERHUB_TOKEN"]
+			
+			// Prefer explicit Docker Hub credentials
+			if dockerUsername != "" && dockerPassword != "" {
+				log.Debug().
+					Str("registry", registry).
+					Msg("creating Docker Hub provider with username/password")
+				return NewStaticProviderWithName(providerName, map[string]*authn.AuthConfig{
+					registry: {
+						Username: dockerUsername,
+						Password: dockerPassword,
+					},
+				})
+			}
+			
+			// Use token if provided
+			if dockerToken != "" {
+				if dockerUsername == "" {
+					dockerUsername = creds["USERNAME"]
+				}
+				log.Debug().
+					Str("registry", registry).
+					Msg("creating Docker Hub provider with token")
+				return NewStaticProviderWithName(providerName, map[string]*authn.AuthConfig{
+					registry: {
+						Username: dockerUsername,
+						Password: dockerToken,
+					},
+				})
+			}
+		}
+
+		// Generic token handling - try each token type
+		tokenConfigs := []struct {
+			key      string
+			username string
+		}{
+			{"NGC_API_KEY", "$oauthtoken"},
+			{"GITHUB_TOKEN", "oauth2accesstoken"},
+			{"DOCKERHUB_TOKEN", ""},
+			{"GCP_ACCESS_TOKEN", "oauth2accesstoken"},
+		}
+
+		for _, tc := range tokenConfigs {
+			if token, ok := creds[tc.key]; ok && token != "" {
+				username := tc.username
+				if username == "" {
+					// For tokens without a specific username, check for explicit username
+					username = creds["USERNAME"]
+					if username == "" {
+						username = "oauth2accesstoken" // default
+					}
+				}
+				
+				log.Debug().
+					Str("registry", registry).
+					Str("token_key", tc.key).
+					Str("username", username).
+					Msg("creating token provider")
+				
+				return NewStaticProviderWithName(providerName, map[string]*authn.AuthConfig{
+					registry: {
+						Username: username,
 						Password: token,
 					},
 				})
 			}
 		}
+		
 		return NewPublicOnlyProvider()
 
 	default:
