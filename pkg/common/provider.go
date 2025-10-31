@@ -577,6 +577,11 @@ func NewECRProvider(config ECRProviderConfig) *ECRProvider {
 func (p *ECRProvider) GetCredentials(ctx context.Context, registry string, scope string) (*authn.AuthConfig, error) {
 	// Check if this registry matches our pattern
 	if !matchRegistryPattern(p.registryPattern, registry) {
+		log.Debug().
+			Str("registry", registry).
+			Str("pattern", p.registryPattern).
+			Str("scope", scope).
+			Msg("ECR provider: registry does not match pattern")
 		return nil, ErrNoCredentials
 	}
 
@@ -593,10 +598,11 @@ func (p *ECRProvider) GetCredentials(ctx context.Context, registry string, scope
 	p.mu.RUnlock()
 
 	// Fetch new token from ECR
-	log.Debug().
+	log.Info().
 		Str("registry", registry).
 		Str("region", p.awsRegion).
 		Str("provider", "ecr").
+		Str("pattern", p.registryPattern).
 		Msg("fetching new ECR authorization token")
 
 	// Configure AWS client
@@ -1125,6 +1131,8 @@ func CreateProviderFromCredentials(ctx context.Context, registry string, credTyp
 
 // ParseCredentialsFromJSON parses credentials from JSON string or username:password format
 // Returns structured credentials as a map
+// Handles nested JSON structures where credentials may be encoded as JSON strings
+// Recursively extracts credentials from nested "credentials" objects
 func ParseCredentialsFromJSON(credStr string) (map[string]string, error) {
 	if credStr == "" {
 		return nil, nil
@@ -1133,7 +1141,28 @@ func ParseCredentialsFromJSON(credStr string) (map[string]string, error) {
 	// Try JSON format first
 	var credMap map[string]string
 	if err := json.Unmarshal([]byte(credStr), &credMap); err == nil {
-		return credMap, nil
+		// Check if this is a nested structure where values are JSON strings
+		// Beta9 sends complex nested structures like:
+		// {"PASSWORD": "{\"credentials\":{\"AWS_ACCESS_KEY_ID\":\"...\"}}", ...}
+		result := make(map[string]string)
+		
+		// First, copy all existing keys
+		for key, value := range credMap {
+			result[key] = value
+		}
+		
+		// Then try to extract nested JSON
+		for _, value := range credMap {
+			extracted := extractNestedCredentials(value)
+			for k, v := range extracted {
+				// Don't overwrite existing keys
+				if _, exists := result[k]; !exists {
+					result[k] = v
+				}
+			}
+		}
+		
+		return result, nil
 	}
 
 	// Try legacy username:password format
@@ -1146,6 +1175,55 @@ func ParseCredentialsFromJSON(credStr string) (map[string]string, error) {
 	}
 
 	return nil, fmt.Errorf("unable to parse credentials: invalid format")
+}
+
+// extractNestedCredentials recursively extracts credentials from nested JSON strings
+func extractNestedCredentials(jsonStr string) map[string]string {
+	result := make(map[string]string)
+	
+	// Try to parse as a map with string values
+	var strMap map[string]string
+	if err := json.Unmarshal([]byte(jsonStr), &strMap); err == nil {
+		for k, v := range strMap {
+			result[k] = v
+			// Recursively extract from nested values
+			nested := extractNestedCredentials(v)
+			for nk, nv := range nested {
+				if _, exists := result[nk]; !exists {
+					result[nk] = nv
+				}
+			}
+		}
+		return result
+	}
+	
+	// Try to parse as a map with interface{} values (for nested objects)
+	var interfaceMap map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &interfaceMap); err == nil {
+		for k, v := range interfaceMap {
+			switch val := v.(type) {
+			case string:
+				result[k] = val
+				// Try to extract from this string
+				nested := extractNestedCredentials(val)
+				for nk, nv := range nested {
+					if _, exists := result[nk]; !exists {
+						result[nk] = nv
+					}
+				}
+			case map[string]interface{}:
+				// Handle nested maps (like "credentials" object)
+				for nk, nv := range val {
+					if strVal, ok := nv.(string); ok {
+						result[nk] = strVal
+					}
+				}
+			}
+		}
+		return result
+	}
+	
+	return result
 }
 
 // CredentialsToProvider converts a credential map and registry to a CLIP-compatible provider

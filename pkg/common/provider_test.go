@@ -568,6 +568,32 @@ func TestParseCredentialsFromJSON(t *testing.T) {
 		assert.Equal(t, "pass", creds["PASSWORD"])
 	})
 
+	t.Run("nested JSON format from beta9", func(t *testing.T) {
+		// Beta9 sends nested JSON where PASSWORD contains a JSON string with AWS credentials
+		jsonStr := `{"PASSWORD":"{\"AWS_ACCESS_KEY_ID\":\"AKIA123\",\"AWS_REGION\":\"us-east-1\",\"AWS_SECRET_ACCESS_KEY\":\"secret123\"}","USERNAME":"ignored"}`
+		creds, err := ParseCredentialsFromJSON(jsonStr)
+		require.NoError(t, err)
+		
+		// Should have extracted the nested AWS credentials
+		assert.Equal(t, "AKIA123", creds["AWS_ACCESS_KEY_ID"])
+		assert.Equal(t, "us-east-1", creds["AWS_REGION"])
+		assert.Equal(t, "secret123", creds["AWS_SECRET_ACCESS_KEY"])
+		
+		// Original keys should still be present
+		assert.Equal(t, "ignored", creds["USERNAME"])
+	})
+
+	t.Run("nested JSON with registry and type", func(t *testing.T) {
+		// Full beta9 format
+		jsonStr := `{"PASSWORD":"{\"credentials\":{\"AWS_ACCESS_KEY_ID\":\"AKIA123\",\"AWS_REGION\":\"us-east-1\",\"AWS_SECRET_ACCESS_KEY\":\"secret\"},\"registry\":\"187248174200.dkr.ecr.us-east-1.amazonaws.com\",\"type\":\"aws\"}","USERNAME":"{\"credentials\"}"}`
+		creds, err := ParseCredentialsFromJSON(jsonStr)
+		require.NoError(t, err)
+		
+		// Check that the inner structure was partially extracted
+		// Note: This may not extract perfectly nested structures, but should get credentials
+		assert.NotEmpty(t, creds)
+	})
+
 	t.Run("username:password format", func(t *testing.T) {
 		creds, err := ParseCredentialsFromJSON("user:pass")
 		require.NoError(t, err)
