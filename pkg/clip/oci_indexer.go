@@ -104,10 +104,9 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 			Str("registry", registryURL).
 			Str("provider", credProvider.Name()).
 			Msg("Using credentials from provider")
-		remoteOpts = append(remoteOpts, remote.WithAuth(&authn.Basic{
-			Username: authConfig.Username,
-			Password: authConfig.Password,
-		}))
+		// Convert AuthConfig to proper authenticator (handles all auth types: username/password, tokens, etc.)
+		auth := authn.FromConfig(*authConfig)
+		remoteOpts = append(remoteOpts, remote.WithAuth(auth))
 	} else {
 		// Fall back to default keychain for anonymous or keychain-based auth
 		log.Debug().
