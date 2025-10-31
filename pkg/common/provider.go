@@ -12,6 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/rs/zerolog/log"
@@ -64,31 +68,102 @@ func (p *PublicOnlyProvider) Name() string {
 }
 
 // StaticProvider returns pre-configured credentials for specific registries
+// Supports both exact registry matching and wildcard patterns
 type StaticProvider struct {
 	credentials map[string]*authn.AuthConfig
+	name        string // optional custom name for debugging
 }
 
 // NewStaticProvider creates a provider with a fixed set of credentials
 // The map key should be the registry hostname (e.g., "ghcr.io")
+// Supports patterns like "*.dkr.ecr.*.amazonaws.com" for wildcard matching
 func NewStaticProvider(credentials map[string]*authn.AuthConfig) *StaticProvider {
 	return &StaticProvider{
 		credentials: credentials,
+		name:        "static",
+	}
+}
+
+// NewStaticProviderWithName creates a named static provider
+func NewStaticProviderWithName(name string, credentials map[string]*authn.AuthConfig) *StaticProvider {
+	return &StaticProvider{
+		credentials: credentials,
+		name:        name,
 	}
 }
 
 func (p *StaticProvider) GetCredentials(ctx context.Context, registry string, scope string) (*authn.AuthConfig, error) {
+	// Try exact match first
 	if creds, ok := p.credentials[registry]; ok {
 		log.Debug().
 			Str("registry", registry).
-			Str("provider", "static").
-			Msg("found credentials in static provider")
+			Str("provider", p.name).
+			Msg("found credentials in static provider (exact match)")
 		return creds, nil
 	}
+
+	// Try pattern matching (e.g., "*.dkr.ecr.*.amazonaws.com")
+	for pattern, creds := range p.credentials {
+		if matchRegistryPattern(pattern, registry) {
+			log.Debug().
+				Str("registry", registry).
+				Str("pattern", pattern).
+				Str("provider", p.name).
+				Msg("found credentials in static provider (pattern match)")
+			return creds, nil
+		}
+	}
+
 	return nil, ErrNoCredentials
 }
 
 func (p *StaticProvider) Name() string {
-	return "static"
+	return p.name
+}
+
+// matchRegistryPattern checks if a registry matches a pattern with wildcards
+// Supports * as wildcard (e.g., "*.dkr.ecr.*.amazonaws.com" matches "123456789012.dkr.ecr.us-east-1.amazonaws.com")
+func matchRegistryPattern(pattern, registry string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if !strings.Contains(pattern, "*") {
+		return pattern == registry
+	}
+
+	// Simple wildcard matching
+	patternParts := strings.Split(pattern, "*")
+	if len(patternParts) == 0 {
+		return false
+	}
+
+	// Check prefix
+	if patternParts[0] != "" && !strings.HasPrefix(registry, patternParts[0]) {
+		return false
+	}
+
+	// Check suffix
+	if patternParts[len(patternParts)-1] != "" && !strings.HasSuffix(registry, patternParts[len(patternParts)-1]) {
+		return false
+	}
+
+	// Check middle parts
+	currentPos := 0
+	for i, part := range patternParts {
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(registry[currentPos:], part)
+		if idx == -1 {
+			return false
+		}
+		if i == 0 && idx != 0 {
+			return false
+		}
+		currentPos += idx + len(part)
+	}
+
+	return true
 }
 
 // DockerConfigProvider reads credentials from Docker's config.json
@@ -454,6 +529,203 @@ func (p *CachingProvider) Name() string {
 	return fmt.Sprintf("caching[%s]", p.base.Name())
 }
 
+// ECRProvider provides AWS ECR credentials by calling the ECR GetAuthorizationToken API
+// This provider handles AWS ECR registries and fetches temporary tokens dynamically
+type ECRProvider struct {
+	awsAccessKey    string
+	awsSecretKey    string
+	awsSessionToken string
+	awsRegion       string
+	registryPattern string // e.g., "*.dkr.ecr.*.amazonaws.com"
+	cache           *cachedCredential
+	cacheTTL        time.Duration
+	mu              sync.RWMutex
+}
+
+// ECRProviderConfig configures an ECR provider
+type ECRProviderConfig struct {
+	AWSAccessKey    string
+	AWSSecretKey    string
+	AWSSessionToken string        // optional
+	AWSRegion       string
+	RegistryPattern string        // optional, defaults to "*.dkr.ecr.*.amazonaws.com"
+	CacheTTL        time.Duration // optional, defaults to 11 hours (ECR tokens valid for 12h)
+}
+
+// NewECRProvider creates a provider that fetches ECR authorization tokens
+func NewECRProvider(config ECRProviderConfig) *ECRProvider {
+	pattern := config.RegistryPattern
+	if pattern == "" {
+		pattern = "*.dkr.ecr.*.amazonaws.com"
+	}
+
+	ttl := config.CacheTTL
+	if ttl == 0 {
+		ttl = 11 * time.Hour // ECR tokens valid for 12h, refresh at 11h
+	}
+
+	return &ECRProvider{
+		awsAccessKey:    config.AWSAccessKey,
+		awsSecretKey:    config.AWSSecretKey,
+		awsSessionToken: config.AWSSessionToken,
+		awsRegion:       config.AWSRegion,
+		registryPattern: pattern,
+		cacheTTL:        ttl,
+	}
+}
+
+func (p *ECRProvider) GetCredentials(ctx context.Context, registry string, scope string) (*authn.AuthConfig, error) {
+	// Check if this registry matches our pattern
+	if !matchRegistryPattern(p.registryPattern, registry) {
+		return nil, ErrNoCredentials
+	}
+
+	// Check cache
+	p.mu.RLock()
+	if p.cache != nil && time.Now().Before(p.cache.expiresAt) {
+		p.mu.RUnlock()
+		log.Debug().
+			Str("registry", registry).
+			Str("provider", "ecr").
+			Msg("using cached ECR credentials")
+		return p.cache.config, nil
+	}
+	p.mu.RUnlock()
+
+	// Fetch new token from ECR
+	log.Debug().
+		Str("registry", registry).
+		Str("region", p.awsRegion).
+		Str("provider", "ecr").
+		Msg("fetching new ECR authorization token")
+
+	// Configure AWS client
+	credProvider := credentials.NewStaticCredentialsProvider(
+		p.awsAccessKey,
+		p.awsSecretKey,
+		p.awsSessionToken,
+	)
+
+	cfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(p.awsRegion),
+		awsconfig.WithCredentialsProvider(credProvider),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	// Get ECR authorization token
+	client := ecr.NewFromConfig(cfg)
+	output, err := client.GetAuthorizationToken(ctx, &ecr.GetAuthorizationTokenInput{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ECR token: %w", err)
+	}
+
+	if len(output.AuthorizationData) == 0 || output.AuthorizationData[0].AuthorizationToken == nil {
+		return nil, fmt.Errorf("no authorization data returned from ECR")
+	}
+
+	// Decode base64 token (format: "AWS:base64token")
+	base64Token := aws.ToString(output.AuthorizationData[0].AuthorizationToken)
+	decodedToken, err := base64.StdEncoding.DecodeString(base64Token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode ECR token: %w", err)
+	}
+
+	// Parse username:password
+	parts := strings.SplitN(string(decodedToken), ":", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid ECR token format")
+	}
+
+	authConfig := &authn.AuthConfig{
+		Username: parts[0],
+		Password: parts[1],
+	}
+
+	// Cache the result
+	p.mu.Lock()
+	p.cache = &cachedCredential{
+		config:    authConfig,
+		expiresAt: time.Now().Add(p.cacheTTL),
+	}
+	p.mu.Unlock()
+
+	log.Info().
+		Str("registry", registry).
+		Str("region", p.awsRegion).
+		Str("provider", "ecr").
+		Dur("ttl", p.cacheTTL).
+		Msg("fetched and cached ECR authorization token")
+
+	return authConfig, nil
+}
+
+func (p *ECRProvider) Name() string {
+	return fmt.Sprintf("ecr[%s]", p.awsRegion)
+}
+
+// AWSCredentialProvider provides credentials for any AWS-based registry by setting env vars
+// and using the keychain provider (which handles ECR, etc.)
+type AWSCredentialProvider struct {
+	awsAccessKey    string
+	awsSecretKey    string
+	awsSessionToken string
+	awsRegion       string
+	registryPattern string
+	keychain        *KeychainProvider
+}
+
+// NewAWSCredentialProvider creates a provider that uses AWS credentials with the keychain
+func NewAWSCredentialProvider(accessKey, secretKey, sessionToken, region, registryPattern string) *AWSCredentialProvider {
+	if registryPattern == "" {
+		registryPattern = "*.amazonaws.com"
+	}
+	return &AWSCredentialProvider{
+		awsAccessKey:    accessKey,
+		awsSecretKey:    secretKey,
+		awsSessionToken: sessionToken,
+		awsRegion:       region,
+		registryPattern: registryPattern,
+		keychain:        NewKeychainProvider(),
+	}
+}
+
+func (p *AWSCredentialProvider) GetCredentials(ctx context.Context, registry string, scope string) (*authn.AuthConfig, error) {
+	if !matchRegistryPattern(p.registryPattern, registry) {
+		return nil, ErrNoCredentials
+	}
+
+	// Set AWS environment variables for keychain to use
+	oldAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	oldSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	oldSessionToken := os.Getenv("AWS_SESSION_TOKEN")
+	oldRegion := os.Getenv("AWS_REGION")
+
+	os.Setenv("AWS_ACCESS_KEY_ID", p.awsAccessKey)
+	os.Setenv("AWS_SECRET_ACCESS_KEY", p.awsSecretKey)
+	if p.awsSessionToken != "" {
+		os.Setenv("AWS_SESSION_TOKEN", p.awsSessionToken)
+	}
+	if p.awsRegion != "" {
+		os.Setenv("AWS_REGION", p.awsRegion)
+	}
+
+	// Restore old values after getting credentials
+	defer func() {
+		os.Setenv("AWS_ACCESS_KEY_ID", oldAccessKey)
+		os.Setenv("AWS_SECRET_ACCESS_KEY", oldSecretKey)
+		os.Setenv("AWS_SESSION_TOKEN", oldSessionToken)
+		os.Setenv("AWS_REGION", oldRegion)
+	}()
+
+	return p.keychain.GetCredentials(ctx, registry, scope)
+}
+
+func (p *AWSCredentialProvider) Name() string {
+	return "aws-credentials"
+}
+
 // DefaultProvider returns a sensible default provider chain for most use cases
 // Order: Env -> Docker Config -> Keychain
 func DefaultProvider() RegistryCredentialProvider {
@@ -491,4 +763,239 @@ func ParseBase64AuthConfig(encoded string, registry string) (*StaticProvider, er
 	return NewStaticProvider(map[string]*authn.AuthConfig{
 		registry: &config,
 	}), nil
+}
+
+// CredentialType represents different types of registry credentials
+type CredentialType string
+
+const (
+	CredTypePublic  CredentialType = "public"
+	CredTypeBasic   CredentialType = "basic"
+	CredTypeAWS     CredentialType = "aws"
+	CredTypeGCP     CredentialType = "gcp"
+	CredTypeAzure   CredentialType = "azure"
+	CredTypeToken   CredentialType = "token"
+	CredTypeUnknown CredentialType = "unknown"
+)
+
+// DetectCredentialType determines the type of credentials based on the registry and credential keys
+func DetectCredentialType(registry string, creds map[string]string) CredentialType {
+	if len(creds) == 0 {
+		return CredTypePublic
+	}
+
+	registry = strings.ToLower(registry)
+
+	// Check for AWS credentials
+	if _, hasAwsKey := creds["AWS_ACCESS_KEY_ID"]; hasAwsKey {
+		if _, hasAwsSecret := creds["AWS_SECRET_ACCESS_KEY"]; hasAwsSecret {
+			return CredTypeAWS
+		}
+	}
+
+	// Check for GCP credentials
+	if _, hasGcp := creds["GOOGLE_APPLICATION_CREDENTIALS"]; hasGcp {
+		return CredTypeGCP
+	}
+	if _, hasGcpProject := creds["GCP_PROJECT_ID"]; hasGcpProject {
+		return CredTypeGCP
+	}
+	if _, hasGcpToken := creds["GCP_ACCESS_TOKEN"]; hasGcpToken {
+		return CredTypeGCP
+	}
+
+	// Check for Azure credentials
+	if _, hasAzureClientId := creds["AZURE_CLIENT_ID"]; hasAzureClientId {
+		if _, hasAzureSecret := creds["AZURE_CLIENT_SECRET"]; hasAzureSecret {
+			return CredTypeAzure
+		}
+	}
+
+	// Check for token-based auth (before basic auth)
+	tokenKeys := []string{"NGC_API_KEY", "GITHUB_TOKEN", "DOCKERHUB_TOKEN"}
+	for _, key := range tokenKeys {
+		if _, hasToken := creds[key]; hasToken {
+			return CredTypeToken
+		}
+	}
+
+	// Check for basic auth (username/password)
+	hasUsername := false
+	hasPassword := false
+	for key := range creds {
+		keyUpper := strings.ToUpper(key)
+		if strings.Contains(keyUpper, "USERNAME") {
+			hasUsername = true
+		}
+		if strings.Contains(keyUpper, "PASSWORD") {
+			hasPassword = true
+		}
+	}
+	if hasUsername && hasPassword {
+		return CredTypeBasic
+	}
+
+	// Detect based on registry
+	if strings.Contains(registry, "ecr") || strings.Contains(registry, "amazonaws.com") {
+		return CredTypeAWS
+	}
+	if strings.Contains(registry, "gcr.io") || strings.Contains(registry, "pkg.dev") {
+		return CredTypeGCP
+	}
+	if strings.Contains(registry, "azurecr.io") {
+		return CredTypeAzure
+	}
+
+	return CredTypeUnknown
+}
+
+// CreateProviderFromCredentials creates a CLIP-compatible credential provider from a credential map
+// This is the main function that beta9 should use to create providers for CLIP
+// Returns common.RegistryCredentialProvider
+func CreateProviderFromCredentials(ctx context.Context, registry string, credType CredentialType, creds map[string]string) RegistryCredentialProvider {
+	if len(creds) == 0 {
+		return NewPublicOnlyProvider()
+	}
+
+	providerName := fmt.Sprintf("creds-%s", registry)
+
+	switch credType {
+	case CredTypeBasic:
+		// Basic auth with username/password
+		username := ""
+		password := ""
+
+		// Try different username keys
+		for key, value := range creds {
+			keyUpper := strings.ToUpper(key)
+			if strings.Contains(keyUpper, "USERNAME") {
+				username = value
+			}
+			if strings.Contains(keyUpper, "PASSWORD") {
+				password = value
+			}
+		}
+
+		if username != "" && password != "" {
+			return NewStaticProviderWithName(providerName, map[string]*authn.AuthConfig{
+				registry: {
+					Username: username,
+					Password: password,
+				},
+			})
+		}
+		return NewPublicOnlyProvider()
+
+	case CredTypeAWS:
+		// For AWS ECR, use the ECR provider which calls the API
+		accessKey := creds["AWS_ACCESS_KEY_ID"]
+		secretKey := creds["AWS_SECRET_ACCESS_KEY"]
+		sessionToken := creds["AWS_SESSION_TOKEN"]
+		region := creds["AWS_REGION"]
+
+		if accessKey != "" && secretKey != "" && region != "" {
+			log.Info().
+				Str("registry", registry).
+				Str("region", region).
+				Msg("creating ECR provider with AWS credentials")
+
+			return NewECRProvider(ECRProviderConfig{
+				AWSAccessKey:    accessKey,
+				AWSSecretKey:    secretKey,
+				AWSSessionToken: sessionToken,
+				AWSRegion:       region,
+				RegistryPattern: registry, // Match specific registry
+			})
+		}
+		return NewPublicOnlyProvider()
+
+	case CredTypeGCP, CredTypeAzure:
+		// For cloud providers that require env vars, create a callback provider
+		callback := func(ctx context.Context, reg string, scope string) (*authn.AuthConfig, error) {
+			if reg != registry {
+				return nil, ErrNoCredentials
+			}
+
+			// Set environment variables temporarily
+			oldEnv := make(map[string]string)
+			for key, value := range creds {
+				oldEnv[key] = os.Getenv(key)
+				os.Setenv(key, value)
+			}
+
+			// Restore environment after getting credentials
+			defer func() {
+				for key, oldValue := range oldEnv {
+					os.Setenv(key, oldValue)
+				}
+			}()
+
+			// Use keychain provider which handles GCP/Azure
+			keychain := NewKeychainProvider()
+			return keychain.GetCredentials(ctx, reg, scope)
+		}
+
+		return NewCallbackProviderWithName(providerName, callback)
+
+	case CredTypeToken:
+		// For token-based auth, use token as password with oauth2accesstoken username
+		tokenKeys := []string{"NGC_API_KEY", "GITHUB_TOKEN", "DOCKERHUB_TOKEN"}
+		for _, key := range tokenKeys {
+			if token, ok := creds[key]; ok && token != "" {
+				return NewStaticProviderWithName(providerName, map[string]*authn.AuthConfig{
+					registry: {
+						Username: "oauth2accesstoken",
+						Password: token,
+					},
+				})
+			}
+		}
+		return NewPublicOnlyProvider()
+
+	default:
+		return NewPublicOnlyProvider()
+	}
+}
+
+// ParseCredentialsFromJSON parses credentials from JSON string or username:password format
+// Returns structured credentials as a map
+func ParseCredentialsFromJSON(credStr string) (map[string]string, error) {
+	if credStr == "" {
+		return nil, nil
+	}
+
+	// Try JSON format first
+	var credMap map[string]string
+	if err := json.Unmarshal([]byte(credStr), &credMap); err == nil {
+		return credMap, nil
+	}
+
+	// Try legacy username:password format
+	parts := strings.SplitN(credStr, ":", 2)
+	if len(parts) == 2 {
+		return map[string]string{
+			"USERNAME": parts[0],
+			"PASSWORD": parts[1],
+		}, nil
+	}
+
+	return nil, fmt.Errorf("unable to parse credentials: invalid format")
+}
+
+// CredentialsToProvider converts a credential map and registry to a CLIP-compatible provider
+// This is a convenience function that auto-detects credential type and creates the appropriate provider
+func CredentialsToProvider(ctx context.Context, registry string, creds map[string]string) RegistryCredentialProvider {
+	if len(creds) == 0 {
+		log.Debug().Str("registry", registry).Msg("no credentials provided, using public access")
+		return NewPublicOnlyProvider()
+	}
+
+	credType := DetectCredentialType(registry, creds)
+	log.Debug().
+		Str("registry", registry).
+		Str("cred_type", string(credType)).
+		Int("cred_count", len(creds)).
+		Msg("creating credential provider")
+
+	return CreateProviderFromCredentials(ctx, registry, credType, creds)
 }

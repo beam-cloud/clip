@@ -95,6 +95,7 @@ require (
 )
 
 require (
+	github.com/aws/aws-sdk-go-v2/service/ecr v1.27.0 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.16.3 // indirect
 	github.com/docker/cli v27.5.0+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
