@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
-	"github.com/beam-cloud/clip/pkg/registryauth"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -27,10 +26,10 @@ type OCIClipStorage struct {
 	layerCache            map[string]v1.Layer
 	diskCacheDir          string // Local disk cache directory for decompressed layers
 	httpClient            *http.Client
-	credProvider          registryauth.RegistryCredentialProvider // Credential provider for registry auth
-	contentCache          ContentCache                            // Remote content cache (blobcache)
-	contentCacheAvailable bool                                    // is there an available content cache for range reads?
-	useCheckpoints        bool                                    // Enable checkpoint-based partial decompression
+	credProvider          common.RegistryCredentialProvider // Credential provider for registry auth
+	contentCache          ContentCache                      // Remote content cache (blobcache)
+	contentCacheAvailable bool                              // is there an available content cache for range reads?
+	useCheckpoints        bool                              // Enable checkpoint-based partial decompression
 	mu                    sync.RWMutex
 	layerDecompressMu     sync.Mutex               // Prevents duplicate decompression
 	layersDecompressing   map[string]chan struct{} // Tracks in-progress decompressions
@@ -38,12 +37,11 @@ type OCIClipStorage struct {
 
 type OCIClipStorageOpts struct {
 	Metadata              *common.ClipArchiveMetadata
-	AuthConfig            string                                // DEPRECATED: optional base64-encoded auth config (use CredProvider instead)
-	CredProvider          registryauth.RegistryCredentialProvider // optional credential provider for registry authentication
-	ContentCache          ContentCache                          // optional remote content cache (blobcache)
-	ContentCacheAvailable bool                                  // is there an available content cache for range reads?
-	DiskCacheDir          string                                // optional local disk cache directory
-	UseCheckpoints        bool                                  // Enable checkpoint-based partial decompression (default: false)
+	CredProvider          common.RegistryCredentialProvider // optional credential provider for registry authentication
+	ContentCache          ContentCache                      // optional remote content cache (blobcache)
+	ContentCacheAvailable bool                              // is there an available content cache for range reads?
+	DiskCacheDir          string                            // optional local disk cache directory
+	UseCheckpoints        bool                              // Enable checkpoint-based partial decompression (default: false)
 }
 
 func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
@@ -72,20 +70,7 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 	// Determine which credential provider to use
 	credProvider := opts.CredProvider
 	if credProvider == nil {
-		// Handle legacy base64 AuthConfig (deprecated)
-		if opts.AuthConfig != "" {
-			log.Warn().Msg("DEPRECATED: AuthConfig field is deprecated, use CredProvider instead")
-			staticProvider, err := registryauth.ParseBase64AuthConfig(opts.AuthConfig, storageInfo.RegistryURL)
-			if err != nil {
-				log.Warn().Err(err).Msg("Failed to parse legacy AuthConfig, falling back to default provider")
-				credProvider = registryauth.DefaultProvider()
-			} else {
-				credProvider = staticProvider
-			}
-		} else {
-			// Use default provider chain (env -> docker config -> keychain)
-			credProvider = registryauth.DefaultProvider()
-		}
+		credProvider = common.DefaultProvider()
 	}
 
 	storage := &OCIClipStorage{
@@ -128,7 +113,7 @@ func (s *OCIClipStorage) initLayers(ctx context.Context) error {
 
 	// Try to get credentials from provider
 	authConfig, err := s.credProvider.GetCredentials(ctx, s.storageInfo.RegistryURL, s.storageInfo.Repository)
-	if err != nil && err != registryauth.ErrNoCredentials {
+	if err != nil && err != common.ErrNoCredentials {
 		log.Warn().
 			Err(err).
 			Str("registry", s.storageInfo.RegistryURL).

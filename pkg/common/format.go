@@ -75,14 +75,13 @@ func (ssi S3StorageInfo) Encode() ([]byte, error) {
 
 // OCIStorageInfo stores metadata for OCI images with decompression indexes
 type OCIStorageInfo struct {
-	RegistryURL            string
-	Repository             string
-	Reference              string // tag or digest
-	Layers                 []string
-	GzipIdxByLayer         map[string]*GzipIndex // per-layer gzip decompression index
-	ZstdIdxByLayer         map[string]*ZstdIndex // per-layer zstd index (P1)
+	RegistryURL             string
+	Repository              string
+	Reference               string // tag or digest
+	Layers                  []string
+	GzipIdxByLayer          map[string]*GzipIndex // per-layer gzip decompression index
+	ZstdIdxByLayer          map[string]*ZstdIndex // per-layer zstd index (P1)
 	DecompressedHashByLayer map[string]string     // maps layer digest -> SHA256 hash of decompressed data
-	AuthConfig             string                // optional: base64-encoded auth config
 }
 
 func (osi OCIStorageInfo) Type() string {

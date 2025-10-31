@@ -1,4 +1,4 @@
-package registryauth
+package common
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 
 func TestPublicOnlyProvider(t *testing.T) {
 	provider := NewPublicOnlyProvider()
-	
+
 	creds, err := provider.GetCredentials(context.Background(), "ghcr.io", "")
 	assert.Equal(t, ErrNoCredentials, err)
 	assert.Nil(t, creds)
@@ -338,11 +338,11 @@ func TestCachingProvider(t *testing.T) {
 
 func TestDefaultProvider(t *testing.T) {
 	provider := DefaultProvider()
-	
+
 	// Should be a chained provider
 	assert.NotNil(t, provider)
 	assert.Contains(t, provider.Name(), "chain")
-	
+
 	// Should include env, docker-config, and keychain
 	assert.Contains(t, provider.Name(), "env")
 	assert.Contains(t, provider.Name(), "docker-config")

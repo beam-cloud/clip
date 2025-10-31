@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
-	"github.com/beam-cloud/clip/pkg/registryauth"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -37,10 +36,9 @@ type OCIIndexProgress struct {
 // IndexOCIImageOptions configures the OCI indexer
 type IndexOCIImageOptions struct {
 	ImageRef      string
-	CheckpointMiB int64                                 // Checkpoint every N MiB (default 2)
-	AuthConfig    string                                // DEPRECATED: optional base64-encoded auth config (use CredProvider instead)
-	CredProvider  registryauth.RegistryCredentialProvider // optional credential provider for registry authentication
-	ProgressChan  chan<- OCIIndexProgress               // optional channel for progress updates
+	CheckpointMiB int64                             // Checkpoint every N MiB (default 2)
+	CredProvider  common.RegistryCredentialProvider // optional credential provider for registry authentication
+	ProgressChan  chan<- OCIIndexProgress           // optional channel for progress updates
 }
 
 // countingReader tracks bytes read from an io.Reader
@@ -84,20 +82,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	// Determine which credential provider to use
 	credProvider := opts.CredProvider
 	if credProvider == nil {
-		// Handle legacy base64 AuthConfig (deprecated)
-		if opts.AuthConfig != "" {
-			log.Warn().Msg("DEPRECATED: AuthConfig field is deprecated, use CredProvider instead")
-			staticProvider, err := registryauth.ParseBase64AuthConfig(opts.AuthConfig, registryURL)
-			if err != nil {
-				log.Warn().Err(err).Msg("Failed to parse legacy AuthConfig, falling back to default provider")
-				credProvider = registryauth.DefaultProvider()
-			} else {
-				credProvider = staticProvider
-			}
-		} else {
-			// Use default provider chain (env -> docker config -> keychain)
-			credProvider = registryauth.DefaultProvider()
-		}
+		credProvider = common.DefaultProvider()
 	}
 
 	// Build remote options with authentication
@@ -105,7 +90,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 
 	// Try to get credentials from provider
 	authConfig, err := credProvider.GetCredentials(ctx, registryURL, repository)
-	if err != nil && err != registryauth.ErrNoCredentials {
+	if err != nil && err != common.ErrNoCredentials {
 		log.Warn().
 			Err(err).
 			Str("registry", registryURL).
@@ -448,7 +433,6 @@ func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOpt
 		GzipIdxByLayer:          gzipIdx,
 		ZstdIdxByLayer:          nil, // P1 feature
 		DecompressedHashByLayer: decompressedHashes,
-		AuthConfig:              opts.AuthConfig,
 	}
 
 	// Create metadata
@@ -631,4 +615,3 @@ func (ca *ClipArchiver) processHardLink(index *btree.BTree, hdr *tar.Header, cle
 		index.Set(node)
 	}
 }
-

@@ -1,4 +1,4 @@
-package registryauth
+package common
 
 import (
 	"context"
