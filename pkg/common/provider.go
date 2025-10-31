@@ -919,10 +919,25 @@ func CreateProviderFromCredentials(ctx context.Context, registry string, credTyp
 		sessionToken := creds["AWS_SESSION_TOKEN"]
 		region := creds["AWS_REGION"]
 
+		log.Debug().
+			Str("registry", registry).
+			Str("access_key", accessKey).
+			Str("region", region).
+			Bool("has_secret", secretKey != "").
+			Int("total_creds", len(creds)).
+			Msg("CreateProviderFromCredentials: AWS case")
+
 		if accessKey != "" && secretKey != "" && region != "" {
+			// Mask access key for logging
+			maskedKey := accessKey
+			if len(accessKey) > 10 {
+				maskedKey = accessKey[:10] + "..."
+			}
+			
 			log.Info().
 				Str("registry", registry).
 				Str("region", region).
+				Str("access_key", maskedKey).
 				Msg("creating ECR provider with AWS credentials")
 
 			return NewECRProvider(ECRProviderConfig{
@@ -933,6 +948,13 @@ func CreateProviderFromCredentials(ctx context.Context, registry string, credTyp
 				RegistryPattern: registry, // Match specific registry
 			})
 		}
+		
+		log.Warn().
+			Str("registry", registry).
+			Bool("has_access_key", accessKey != "").
+			Bool("has_secret_key", secretKey != "").
+			Bool("has_region", region != "").
+			Msg("AWS credentials incomplete, using public provider")
 		return NewPublicOnlyProvider()
 
 	case CredTypeGCP:
@@ -1277,12 +1299,19 @@ func CredentialsToProvider(ctx context.Context, registry string, creds map[strin
 		return NewPublicOnlyProvider()
 	}
 
+	// Log all credential keys (but not values)
+	credKeys := make([]string, 0, len(creds))
+	for k := range creds {
+		credKeys = append(credKeys, k)
+	}
+
 	credType := DetectCredentialType(registry, creds)
-	log.Debug().
+	log.Info().
 		Str("registry", registry).
 		Str("cred_type", string(credType)).
 		Int("cred_count", len(creds)).
-		Msg("creating credential provider")
+		Strs("cred_keys", credKeys).
+		Msg("CredentialsToProvider: creating credential provider")
 
 	return CreateProviderFromCredentials(ctx, registry, credType, creds)
 }
