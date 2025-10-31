@@ -1131,19 +1131,62 @@ func CreateProviderFromCredentials(ctx context.Context, registry string, credTyp
 
 // ParseCredentialsFromJSON parses credentials from JSON string or username:password format
 // Returns structured credentials as a map
-// Handles nested JSON structures where credentials may be encoded as JSON strings
-// Recursively extracts credentials from nested "credentials" objects
+// Handles multiple formats:
+// 1. Beta9 format: {"credentials": {...}, "registry": "...", "type": "..."}
+// 2. Nested JSON strings: {"PASSWORD": "{\"AWS_ACCESS_KEY_ID\":\"...\"}"}
+// 3. Flat JSON: {"USERNAME": "user", "PASSWORD": "pass"}
+// 4. Legacy: "username:password"
 func ParseCredentialsFromJSON(credStr string) (map[string]string, error) {
 	if credStr == "" {
 		return nil, nil
 	}
 
-	// Try JSON format first
+	// Try to parse as structured object with interface{} values first (beta9 format)
+	var structuredData map[string]interface{}
+	if err := json.Unmarshal([]byte(credStr), &structuredData); err == nil {
+		// Check if this is beta9 format with "credentials" object
+		if credObj, hasCredentials := structuredData["credentials"]; hasCredentials {
+			// Extract the credentials map
+			if credMap, ok := credObj.(map[string]interface{}); ok {
+				result := make(map[string]string)
+				for k, v := range credMap {
+					if strVal, ok := v.(string); ok {
+						result[k] = strVal
+					}
+				}
+				
+				// Also include top-level string fields (registry, type, etc.)
+				for k, v := range structuredData {
+					if k == "credentials" {
+						continue // Skip the credentials object itself
+					}
+					if strVal, ok := v.(string); ok {
+						result[k] = strVal
+					}
+				}
+				
+				return result, nil
+			}
+		}
+		
+		// Otherwise, flatten all string values
+		result := make(map[string]string)
+		for k, v := range structuredData {
+			if strVal, ok := v.(string); ok {
+				result[k] = strVal
+			}
+		}
+		
+		// If we got some values, return them
+		if len(result) > 0 {
+			return result, nil
+		}
+	}
+
+	// Try flat JSON format (map[string]string)
 	var credMap map[string]string
 	if err := json.Unmarshal([]byte(credStr), &credMap); err == nil {
 		// Check if this is a nested structure where values are JSON strings
-		// Beta9 sends complex nested structures like:
-		// {"PASSWORD": "{\"credentials\":{\"AWS_ACCESS_KEY_ID\":\"...\"}}", ...}
 		result := make(map[string]string)
 		
 		// First, copy all existing keys
@@ -1151,7 +1194,7 @@ func ParseCredentialsFromJSON(credStr string) (map[string]string, error) {
 			result[key] = value
 		}
 		
-		// Then try to extract nested JSON
+		// Then try to extract nested JSON from string values
 		for _, value := range credMap {
 			extracted := extractNestedCredentials(value)
 			for k, v := range extracted {
