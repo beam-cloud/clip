@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/clip/pkg/registryauth"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -36,9 +37,10 @@ type OCIIndexProgress struct {
 // IndexOCIImageOptions configures the OCI indexer
 type IndexOCIImageOptions struct {
 	ImageRef      string
-	CheckpointMiB int64                   // Checkpoint every N MiB (default 2)
-	AuthConfig    string                  // optional base64-encoded auth config
-	ProgressChan  chan<- OCIIndexProgress // optional channel for progress updates
+	CheckpointMiB int64                                 // Checkpoint every N MiB (default 2)
+	AuthConfig    string                                // DEPRECATED: optional base64-encoded auth config (use CredProvider instead)
+	CredProvider  registryauth.RegistryCredentialProvider // optional credential provider for registry authentication
+	ProgressChan  chan<- OCIIndexProgress               // optional channel for progress updates
 }
 
 // countingReader tracks bytes read from an io.Reader
@@ -79,8 +81,58 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	repository = ref.Context().RepositoryStr()
 	reference = ref.Identifier()
 
+	// Determine which credential provider to use
+	credProvider := opts.CredProvider
+	if credProvider == nil {
+		// Handle legacy base64 AuthConfig (deprecated)
+		if opts.AuthConfig != "" {
+			log.Warn().Msg("DEPRECATED: AuthConfig field is deprecated, use CredProvider instead")
+			staticProvider, err := registryauth.ParseBase64AuthConfig(opts.AuthConfig, registryURL)
+			if err != nil {
+				log.Warn().Err(err).Msg("Failed to parse legacy AuthConfig, falling back to default provider")
+				credProvider = registryauth.DefaultProvider()
+			} else {
+				credProvider = staticProvider
+			}
+		} else {
+			// Use default provider chain (env -> docker config -> keychain)
+			credProvider = registryauth.DefaultProvider()
+		}
+	}
+
+	// Build remote options with authentication
+	remoteOpts := []remote.Option{remote.WithContext(ctx)}
+
+	// Try to get credentials from provider
+	authConfig, err := credProvider.GetCredentials(ctx, registryURL, repository)
+	if err != nil && err != registryauth.ErrNoCredentials {
+		log.Warn().
+			Err(err).
+			Str("registry", registryURL).
+			Str("provider", credProvider.Name()).
+			Msg("Failed to get credentials from provider, falling back to keychain")
+	}
+
+	if authConfig != nil {
+		// Use provided credentials
+		log.Debug().
+			Str("registry", registryURL).
+			Str("provider", credProvider.Name()).
+			Msg("Using credentials from provider")
+		remoteOpts = append(remoteOpts, remote.WithAuth(&authn.Basic{
+			Username: authConfig.Username,
+			Password: authConfig.Password,
+		}))
+	} else {
+		// Fall back to default keychain for anonymous or keychain-based auth
+		log.Debug().
+			Str("registry", registryURL).
+			Msg("No credentials from provider, using default keychain")
+		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	}
+
 	// Fetch image
-	img, err := remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithContext(ctx))
+	img, err := remote.Image(ref, remoteOpts...)
 	if err != nil {
 		return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to fetch image: %w", err)
 	}

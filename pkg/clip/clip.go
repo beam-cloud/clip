@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/clip/pkg/registryauth"
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -65,6 +66,9 @@ type MountOptions struct {
 	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
 	UseCheckpoints        bool // Enable checkpoint-based partial decompression for OCI layers
+	
+	// Registry authentication (for OCI archives)
+	RegistryCredProvider interface{} // registryauth.RegistryCredentialProvider (interface{} to avoid import in API)
 }
 
 type StoreS3Options struct {
@@ -181,6 +185,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		ContentCache:          options.ContentCache,
 		UseCheckpoints:        options.UseCheckpoints,
 		ContentCacheAvailable: options.ContentCacheAvailable,
+		RegistryCredProvider:  options.RegistryCredProvider,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
@@ -263,7 +268,8 @@ type CreateFromOCIImageOptions struct {
 	ImageRef      string
 	OutputPath    string
 	CheckpointMiB int64
-	AuthConfig    string
+	AuthConfig    string // DEPRECATED: use CredProvider instead
+	CredProvider  interface{} // registryauth.RegistryCredentialProvider (interface{} to avoid import in API)
 	ProgressChan  chan<- OCIIndexProgress // optional channel for progress updates
 }
 
@@ -275,11 +281,20 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 		options.CheckpointMiB = 2 // default
 	}
 
+	// Convert interface{} to RegistryCredentialProvider if provided
+	var credProvider registryauth.RegistryCredentialProvider
+	if options.CredProvider != nil {
+		if provider, ok := options.CredProvider.(registryauth.RegistryCredentialProvider); ok {
+			credProvider = provider
+		}
+	}
+	
 	archiver := NewClipArchiver()
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
 		ImageRef:      options.ImageRef,
 		CheckpointMiB: options.CheckpointMiB,
 		AuthConfig:    options.AuthConfig,
+		CredProvider:  credProvider,
 		ProgressChan:  options.ProgressChan,
 	}, options.OutputPath)
 

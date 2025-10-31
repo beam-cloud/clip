@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/clip/pkg/registryauth"
 )
 
 // ContentCache interface for layer caching (e.g., blobcache)
@@ -34,6 +35,9 @@ type ClipStorageOpts struct {
 	ContentCache          ContentCache // For OCI storage remote caching
 	ContentCacheAvailable bool
 	UseCheckpoints        bool // Enable checkpoint-based partial decompression for OCI layers
+	
+	// Registry authentication (for OCI storage)
+	RegistryCredProvider interface{} // registryauth.RegistryCredentialProvider (interface{} to avoid import cycle)
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
@@ -88,13 +92,21 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 			SecretKey:      opts.Credentials.S3.SecretKey,
 		})
 	case common.StorageModeOCI:
+		// Convert interface{} to RegistryCredentialProvider if provided
+		var credProvider registryauth.RegistryCredentialProvider
+		if opts.RegistryCredProvider != nil {
+			if provider, ok := opts.RegistryCredProvider.(registryauth.RegistryCredentialProvider); ok {
+				credProvider = provider
+			}
+		}
+		
 		storage, err = NewOCIClipStorage(OCIClipStorageOpts{
 			Metadata:              metadata,
+			CredProvider:          credProvider,
 			ContentCache:          opts.ContentCache,
 			ContentCacheAvailable: opts.ContentCacheAvailable,
 			DiskCacheDir:          opts.CachePath,
 			UseCheckpoints:        opts.UseCheckpoints,
-			// AuthConfig: opts.Credentials
 		})
 	case common.StorageModeLocal:
 		storage, err = NewLocalClipStorage(metadata, LocalClipStorageOpts{

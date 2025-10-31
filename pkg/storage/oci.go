@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/clip/pkg/registryauth"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -26,10 +27,10 @@ type OCIClipStorage struct {
 	layerCache            map[string]v1.Layer
 	diskCacheDir          string // Local disk cache directory for decompressed layers
 	httpClient            *http.Client
-	keychain              authn.Keychain
-	contentCache          ContentCache // Remote content cache (blobcache)
-	contentCacheAvailable bool         // is there an available content cache for range reads?
-	useCheckpoints        bool         // Enable checkpoint-based partial decompression
+	credProvider          registryauth.RegistryCredentialProvider // Credential provider for registry auth
+	contentCache          ContentCache                            // Remote content cache (blobcache)
+	contentCacheAvailable bool                                    // is there an available content cache for range reads?
+	useCheckpoints        bool                                    // Enable checkpoint-based partial decompression
 	mu                    sync.RWMutex
 	layerDecompressMu     sync.Mutex               // Prevents duplicate decompression
 	layersDecompressing   map[string]chan struct{} // Tracks in-progress decompressions
@@ -37,11 +38,12 @@ type OCIClipStorage struct {
 
 type OCIClipStorageOpts struct {
 	Metadata              *common.ClipArchiveMetadata
-	AuthConfig            string       // optional base64-encoded auth config
-	ContentCache          ContentCache // optional remote content cache (blobcache)
-	ContentCacheAvailable bool         // is there an available content cache for range reads?
-	DiskCacheDir          string       // optional local disk cache directory
-	UseCheckpoints        bool         // Enable checkpoint-based partial decompression (default: false)
+	AuthConfig            string                                // DEPRECATED: optional base64-encoded auth config (use CredProvider instead)
+	CredProvider          registryauth.RegistryCredentialProvider // optional credential provider for registry authentication
+	ContentCache          ContentCache                          // optional remote content cache (blobcache)
+	ContentCacheAvailable bool                                  // is there an available content cache for range reads?
+	DiskCacheDir          string                                // optional local disk cache directory
+	UseCheckpoints        bool                                  // Enable checkpoint-based partial decompression (default: false)
 }
 
 func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
@@ -67,20 +69,42 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		diskCacheDir = os.TempDir()
 	}
 
+	// Determine which credential provider to use
+	credProvider := opts.CredProvider
+	if credProvider == nil {
+		// Handle legacy base64 AuthConfig (deprecated)
+		if opts.AuthConfig != "" {
+			log.Warn().Msg("DEPRECATED: AuthConfig field is deprecated, use CredProvider instead")
+			staticProvider, err := registryauth.ParseBase64AuthConfig(opts.AuthConfig, storageInfo.RegistryURL)
+			if err != nil {
+				log.Warn().Err(err).Msg("Failed to parse legacy AuthConfig, falling back to default provider")
+				credProvider = registryauth.DefaultProvider()
+			} else {
+				credProvider = staticProvider
+			}
+		} else {
+			// Use default provider chain (env -> docker config -> keychain)
+			credProvider = registryauth.DefaultProvider()
+		}
+	}
+
 	storage := &OCIClipStorage{
 		metadata:              opts.Metadata,
 		storageInfo:           &storageInfo,
 		layerCache:            make(map[string]v1.Layer),
 		diskCacheDir:          diskCacheDir,
 		httpClient:            &http.Client{},
-		keychain:              authn.DefaultKeychain,
+		credProvider:          credProvider,
 		contentCache:          opts.ContentCache,
 		contentCacheAvailable: opts.ContentCacheAvailable,
 		useCheckpoints:        opts.UseCheckpoints,
 		layersDecompressing:   make(map[string]chan struct{}),
 	}
 
-	log.Info().Str("cache_dir", diskCacheDir).Msg("initialized OCI storage with disk cache")
+	log.Info().
+		Str("cache_dir", diskCacheDir).
+		Str("cred_provider", credProvider.Name()).
+		Msg("initialized OCI storage with disk cache")
 
 	// Pre-fetch layer descriptors
 	if err := storage.initLayers(context.Background()); err != nil {
@@ -99,7 +123,38 @@ func (s *OCIClipStorage) initLayers(ctx context.Context) error {
 		return fmt.Errorf("failed to parse image reference: %w", err)
 	}
 
-	img, err := remote.Image(ref, remote.WithAuthFromKeychain(s.keychain), remote.WithContext(ctx))
+	// Build remote options with authentication
+	remoteOpts := []remote.Option{remote.WithContext(ctx)}
+
+	// Try to get credentials from provider
+	authConfig, err := s.credProvider.GetCredentials(ctx, s.storageInfo.RegistryURL, s.storageInfo.Repository)
+	if err != nil && err != registryauth.ErrNoCredentials {
+		log.Warn().
+			Err(err).
+			Str("registry", s.storageInfo.RegistryURL).
+			Str("provider", s.credProvider.Name()).
+			Msg("Failed to get credentials from provider, falling back to keychain")
+	}
+
+	if authConfig != nil {
+		// Use provided credentials
+		log.Debug().
+			Str("registry", s.storageInfo.RegistryURL).
+			Str("provider", s.credProvider.Name()).
+			Msg("Using credentials from provider for layer init")
+		remoteOpts = append(remoteOpts, remote.WithAuth(&authn.Basic{
+			Username: authConfig.Username,
+			Password: authConfig.Password,
+		}))
+	} else {
+		// Fall back to default keychain for anonymous or keychain-based auth
+		log.Debug().
+			Str("registry", s.storageInfo.RegistryURL).
+			Msg("No credentials from provider for layer init, using default keychain")
+		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	}
+
+	img, err := remote.Image(ref, remoteOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to fetch image: %w", err)
 	}
