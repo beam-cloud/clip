@@ -22,7 +22,6 @@ type ClipStorageInterface interface {
 
 type ClipStorageCredentials struct {
 	S3 *S3ClipStorageCredentials
-	// OCI *OCIClipStorageCredentials
 }
 
 type ClipStorageOpts struct {
@@ -33,10 +32,8 @@ type ClipStorageOpts struct {
 	Credentials           ClipStorageCredentials
 	ContentCache          ContentCache // For OCI storage remote caching
 	ContentCacheAvailable bool
-	UseCheckpoints        bool // Enable checkpoint-based partial decompression for OCI layers
-
-	// Registry authentication (for OCI storage)
-	RegistryCredProvider interface{} // registryauth.RegistryCredentialProvider (interface{} to avoid import cycle)
+	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
+	RegistryCredProvider  interface{} // Registry authentication (for OCI storage)
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {

@@ -64,10 +64,8 @@ type MountOptions struct {
 	ContentCacheAvailable bool
 	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
-	UseCheckpoints        bool // Enable checkpoint-based partial decompression for OCI layers
-
-	// Registry authentication (for OCI archives)
-	RegistryCredProvider interface{} // registryauth.RegistryCredentialProvider (interface{} to avoid import in API)
+	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
+	RegistryCredProvider  interface{} // Registry authentication (for OCI archives)
 }
 
 type StoreS3Options struct {
@@ -267,7 +265,7 @@ type CreateFromOCIImageOptions struct {
 	ImageRef      string
 	OutputPath    string
 	CheckpointMiB int64
-	CredProvider  interface{}             // registryauth.RegistryCredentialProvider (interface{} to avoid import in API)
+	CredProvider  interface{}
 	ProgressChan  chan<- OCIIndexProgress // optional channel for progress updates
 }
 
