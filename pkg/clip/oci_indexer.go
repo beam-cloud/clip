@@ -36,9 +36,9 @@ type OCIIndexProgress struct {
 // IndexOCIImageOptions configures the OCI indexer
 type IndexOCIImageOptions struct {
 	ImageRef      string
-	CheckpointMiB int64                   // Checkpoint every N MiB (default 2)
-	AuthConfig    string                  // optional base64-encoded auth config
-	ProgressChan  chan<- OCIIndexProgress // optional channel for progress updates
+	CheckpointMiB int64                             // Checkpoint every N MiB (default 2)
+	CredProvider  common.RegistryCredentialProvider // optional credential provider for registry authentication
+	ProgressChan  chan<- OCIIndexProgress           // optional channel for progress updates
 }
 
 // countingReader tracks bytes read from an io.Reader
@@ -79,8 +79,45 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	repository = ref.Context().RepositoryStr()
 	reference = ref.Identifier()
 
+	// Determine which credential provider to use
+	credProvider := opts.CredProvider
+	if credProvider == nil {
+		credProvider = common.DefaultProvider()
+	}
+
+	// Build remote options with authentication
+	remoteOpts := []remote.Option{remote.WithContext(ctx)}
+
+	// Try to get credentials from provider
+	authConfig, err := credProvider.GetCredentials(ctx, registryURL, repository)
+	if err != nil && err != common.ErrNoCredentials {
+		log.Warn().
+			Err(err).
+			Str("registry", registryURL).
+			Str("provider", credProvider.Name()).
+			Msg("Failed to get credentials from provider, falling back to keychain")
+	}
+
+	if authConfig != nil {
+		// Use provided credentials
+		log.Debug().
+			Str("registry", registryURL).
+			Str("provider", credProvider.Name()).
+			Msg("Using credentials from provider")
+		remoteOpts = append(remoteOpts, remote.WithAuth(&authn.Basic{
+			Username: authConfig.Username,
+			Password: authConfig.Password,
+		}))
+	} else {
+		// Fall back to default keychain for anonymous or keychain-based auth
+		log.Debug().
+			Str("registry", registryURL).
+			Msg("No credentials from provider, using default keychain")
+		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	}
+
 	// Fetch image
-	img, err := remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithContext(ctx))
+	img, err := remote.Image(ref, remoteOpts...)
 	if err != nil {
 		return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to fetch image: %w", err)
 	}
@@ -396,7 +433,6 @@ func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOpt
 		GzipIdxByLayer:          gzipIdx,
 		ZstdIdxByLayer:          nil, // P1 feature
 		DecompressedHashByLayer: decompressedHashes,
-		AuthConfig:              opts.AuthConfig,
 	}
 
 	// Create metadata
@@ -579,4 +615,3 @@ func (ca *ClipArchiver) processHardLink(index *btree.BTree, hdr *tar.Header, cle
 		index.Set(node)
 	}
 }
-

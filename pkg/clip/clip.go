@@ -64,7 +64,8 @@ type MountOptions struct {
 	ContentCacheAvailable bool
 	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
-	UseCheckpoints        bool // Enable checkpoint-based partial decompression for OCI layers
+	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
+	RegistryCredProvider  interface{} // Registry authentication (for OCI archives)
 }
 
 type StoreS3Options struct {
@@ -181,6 +182,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		ContentCache:          options.ContentCache,
 		UseCheckpoints:        options.UseCheckpoints,
 		ContentCacheAvailable: options.ContentCacheAvailable,
+		RegistryCredProvider:  options.RegistryCredProvider,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
@@ -263,7 +265,7 @@ type CreateFromOCIImageOptions struct {
 	ImageRef      string
 	OutputPath    string
 	CheckpointMiB int64
-	AuthConfig    string
+	CredProvider  interface{}
 	ProgressChan  chan<- OCIIndexProgress // optional channel for progress updates
 }
 
@@ -275,11 +277,19 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 		options.CheckpointMiB = 2 // default
 	}
 
+	// Convert interface{} to RegistryCredentialProvider if provided
+	var credProvider common.RegistryCredentialProvider
+	if options.CredProvider != nil {
+		if provider, ok := options.CredProvider.(common.RegistryCredentialProvider); ok {
+			credProvider = provider
+		}
+	}
+
 	archiver := NewClipArchiver()
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
 		ImageRef:      options.ImageRef,
 		CheckpointMiB: options.CheckpointMiB,
-		AuthConfig:    options.AuthConfig,
+		CredProvider:  credProvider,
 		ProgressChan:  options.ProgressChan,
 	}, options.OutputPath)
 
