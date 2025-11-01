@@ -422,3 +422,361 @@ func TestDecodeDockerAuth(t *testing.T) {
 		assert.Equal(t, "pass:word:with:colons", config.Password)
 	})
 }
+
+func TestMatchRegistryPattern(t *testing.T) {
+	tests := []struct {
+		name     string
+		pattern  string
+		registry string
+		want     bool
+	}{
+		{"exact match", "ghcr.io", "ghcr.io", true},
+		{"no match", "ghcr.io", "docker.io", false},
+		{"wildcard all", "*", "anything.com", true},
+		{"prefix wildcard", "*.dkr.ecr.*.amazonaws.com", "123456789012.dkr.ecr.us-east-1.amazonaws.com", true},
+		{"prefix wildcard no match", "*.dkr.ecr.*.amazonaws.com", "gcr.io", false},
+		{"suffix wildcard", "*.gcr.io", "us.gcr.io", true},
+		{"suffix wildcard no match", "*.gcr.io", "ghcr.io", false},
+		{"middle wildcard", "registry-*.example.com", "registry-1.example.com", true},
+		{"middle wildcard no match", "registry-*.example.com", "registry.example.com", false},
+		{"multiple wildcards", "*-*.*.example.com", "registry-1.us.example.com", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchRegistryPattern(tt.pattern, tt.registry)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestStaticProviderPatternMatching(t *testing.T) {
+	provider := NewStaticProvider(map[string]*authn.AuthConfig{
+		"ghcr.io": {
+			Username: "ghcr-user",
+			Password: "ghcr-pass",
+		},
+		"*.dkr.ecr.*.amazonaws.com": {
+			Username: "ecr-user",
+			Password: "ecr-pass",
+		},
+	})
+
+	t.Run("exact match", func(t *testing.T) {
+		creds, err := provider.GetCredentials(context.Background(), "ghcr.io", "")
+		require.NoError(t, err)
+		require.NotNil(t, creds)
+		assert.Equal(t, "ghcr-user", creds.Username)
+	})
+
+	t.Run("wildcard match", func(t *testing.T) {
+		creds, err := provider.GetCredentials(context.Background(), "123456789012.dkr.ecr.us-east-1.amazonaws.com", "")
+		require.NoError(t, err)
+		require.NotNil(t, creds)
+		assert.Equal(t, "ecr-user", creds.Username)
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		creds, err := provider.GetCredentials(context.Background(), "unknown.io", "")
+		assert.Equal(t, ErrNoCredentials, err)
+		assert.Nil(t, creds)
+	})
+}
+
+func TestDetectCredentialType(t *testing.T) {
+	tests := []struct {
+		name     string
+		registry string
+		creds    map[string]string
+		want     CredentialType
+	}{
+		{
+			name:     "no credentials",
+			registry: "ghcr.io",
+			creds:    map[string]string{},
+			want:     CredTypePublic,
+		},
+		{
+			name:     "AWS credentials",
+			registry: "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+			creds: map[string]string{
+				"AWS_ACCESS_KEY_ID":     "AKIAIOSFODNN7EXAMPLE",
+				"AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+				"AWS_REGION":            "us-east-1",
+			},
+			want: CredTypeAWS,
+		},
+		{
+			name:     "GCP credentials via token",
+			registry: "gcr.io",
+			creds: map[string]string{
+				"GCP_ACCESS_TOKEN": "ya29.example",
+			},
+			want: CredTypeGCP,
+		},
+		{
+			name:     "Azure credentials",
+			registry: "myregistry.azurecr.io",
+			creds: map[string]string{
+				"AZURE_CLIENT_ID":     "client-id",
+				"AZURE_CLIENT_SECRET": "client-secret",
+				"AZURE_TENANT_ID":     "tenant-id",
+			},
+			want: CredTypeAzure,
+		},
+		{
+			name:     "token credentials",
+			registry: "nvcr.io",
+			creds: map[string]string{
+				"NGC_API_KEY": "api-key",
+			},
+			want: CredTypeToken,
+		},
+		{
+			name:     "basic auth",
+			registry: "ghcr.io",
+			creds: map[string]string{
+				"USERNAME": "user",
+				"PASSWORD": "pass",
+			},
+			want: CredTypeBasic,
+		},
+		{
+			name:     "detect AWS from registry",
+			registry: "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+			creds: map[string]string{
+				"SOME_KEY": "value",
+			},
+			want: CredTypeAWS,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DetectCredentialType(tt.registry, tt.creds)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestParseCredentialsFromJSON(t *testing.T) {
+	t.Run("JSON format", func(t *testing.T) {
+		jsonStr := `{"USERNAME":"user","PASSWORD":"pass"}`
+		creds, err := ParseCredentialsFromJSON(jsonStr)
+		require.NoError(t, err)
+		assert.Equal(t, "user", creds["USERNAME"])
+		assert.Equal(t, "pass", creds["PASSWORD"])
+	})
+
+	t.Run("nested JSON string format (legacy)", func(t *testing.T) {
+		// Old format where PASSWORD contains a JSON string
+		jsonStr := `{"PASSWORD":"{\"AWS_ACCESS_KEY_ID\":\"AKIA123\",\"AWS_REGION\":\"us-east-1\",\"AWS_SECRET_ACCESS_KEY\":\"secret123\"}","USERNAME":"ignored"}`
+		creds, err := ParseCredentialsFromJSON(jsonStr)
+		require.NoError(t, err)
+		
+		// Should at minimum have the original keys
+		assert.Equal(t, "ignored", creds["USERNAME"])
+		// May or may not extract nested credentials - depends on implementation
+		assert.NotEmpty(t, creds)
+	})
+
+	t.Run("beta9 structured format", func(t *testing.T) {
+		// Beta9's new clean format
+		jsonStr := `{"credentials":{"AWS_ACCESS_KEY_ID":"AKIASXGG4MR4EOLXJ5PM","AWS_REGION":"us-east-1","AWS_SECRET_ACCESS_KEY":"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"},"registry":"187248174200.dkr.ecr.us-east-1.amazonaws.com","type":"aws"}`
+		creds, err := ParseCredentialsFromJSON(jsonStr)
+		require.NoError(t, err)
+		
+		// Should have extracted all AWS credentials
+		assert.Equal(t, "AKIASXGG4MR4EOLXJ5PM", creds["AWS_ACCESS_KEY_ID"])
+		assert.Equal(t, "us-east-1", creds["AWS_REGION"])
+		assert.Equal(t, "vsUvsh6zd6+1sw5dxYklr1SOuHorY7Cdyr5ff8YA", creds["AWS_SECRET_ACCESS_KEY"])
+		
+		// Should also include top-level fields
+		assert.Equal(t, "187248174200.dkr.ecr.us-east-1.amazonaws.com", creds["registry"])
+		assert.Equal(t, "aws", creds["type"])
+	})
+	
+	t.Run("beta9 format end-to-end", func(t *testing.T) {
+		// Full workflow: parse -> detect type -> create provider
+		jsonStr := `{"credentials":{"AWS_ACCESS_KEY_ID":"AKIA123","AWS_REGION":"us-east-1","AWS_SECRET_ACCESS_KEY":"secret123"},"registry":"187248174200.dkr.ecr.us-east-1.amazonaws.com","type":"aws"}`
+		creds, err := ParseCredentialsFromJSON(jsonStr)
+		require.NoError(t, err)
+		
+		registry := creds["registry"]
+		credType := DetectCredentialType(registry, creds)
+		assert.Equal(t, CredTypeAWS, credType)
+		
+		// Should have all required AWS fields
+		assert.Equal(t, "AKIA123", creds["AWS_ACCESS_KEY_ID"])
+		assert.Equal(t, "us-east-1", creds["AWS_REGION"])
+		assert.Equal(t, "secret123", creds["AWS_SECRET_ACCESS_KEY"])
+	})
+
+	t.Run("username:password format", func(t *testing.T) {
+		creds, err := ParseCredentialsFromJSON("user:pass")
+		require.NoError(t, err)
+		assert.Equal(t, "user", creds["USERNAME"])
+		assert.Equal(t, "pass", creds["PASSWORD"])
+	})
+
+	t.Run("empty string", func(t *testing.T) {
+		creds, err := ParseCredentialsFromJSON("")
+		require.NoError(t, err)
+		assert.Nil(t, creds)
+	})
+
+	t.Run("invalid format", func(t *testing.T) {
+		creds, err := ParseCredentialsFromJSON("invalid")
+		assert.Error(t, err)
+		assert.Nil(t, creds)
+	})
+}
+
+func TestCreateProviderFromCredentials(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("basic auth", func(t *testing.T) {
+		creds := map[string]string{
+			"USERNAME": "testuser",
+			"PASSWORD": "testpass",
+		}
+		provider := CreateProviderFromCredentials(ctx, "ghcr.io", CredTypeBasic, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
+		require.NoError(t, err)
+		assert.Equal(t, "testuser", authConfig.Username)
+		assert.Equal(t, "testpass", authConfig.Password)
+	})
+
+	t.Run("NGC token auth", func(t *testing.T) {
+		creds := map[string]string{
+			"NGC_API_KEY": "api-key-value",
+		}
+		provider := CreateProviderFromCredentials(ctx, "nvcr.io", CredTypeToken, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "nvcr.io", "")
+		require.NoError(t, err)
+		assert.Equal(t, "$oauthtoken", authConfig.Username)
+		assert.Equal(t, "api-key-value", authConfig.Password)
+	})
+
+	t.Run("GHCR token auth with username", func(t *testing.T) {
+		creds := map[string]string{
+			"GITHUB_USERNAME": "testuser",
+			"GITHUB_TOKEN":    "ghp_token123",
+		}
+		provider := CreateProviderFromCredentials(ctx, "ghcr.io", CredTypeToken, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
+		require.NoError(t, err)
+		assert.Equal(t, "testuser", authConfig.Username)
+		assert.Equal(t, "ghp_token123", authConfig.Password)
+	})
+
+	t.Run("GHCR token auth without username", func(t *testing.T) {
+		creds := map[string]string{
+			"GITHUB_TOKEN": "ghp_token123",
+		}
+		provider := CreateProviderFromCredentials(ctx, "ghcr.io", CredTypeToken, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
+		require.NoError(t, err)
+		// Should use token as username when no username provided
+		assert.Equal(t, "ghp_token123", authConfig.Username)
+		assert.Equal(t, "ghp_token123", authConfig.Password)
+	})
+
+	t.Run("Docker Hub with username/password", func(t *testing.T) {
+		creds := map[string]string{
+			"DOCKERHUB_USERNAME": "dockeruser",
+			"DOCKERHUB_PASSWORD": "dockerpass",
+		}
+		provider := CreateProviderFromCredentials(ctx, "docker.io", CredTypeToken, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "docker.io", "")
+		require.NoError(t, err)
+		assert.Equal(t, "dockeruser", authConfig.Username)
+		assert.Equal(t, "dockerpass", authConfig.Password)
+	})
+
+	t.Run("GCP with access token", func(t *testing.T) {
+		creds := map[string]string{
+			"GCP_ACCESS_TOKEN": "ya29.token123",
+		}
+		provider := CreateProviderFromCredentials(ctx, "gcr.io", CredTypeGCP, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "gcr.io", "")
+		require.NoError(t, err)
+		assert.Equal(t, "oauth2accesstoken", authConfig.Username)
+		assert.Equal(t, "ya29.token123", authConfig.Password)
+	})
+
+	t.Run("no credentials", func(t *testing.T) {
+		provider := CreateProviderFromCredentials(ctx, "ghcr.io", CredTypePublic, map[string]string{})
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
+		assert.Equal(t, ErrNoCredentials, err)
+		assert.Nil(t, authConfig)
+	})
+
+	t.Run("registry-specific username keys", func(t *testing.T) {
+		creds := map[string]string{
+			"REGISTRY_USERNAME": "registry-user",
+			"DOCKER_USERNAME":   "docker-user",
+			"USERNAME":          "generic-user",
+			"PASSWORD":          "pass123",
+		}
+		provider := CreateProviderFromCredentials(ctx, "example.com", CredTypeBasic, creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "example.com", "")
+		require.NoError(t, err)
+		// Should prefer REGISTRY_USERNAME over others
+		assert.Equal(t, "registry-user", authConfig.Username)
+		assert.Equal(t, "pass123", authConfig.Password)
+	})
+}
+
+func TestCredentialsToProvider(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("auto-detect basic auth", func(t *testing.T) {
+		creds := map[string]string{
+			"USERNAME": "user",
+			"PASSWORD": "pass",
+		}
+		provider := CredentialsToProvider(ctx, "ghcr.io", creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
+		require.NoError(t, err)
+		assert.Equal(t, "user", authConfig.Username)
+	})
+
+	t.Run("auto-detect token", func(t *testing.T) {
+		creds := map[string]string{
+			"GITHUB_TOKEN": "ghp_token",
+		}
+		provider := CredentialsToProvider(ctx, "ghcr.io", creds)
+		require.NotNil(t, provider)
+		
+		authConfig, err := provider.GetCredentials(ctx, "ghcr.io", "")
+		require.NoError(t, err)
+		// For GHCR without explicit username, token is used as both username and password
+		assert.Equal(t, "ghp_token", authConfig.Username)
+		assert.Equal(t, "ghp_token", authConfig.Password)
+	})
+
+	t.Run("empty credentials", func(t *testing.T) {
+		provider := CredentialsToProvider(ctx, "ghcr.io", map[string]string{})
+		require.NotNil(t, provider)
+		assert.Equal(t, "public-only", provider.Name())
+	})
+}

@@ -117,24 +117,33 @@ func (s *OCIClipStorage) initLayers(ctx context.Context) error {
 		log.Warn().
 			Err(err).
 			Str("registry", s.storageInfo.RegistryURL).
+			Str("repository", s.storageInfo.Repository).
 			Str("provider", s.credProvider.Name()).
 			Msg("Failed to get credentials from provider, falling back to keychain")
 	}
 
 	if authConfig != nil {
 		// Use provided credentials
-		log.Debug().
+		log.Info().
 			Str("registry", s.storageInfo.RegistryURL).
+			Str("repository", s.storageInfo.Repository).
 			Str("provider", s.credProvider.Name()).
+			Bool("has_username", authConfig.Username != "").
+			Bool("has_password", authConfig.Password != "").
+			Bool("has_auth", authConfig.Auth != "").
+			Bool("has_identity_token", authConfig.IdentityToken != "").
+			Bool("has_registry_token", authConfig.RegistryToken != "").
 			Msg("Using credentials from provider for layer init")
-		remoteOpts = append(remoteOpts, remote.WithAuth(&authn.Basic{
-			Username: authConfig.Username,
-			Password: authConfig.Password,
-		}))
+		// Convert AuthConfig to proper authenticator (handles all auth types: username/password, tokens, etc.)
+		auth := authn.FromConfig(*authConfig)
+		remoteOpts = append(remoteOpts, remote.WithAuth(auth))
 	} else {
 		// Fall back to default keychain for anonymous or keychain-based auth
-		log.Debug().
+		log.Warn().
+			Err(err).
 			Str("registry", s.storageInfo.RegistryURL).
+			Str("repository", s.storageInfo.Repository).
+			Str("provider", s.credProvider.Name()).
 			Msg("No credentials from provider for layer init, using default keychain")
 		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
 	}
