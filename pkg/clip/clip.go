@@ -5,19 +5,43 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
+
+// SetLogLevel configures the logging verbosity for the CLIP library.
+// Valid levels: "debug", "info", "warn", "error", "disabled"
+// Use "debug" to see detailed operation logs (file operations, cache hits/misses, etc.)
+// Use "info" for high-level operation logs (default)
+// Use "disabled" to suppress all logs
+func SetLogLevel(level string) error {
+	switch strings.ToLower(level) {
+	case "debug":
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	case "info":
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	case "warn", "warning":
+		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	case "error":
+		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+	case "disabled", "none", "off":
+		zerolog.SetGlobalLevel(zerolog.Disabled)
+	default:
+		return fmt.Errorf("invalid log level %q: must be one of: debug, info, warn, error, disabled", level)
+	}
+	return nil
+}
 
 type CreateOptions struct {
 	InputPath    string
 	OutputPath   string
-	Verbose      bool
 	Credentials  storage.ClipStorageCredentials
 	ProgressChan chan<- int
 }
@@ -25,24 +49,23 @@ type CreateOptions struct {
 type CreateRemoteOptions struct {
 	InputPath  string
 	OutputPath string
-	Verbose    bool
 }
 
 type ExtractOptions struct {
 	InputFile  string
 	OutputPath string
-	Verbose    bool
 }
 
 type MountOptions struct {
 	ArchivePath           string
 	MountPoint            string
-	Verbose               bool
 	CachePath             string
-	ContentCache          ContentCache
+	ContentCache          storage.ContentCache
 	ContentCacheAvailable bool
-	StorageInfo           *common.S3StorageInfo
+	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
+	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
+	RegistryCredProvider  interface{} // Registry authentication (for OCI archives)
 }
 
 type StoreS3Options struct {
@@ -63,7 +86,6 @@ func CreateArchive(options CreateOptions) error {
 	err := a.Create(ClipArchiverOptions{
 		SourcePath: options.InputPath,
 		OutputFile: options.OutputPath,
-		Verbose:    options.Verbose,
 	})
 	if err != nil {
 		return err
@@ -87,7 +109,6 @@ func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si commo
 	err = localArchiver.Create(ClipArchiverOptions{
 		SourcePath: options.InputPath,
 		OutputFile: tempFile.Name(),
-		Verbose:    options.Verbose,
 	})
 	if err != nil {
 		return err
@@ -115,7 +136,6 @@ func ExtractArchive(options ExtractOptions) error {
 	err := a.Extract(ClipArchiverOptions{
 		ArchivePath: options.InputFile,
 		OutputPath:  options.OutputPath,
-		Verbose:     options.Verbose,
 	})
 
 	if err != nil {
@@ -143,18 +163,32 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		return nil, nil, nil, fmt.Errorf("invalid archive: %v", err)
 	}
 
+	// Handle StorageInfo type conversion
+	var s3Info *common.S3StorageInfo
+	if options.StorageInfo != nil {
+		if si, ok := options.StorageInfo.(*common.S3StorageInfo); ok {
+			s3Info = si
+		} else if si, ok := options.StorageInfo.(common.S3StorageInfo); ok {
+			s3Info = &si
+		}
+	}
+
 	storage, err := storage.NewClipStorage(storage.ClipStorageOpts{
-		ArchivePath: options.ArchivePath,
-		CachePath:   options.CachePath,
-		Metadata:    metadata,
-		Credentials: options.Credentials,
-		StorageInfo: options.StorageInfo,
+		ArchivePath:           options.ArchivePath,
+		CachePath:             options.CachePath,
+		Metadata:              metadata,
+		Credentials:           options.Credentials,
+		StorageInfo:           s3Info,
+		ContentCache:          options.ContentCache,
+		UseCheckpoints:        options.UseCheckpoints,
+		ContentCacheAvailable: options.ContentCacheAvailable,
+		RegistryCredProvider:  options.RegistryCredProvider,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{Verbose: options.Verbose, ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
+	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
@@ -223,5 +257,83 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 	}
 
 	log.Info().Msg("done uploading archive")
+	return nil
+}
+
+// CreateFromOCIImageOptions configures OCI image indexing
+type CreateFromOCIImageOptions struct {
+	ImageRef      string
+	OutputPath    string
+	CheckpointMiB int64
+	CredProvider  interface{}
+	ProgressChan  chan<- OCIIndexProgress // optional channel for progress updates
+}
+
+// CreateFromOCIImage creates a metadata-only index (.clip) file from an OCI image
+func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) error {
+	log.Info().Msgf("creating OCI archive index from %s to %s", options.ImageRef, options.OutputPath)
+
+	if options.CheckpointMiB == 0 {
+		options.CheckpointMiB = 2 // default
+	}
+
+	// Convert interface{} to RegistryCredentialProvider if provided
+	var credProvider common.RegistryCredentialProvider
+	if options.CredProvider != nil {
+		if provider, ok := options.CredProvider.(common.RegistryCredentialProvider); ok {
+			credProvider = provider
+		}
+	}
+
+	archiver := NewClipArchiver()
+	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
+		ImageRef:      options.ImageRef,
+		CheckpointMiB: options.CheckpointMiB,
+		CredProvider:  credProvider,
+		ProgressChan:  options.ProgressChan,
+	}, options.OutputPath)
+
+	if err != nil {
+		return err
+	}
+
+	log.Info().Msg("OCI archive index created successfully")
+	return nil
+}
+
+// CreateAndUploadOCIArchive creates an OCI index and uploads metadata to S3
+// This combines indexing with remote storage upload
+func CreateAndUploadOCIArchive(ctx context.Context, options CreateFromOCIImageOptions, si common.ClipStorageInfo) error {
+	log.Info().Msgf("creating and uploading OCI archive index from %s", options.ImageRef)
+
+	// Create the OCI index locally
+	err := CreateFromOCIImage(ctx, options)
+	if err != nil {
+		return fmt.Errorf("failed to create OCI index: %w", err)
+	}
+
+	// If S3 storage info is provided, upload the metadata
+	if _, ok := si.(*common.S3StorageInfo); ok {
+		// Load the metadata
+		localArchiver := NewClipArchiver()
+		metadata, err := localArchiver.ExtractMetadata(options.OutputPath)
+		if err != nil {
+			return fmt.Errorf("failed to extract metadata: %w", err)
+		}
+
+		// Create remote archive (uploads metadata to S3)
+		outputPath := options.OutputPath
+		if outputPath == "" {
+			outputPath = fmt.Sprintf("%s.clip", options.ImageRef)
+		}
+
+		err = localArchiver.CreateRemoteArchive(si, metadata, outputPath)
+		if err != nil {
+			return fmt.Errorf("failed to create remote archive: %w", err)
+		}
+
+		log.Info().Msg("OCI archive index uploaded successfully")
+	}
+
 	return nil
 }

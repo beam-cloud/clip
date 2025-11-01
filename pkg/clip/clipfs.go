@@ -8,11 +8,12 @@ import (
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/rs/zerolog/log"
 )
 
 type ClipFileSystemOpts struct {
 	Verbose               bool
-	ContentCache          ContentCache
+	ContentCache          storage.ContentCache
 	ContentCacheAvailable bool
 }
 
@@ -20,10 +21,9 @@ type ClipFileSystem struct {
 	storage               storage.ClipStorageInterface
 	root                  *FSNode
 	lookupCache           map[string]*lookupCacheEntry
-	contentCache          ContentCache
+	contentCache          storage.ContentCache
 	contentCacheAvailable bool
 	cacheMutex            sync.RWMutex
-	verbose               bool
 	cachingStatus         map[string]bool
 	cacheEventChan        chan cacheEvent
 	cachingStatusMu       sync.Mutex
@@ -34,11 +34,6 @@ type lookupCacheEntry struct {
 	attr  fuse.Attr
 }
 
-type ContentCache interface {
-	GetContent(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]byte, error)
-	StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error)
-}
-
 type cacheEvent struct {
 	node *FSNode
 }
@@ -46,7 +41,6 @@ type cacheEvent struct {
 func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
 		storage:               s,
-		verbose:               opts.Verbose,
 		lookupCache:           make(map[string]*lookupCacheEntry),
 		contentCache:          opts.ContentCache,
 		cacheEventChan:        make(chan cacheEvent, 10000),
@@ -119,12 +113,12 @@ func (cfs *ClipFileSystem) processCacheEvents() {
 						chunkSize = clipNode.DataLen - offset
 					}
 
-					fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
-					nRead, err := cfs.storage.ReadFile(clipNode, fileContent, offset)
-					if err != nil {
-						cacheEvent.node.log("err reading file: %v", err)
-						break
-					}
+				fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
+				nRead, err := cfs.storage.ReadFile(clipNode, fileContent, offset)
+				if err != nil {
+					log.Error().Err(err).Str("path", clipNode.Path).Msg("error reading file for caching")
+					break
+				}
 
 					chunks <- fileContent[:nRead]
 					fileContent = nil
@@ -135,7 +129,7 @@ func (cfs *ClipFileSystem) processCacheEvents() {
 
 			hash, err := cfs.contentCache.StoreContent(chunks, clipNode.ContentHash, struct{ RoutingKey string }{RoutingKey: clipNode.ContentHash})
 			if err != nil || hash != clipNode.ContentHash {
-				cacheEvent.node.log("err storing file contents: %v", err)
+				log.Error().Err(err).Str("path", clipNode.Path).Str("hash", clipNode.ContentHash).Msg("error storing file contents")
 				cfs.clearCachingStatus(clipNode.ContentHash)
 			}
 		}

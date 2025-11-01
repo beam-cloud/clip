@@ -77,7 +77,6 @@ func TestCreateArchive(t *testing.T) {
 	options := CreateOptions{
 		InputPath:  tempDir,
 		OutputPath: archiveFile.Name(),
-		Verbose:    true,
 	}
 
 	err = CreateArchive(options)
@@ -107,7 +106,6 @@ func TestCreateArchive(t *testing.T) {
 	extractOptions := ExtractOptions{
 		InputFile:  archiveFile.Name(),
 		OutputPath: extractDir,
-		Verbose:    true,
 	}
 
 	err = ExtractArchive(extractOptions)
@@ -243,7 +241,6 @@ func BenchmarkCreateArchiveFromOCIImage(b *testing.B) {
 		options := CreateOptions{
 			InputPath:  tmpDir,
 			OutputPath: archiveFile.Name(),
-			Verbose:    false,
 		}
 
 		start := time.Now()

@@ -3,6 +3,7 @@ package common
 import (
 	"bytes"
 	"encoding/gob"
+	"time"
 )
 
 var ClipFileStartBytes []byte = []byte{0x89, 0x43, 0x4C, 0x49, 0x50, 0x0D, 0x0A, 0x1A, 0x0A}
@@ -67,6 +68,74 @@ func (ssi S3StorageInfo) Encode() ([]byte, error) {
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
 	if err := enc.Encode(ssi); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+// LayerMetadata contains information about an individual OCI layer
+type LayerMetadata struct {
+	MIMEType    string            `json:"MIMEType"`
+	Digest      string            `json:"Digest"`
+	Size        int64             `json:"Size"`
+	Annotations map[string]string `json:"Annotations,omitempty"`
+}
+
+// ImageMetadata contains comprehensive metadata about the OCI image
+// This is embedded in the index to avoid runtime lookups
+type ImageMetadata struct {
+	// Image identification
+	Name   string `json:"Name"`   // Full image reference (e.g., docker.io/library/alpine:3.18)
+	Digest string `json:"Digest"` // Image manifest digest
+
+	// Image configuration
+	RepoTags      []string          `json:"RepoTags,omitempty"`
+	Created       time.Time         `json:"Created"`
+	DockerVersion string            `json:"DockerVersion,omitempty"`
+	Labels        map[string]string `json:"Labels,omitempty"`
+	Architecture  string            `json:"Architecture"`
+	Os            string            `json:"Os"`
+	Variant       string            `json:"Variant,omitempty"`
+	Author        string            `json:"Author,omitempty"`
+
+	// Runtime configuration
+	Env        []string          `json:"Env,omitempty"`
+	Cmd        []string          `json:"Cmd,omitempty"`
+	Entrypoint []string          `json:"Entrypoint,omitempty"`
+	User       string            `json:"User,omitempty"`
+	WorkingDir string            `json:"WorkingDir,omitempty"`
+	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
+	Volumes      map[string]struct{} `json:"Volumes,omitempty"`
+	StopSignal   string            `json:"StopSignal,omitempty"`
+
+	// Layer information
+	Layers     []string        `json:"Layers"`     // Layer digests
+	LayersData []LayerMetadata `json:"LayersData"` // Detailed layer information
+}
+
+// OCIStorageInfo stores metadata for OCI images with decompression indexes
+type OCIStorageInfo struct {
+	RegistryURL             string
+	Repository              string
+	Reference               string // tag or digest
+	Layers                  []string
+	GzipIdxByLayer          map[string]*GzipIndex // per-layer gzip decompression index
+	ZstdIdxByLayer          map[string]*ZstdIndex // per-layer zstd index (P1)
+	DecompressedHashByLayer map[string]string     // maps layer digest -> SHA256 hash of decompressed data
+
+	// Image metadata - embedded to avoid runtime lookups
+	ImageMetadata *ImageMetadata `json:"ImageMetadata,omitempty"`
+}
+
+func (osi OCIStorageInfo) Type() string {
+	return "oci"
+}
+
+func (osi OCIStorageInfo) Encode() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(osi); err != nil {
 		return nil, err
 	}
 

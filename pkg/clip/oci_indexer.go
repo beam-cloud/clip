@@ -1,0 +1,723 @@
+package clip
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"hash/fnv"
+	"io"
+	"path"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/hanwen/go-fuse/v2/fuse"
+	log "github.com/rs/zerolog/log"
+	"github.com/tidwall/btree"
+)
+
+// OCIIndexProgress represents a progress update during OCI image indexing
+type OCIIndexProgress struct {
+	LayerIndex   int    // Current layer being processed (1-based)
+	TotalLayers  int    // Total number of layers
+	LayerDigest  string // Digest of current layer
+	Stage        string // "starting" or "completed"
+	FilesIndexed int    // Number of files indexed so far (only for "completed")
+	Message      string // Human-readable message
+}
+
+// IndexOCIImageOptions configures the OCI indexer
+type IndexOCIImageOptions struct {
+	ImageRef      string
+	CheckpointMiB int64                             // Checkpoint every N MiB (default 2)
+	CredProvider  common.RegistryCredentialProvider // optional credential provider for registry authentication
+	ProgressChan  chan<- OCIIndexProgress           // optional channel for progress updates
+}
+
+// countingReader tracks bytes read from an io.Reader
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	k, err := cr.r.Read(p)
+	cr.n += int64(k)
+	return k, err
+}
+
+// IndexOCIImage creates a metadata-only index from an OCI image
+func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOptions) (
+	index *btree.BTree,
+	layerDigests []string,
+	gzipIdx map[string]*common.GzipIndex,
+	decompressedHashes map[string]string,
+	registryURL string,
+	repository string,
+	reference string,
+	imageMetadata *common.ImageMetadata,
+	err error,
+) {
+	if opts.CheckpointMiB == 0 {
+		opts.CheckpointMiB = 2 // default
+	}
+
+	// Parse image reference
+	ref, err := name.ParseReference(opts.ImageRef)
+	if err != nil {
+		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to parse image reference: %w", err)
+	}
+
+	// Extract registry and repository info
+	registryURL = ref.Context().RegistryStr()
+	repository = ref.Context().RepositoryStr()
+	reference = ref.Identifier()
+
+	// Determine which credential provider to use
+	credProvider := opts.CredProvider
+	if credProvider == nil {
+		credProvider = common.DefaultProvider()
+	}
+
+	// Build remote options with authentication
+	remoteOpts := []remote.Option{remote.WithContext(ctx)}
+
+	// Try to get credentials from provider
+	authConfig, err := credProvider.GetCredentials(ctx, registryURL, repository)
+	if err != nil && err != common.ErrNoCredentials {
+		log.Warn().
+			Err(err).
+			Str("registry", registryURL).
+			Str("provider", credProvider.Name()).
+			Msg("Failed to get credentials from provider, falling back to keychain")
+	}
+
+	if authConfig != nil {
+		// Use provided credentials
+		log.Debug().
+			Str("registry", registryURL).
+			Str("provider", credProvider.Name()).
+			Msg("Using credentials from provider")
+		// Convert AuthConfig to proper authenticator (handles all auth types: username/password, tokens, etc.)
+		auth := authn.FromConfig(*authConfig)
+		remoteOpts = append(remoteOpts, remote.WithAuth(auth))
+	} else {
+		// Fall back to default keychain for anonymous or keychain-based auth
+		log.Debug().
+			Str("registry", registryURL).
+			Msg("No credentials from provider, using default keychain")
+		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	}
+
+	// Fetch image
+	img, err := remote.Image(ref, remoteOpts...)
+	if err != nil {
+		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to fetch image: %w", err)
+	}
+
+	// Extract image metadata
+	imageMetadata, err = ca.extractImageMetadata(img, opts.ImageRef)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to extract image metadata, continuing without it")
+		imageMetadata = nil
+	}
+
+	// Get image layers
+	layers, err := img.Layers()
+	if err != nil {
+		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to get layers: %w", err)
+	}
+
+	// Initialize index and maps
+	index = ca.newIndex()
+	layerDigests = make([]string, 0, len(layers))
+	gzipIdx = make(map[string]*common.GzipIndex)
+	decompressedHashes = make(map[string]string)
+
+	// Create root node with complete FUSE attributes
+	now := time.Now()
+	root := &common.ClipNode{
+		Path:     "/",
+		NodeType: common.DirNode,
+		Attr: fuse.Attr{
+			Ino:       1,
+			Size:      0,
+			Blocks:    0,
+			Atime:     uint64(now.Unix()),
+			Atimensec: uint32(now.Nanosecond()),
+			Mtime:     uint64(now.Unix()),
+			Mtimensec: uint32(now.Nanosecond()),
+			Ctime:     uint64(now.Unix()),
+			Ctimensec: uint32(now.Nanosecond()),
+			Mode:      uint32(syscall.S_IFDIR | 0755),
+			Nlink:     2, // Directories start with link count of 2 (. and ..)
+			Owner: fuse.Owner{
+				Uid: 0, // root
+				Gid: 0, // root
+			},
+		},
+	}
+	index.Set(root)
+
+	log.Info().Msgf("Indexing %d layers from %s", len(layers), opts.ImageRef)
+
+	// Process each layer in order (bottom to top)
+	for i, layer := range layers {
+		digest, err := layer.Digest()
+		if err != nil {
+			return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to get layer digest: %w", err)
+		}
+
+		layerDigestStr := digest.String()
+		layerDigests = append(layerDigests, layerDigestStr)
+
+		log.Info().Msgf("Processing layer %d/%d: %s", i+1, len(layers), layerDigestStr)
+
+		// Send progress update: starting layer
+		if opts.ProgressChan != nil {
+			opts.ProgressChan <- OCIIndexProgress{
+				LayerIndex:  i + 1,
+				TotalLayers: len(layers),
+				LayerDigest: layerDigestStr,
+				Stage:       "starting",
+				Message:     fmt.Sprintf("Processing layer %d/%d", i+1, len(layers)),
+			}
+		}
+
+		// Get compressed layer stream
+		compressedRC, err := layer.Compressed()
+		if err != nil {
+			return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to get compressed layer: %w", err)
+		}
+
+		// Index this layer with optimizations
+		gzipIndex, decompressedHash, err := ca.indexLayerOptimized(ctx, compressedRC, layerDigestStr, index, opts)
+		compressedRC.Close()
+		if err != nil {
+			return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
+		}
+
+		gzipIdx[layerDigestStr] = gzipIndex
+		decompressedHashes[layerDigestStr] = decompressedHash
+
+		log.Info().Msgf("Layer %s: decompressed_hash=%s", layerDigestStr, decompressedHash)
+
+		// Send progress update: completed layer
+		if opts.ProgressChan != nil {
+			opts.ProgressChan <- OCIIndexProgress{
+				LayerIndex:   i + 1,
+				TotalLayers:  len(layers),
+				LayerDigest:  layerDigestStr,
+				Stage:        "completed",
+				FilesIndexed: index.Len(),
+				Message:      fmt.Sprintf("Completed layer %d/%d (%d files total)", i+1, len(layers), index.Len()),
+			}
+		}
+	}
+
+	log.Info().Msgf("Successfully indexed image with %d files", index.Len())
+
+	return index, layerDigests, gzipIdx, decompressedHashes, registryURL, repository, reference, imageMetadata, nil
+}
+
+// indexLayerOptimized processes a single layer with optimizations
+// Returns gzip index and SHA256 hash of decompressed data
+func (ca *ClipArchiver) indexLayerOptimized(
+	ctx context.Context,
+	compressedRC io.ReadCloser,
+	layerDigest string,
+	index *btree.BTree,
+	opts IndexOCIImageOptions,
+) (*common.GzipIndex, string, error) {
+	// Wrap compressed stream with counting reader
+	compressedCounter := &countingReader{r: compressedRC}
+
+	// Create gzip reader
+	gzr, err := gzip.NewReader(compressedCounter)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzr.Close()
+
+	// Hash the decompressed data as we read it
+	hasher := sha256.New()
+	hashingReader := io.TeeReader(gzr, hasher)
+
+	// Wrap uncompressed stream with counting reader
+	uncompressedCounter := &countingReader{r: hashingReader}
+
+	// Create tar reader
+	tr := tar.NewReader(uncompressedCounter)
+
+	// Track checkpoints
+	checkpoints := make([]common.GzipCheckpoint, 0)
+	checkpointInterval := opts.CheckpointMiB * 1024 * 1024
+	lastCheckpoint := int64(0)
+
+	// Process tar entries
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to read tar header: %w", err)
+		}
+
+		// Record checkpoint periodically (before processing file data)
+		if uncompressedCounter.n-lastCheckpoint >= checkpointInterval {
+			ca.addCheckpoint(&checkpoints, compressedCounter.n, uncompressedCounter.n, &lastCheckpoint)
+		}
+
+		// Clean path
+		cleanPath := path.Clean("/" + strings.TrimPrefix(hdr.Name, "./"))
+
+		// Handle whiteouts
+		if ca.handleWhiteout(index, cleanPath) {
+			continue
+		}
+
+		// Process based on type
+		switch hdr.Typeflag {
+		case tar.TypeReg, tar.TypeRegA:
+			if err := ca.processRegularFile(index, tr, hdr, cleanPath, layerDigest, compressedCounter, uncompressedCounter, &checkpoints, &lastCheckpoint); err != nil {
+				return nil, "", err
+			}
+
+		case tar.TypeSymlink:
+			ca.processSymlink(index, hdr, cleanPath, layerDigest)
+
+		case tar.TypeDir:
+			ca.processDirectory(index, hdr, cleanPath, layerDigest)
+
+		case tar.TypeLink:
+			ca.processHardLink(index, hdr, cleanPath)
+		}
+	}
+
+	// Add final checkpoint if needed
+	if uncompressedCounter.n > lastCheckpoint {
+		ca.addCheckpoint(&checkpoints, compressedCounter.n, uncompressedCounter.n, &lastCheckpoint)
+	}
+
+	// Compute final hash of all decompressed data
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// Log summary
+	log.Info().Msgf("Layer indexed with %d checkpoints, decompressed_hash=%s", len(checkpoints), decompressedHash)
+
+	// Return gzip index and decompressed hash
+	return &common.GzipIndex{
+		LayerDigest: layerDigest,
+		Checkpoints: checkpoints,
+	}, decompressedHash, nil
+}
+
+// handleWhiteout processes OCI whiteout files
+func (ca *ClipArchiver) handleWhiteout(index *btree.BTree, fullPath string) bool {
+	dir := path.Dir(fullPath)
+	base := path.Base(fullPath)
+
+	// Opaque whiteout: .wh..wh..opq
+	if base == ".wh..wh..opq" {
+		// Remove all entries under this directory from lower layers
+		ca.deleteRange(index, dir+"/")
+		log.Debug().Msgf("  Opaque whiteout: %s", dir)
+		return true
+	}
+
+	// Regular whiteout: .wh.<name>
+	if strings.HasPrefix(base, ".wh.") {
+		victim := path.Join(dir, strings.TrimPrefix(base, ".wh."))
+		ca.deleteNode(index, victim)
+		log.Debug().Msgf("  Whiteout: %s", victim)
+		return true
+	}
+
+	return false
+}
+
+// deleteNode removes a node and all its children from the index
+func (ca *ClipArchiver) deleteNode(index *btree.BTree, nodePath string) {
+	// Remove the node itself
+	index.Delete(&common.ClipNode{Path: nodePath})
+
+	// Remove all children (for directories)
+	ca.deleteRange(index, nodePath+"/")
+}
+
+// deleteRange removes all nodes with paths starting with prefix
+func (ca *ClipArchiver) deleteRange(index *btree.BTree, prefix string) {
+	var toDelete []*common.ClipNode
+
+	pivot := &common.ClipNode{Path: prefix}
+	index.Ascend(pivot, func(a interface{}) bool {
+		node := a.(*common.ClipNode)
+		if strings.HasPrefix(node.Path, prefix) {
+			toDelete = append(toDelete, node)
+			return true
+		}
+		return false // stop iteration once we're past the prefix
+	})
+
+	for _, node := range toDelete {
+		index.Delete(node)
+	}
+}
+
+// isRuntimeDirectory checks if a path is a special runtime directory
+// that should be mounted by the container runtime, not included in the image
+func (ca *ClipArchiver) isRuntimeDirectory(path string) bool {
+	runtimeDirs := []string{
+		"/proc",
+		"/sys",
+		"/dev",
+	}
+
+	for _, dir := range runtimeDirs {
+		if path == dir {
+			return true
+		}
+	}
+
+	return false
+}
+
+// tarModeToFuse converts tar mode to FUSE mode
+func (ca *ClipArchiver) tarModeToFuse(tarMode int64, typeflag byte) uint32 {
+	mode := uint32(tarMode & 0777) // permission bits
+
+	switch typeflag {
+	case tar.TypeDir:
+		mode |= syscall.S_IFDIR
+	case tar.TypeSymlink:
+		mode |= syscall.S_IFLNK
+	case tar.TypeReg, tar.TypeRegA:
+		mode |= syscall.S_IFREG
+	default:
+		mode |= syscall.S_IFREG
+	}
+
+	return mode
+}
+
+// generateInode creates a stable inode number from digest and path
+func (ca *ClipArchiver) generateInode(digest string, path string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(digest))
+	h.Write([]byte(path))
+	inode := h.Sum64()
+
+	// Ensure inode is never 0 (reserved for errors) or 1 (reserved for root)
+	if inode <= 1 {
+		inode = 2
+	}
+
+	return inode
+}
+
+// CreateFromOCI creates a metadata-only .clip file from an OCI image
+func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOptions, clipOut string) error {
+	// Index the OCI image
+	index, layers, gzipIdx, decompressedHashes, registryURL, repository, reference, imageMetadata, err := ca.IndexOCIImage(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to index OCI image: %w", err)
+	}
+
+	// Create OCIStorageInfo
+	storageInfo := &common.OCIStorageInfo{
+		RegistryURL:             registryURL,
+		Repository:              repository,
+		Reference:               reference,
+		Layers:                  layers,
+		GzipIdxByLayer:          gzipIdx,
+		ZstdIdxByLayer:          nil, // P1 feature
+		DecompressedHashByLayer: decompressedHashes,
+		ImageMetadata:           imageMetadata,
+	}
+
+	// Create metadata
+	metadata := &common.ClipArchiveMetadata{
+		Index:       index,
+		StorageInfo: storageInfo,
+	}
+
+	// Write metadata-only clip file
+	err = ca.CreateRemoteArchive(storageInfo, metadata, clipOut)
+	if err != nil {
+		return fmt.Errorf("failed to create remote archive: %w", err)
+	}
+
+	log.Info().Msgf("Created metadata-only clip file: %s", clipOut)
+	log.Info().Msgf("  Files indexed: %d", index.Len())
+	log.Info().Msgf("  Layers: %d", len(layers))
+
+	// Calculate total checkpoint size
+	totalCheckpoints := 0
+	for _, idx := range gzipIdx {
+		totalCheckpoints += len(idx.Checkpoints)
+	}
+	log.Info().Msgf("  Gzip checkpoints: %d", totalCheckpoints)
+
+	return nil
+}
+
+// addCheckpoint adds a gzip checkpoint and updates lastCheckpoint
+func (ca *ClipArchiver) addCheckpoint(checkpoints *[]common.GzipCheckpoint, cOff, uOff int64, lastCheckpoint *int64) {
+	cp := common.GzipCheckpoint{
+		COff: cOff,
+		UOff: uOff,
+	}
+	*checkpoints = append(*checkpoints, cp)
+	*lastCheckpoint = uOff
+	log.Debug().Msgf("Added checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
+}
+
+// processRegularFile processes a regular file entry from tar
+func (ca *ClipArchiver) processRegularFile(
+	index *btree.BTree,
+	tr *tar.Reader,
+	hdr *tar.Header,
+	cleanPath string,
+	layerDigest string,
+	compressedCounter *countingReader,
+	uncompressedCounter *countingReader,
+	checkpoints *[]common.GzipCheckpoint,
+	lastCheckpoint *int64,
+) error {
+	dataStart := uncompressedCounter.n
+
+	// Content-defined checkpoint: Add checkpoint before large files (>512KB)
+	// This enables instant seeking to file start without decompression
+	// Only add if we haven't added a checkpoint in the last 512KB to avoid checkpoint spam
+	const minCheckpointGap = 512 * 1024
+	if hdr.Size > 512*1024 && uncompressedCounter.n > *lastCheckpoint && (uncompressedCounter.n-*lastCheckpoint) >= minCheckpointGap {
+		ca.addCheckpoint(checkpoints, compressedCounter.n, uncompressedCounter.n, lastCheckpoint)
+		log.Debug().Msgf("Added file-boundary checkpoint for large file: %s", cleanPath)
+	}
+
+	// Skip file content efficiently using CopyN
+	if hdr.Size > 0 {
+		n, err := io.CopyN(io.Discard, tr, hdr.Size)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to skip file content: %w", err)
+		}
+		if n != hdr.Size {
+			return fmt.Errorf("failed to skip complete file (wanted %d, got %d)", hdr.Size, n)
+		}
+	}
+
+	node := &common.ClipNode{
+		Path:     cleanPath,
+		NodeType: common.FileNode,
+		Attr: fuse.Attr{
+			Ino:       ca.generateInode(layerDigest, cleanPath),
+			Size:      uint64(hdr.Size),
+			Blocks:    (uint64(hdr.Size) + 511) / 512,
+			Atime:     uint64(hdr.AccessTime.Unix()),
+			Atimensec: uint32(hdr.AccessTime.Nanosecond()),
+			Mtime:     uint64(hdr.ModTime.Unix()),
+			Mtimensec: uint32(hdr.ModTime.Nanosecond()),
+			Ctime:     uint64(hdr.ChangeTime.Unix()),
+			Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+			Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeReg),
+			Nlink:     1,
+			Owner: fuse.Owner{
+				Uid: uint32(hdr.Uid),
+				Gid: uint32(hdr.Gid),
+			},
+		},
+		Remote: &common.RemoteRef{
+			LayerDigest: layerDigest,
+			UOffset:     dataStart,
+			ULength:     hdr.Size,
+		},
+	}
+
+	index.Set(node)
+	log.Debug().Str("path", cleanPath).Int64("size", hdr.Size).Int64("uoff", dataStart).Msg("File")
+	return nil
+}
+
+// processSymlink processes a symlink entry from tar
+func (ca *ClipArchiver) processSymlink(index *btree.BTree, hdr *tar.Header, cleanPath, layerDigest string) {
+	target := hdr.Linkname
+	if target == "" {
+		log.Warn().Msgf("Empty symlink target for %s", cleanPath)
+	}
+
+	node := &common.ClipNode{
+		Path:     cleanPath,
+		NodeType: common.SymLinkNode,
+		Target:   target,
+		Attr: fuse.Attr{
+			Ino:       ca.generateInode(layerDigest, cleanPath),
+			Size:      uint64(len(target)),
+			Blocks:    0,
+			Atime:     uint64(hdr.AccessTime.Unix()),
+			Atimensec: uint32(hdr.AccessTime.Nanosecond()),
+			Mtime:     uint64(hdr.ModTime.Unix()),
+			Mtimensec: uint32(hdr.ModTime.Nanosecond()),
+			Ctime:     uint64(hdr.ChangeTime.Unix()),
+			Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+			Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeSymlink),
+			Nlink:     1,
+			Owner: fuse.Owner{
+				Uid: uint32(hdr.Uid),
+				Gid: uint32(hdr.Gid),
+			},
+		},
+	}
+
+	index.Set(node)
+	log.Debug().Str("path", cleanPath).Str("target", target).Msg("Symlink")
+}
+
+// processDirectory processes a directory entry from tar
+func (ca *ClipArchiver) processDirectory(index *btree.BTree, hdr *tar.Header, cleanPath, layerDigest string) {
+	node := &common.ClipNode{
+		Path:     cleanPath,
+		NodeType: common.DirNode,
+		Attr: fuse.Attr{
+			Ino:       ca.generateInode(layerDigest, cleanPath),
+			Size:      0,
+			Blocks:    0,
+			Atime:     uint64(hdr.AccessTime.Unix()),
+			Atimensec: uint32(hdr.AccessTime.Nanosecond()),
+			Mtime:     uint64(hdr.ModTime.Unix()),
+			Mtimensec: uint32(hdr.ModTime.Nanosecond()),
+			Ctime:     uint64(hdr.ChangeTime.Unix()),
+			Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+			Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeDir),
+			Nlink:     2,
+			Owner: fuse.Owner{
+				Uid: uint32(hdr.Uid),
+				Gid: uint32(hdr.Gid),
+			},
+		},
+	}
+
+	index.Set(node)
+	log.Debug().Str("path", cleanPath).Int64("mode", hdr.Mode).Int64("mtime", hdr.ModTime.Unix()).Msg("Dir")
+}
+
+// processHardLink processes a hard link entry from tar
+func (ca *ClipArchiver) processHardLink(index *btree.BTree, hdr *tar.Header, cleanPath string) {
+	targetPath := path.Clean("/" + strings.TrimPrefix(hdr.Linkname, "./"))
+	targetNode := index.Get(&common.ClipNode{Path: targetPath})
+	if targetNode != nil {
+		tn := targetNode.(*common.ClipNode)
+		node := &common.ClipNode{
+			Path:     cleanPath,
+			NodeType: common.FileNode,
+			Attr:     tn.Attr,
+			Remote:   tn.Remote,
+		}
+		index.Set(node)
+	}
+}
+
+// extractImageMetadata extracts comprehensive metadata from an OCI image
+func (ca *ClipArchiver) extractImageMetadata(imgInterface interface{}, imageRef string) (*common.ImageMetadata, error) {
+	// Type assert to v1.Image from go-containerregistry
+	img, ok := imgInterface.(v1.Image)
+	if !ok {
+		return nil, fmt.Errorf("image does not implement v1.Image interface, got type %T", imgInterface)
+	}
+
+	// Get config file
+	configFile, err := img.ConfigFile()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get config file: %w", err)
+	}
+
+	// Get digest
+	digest, err := img.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get digest: %w", err)
+	}
+
+	// Get manifest for layer information
+	manifest, err := img.Manifest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get manifest: %w", err)
+	}
+
+	// Extract layer metadata from manifest
+	layersData := make([]common.LayerMetadata, 0, len(manifest.Layers))
+	layers := make([]string, 0, len(manifest.Layers))
+
+	for _, layer := range manifest.Layers {
+		layersData = append(layersData, common.LayerMetadata{
+			MIMEType:    string(layer.MediaType),
+			Digest:      layer.Digest.String(),
+			Size:        layer.Size,
+			Annotations: layer.Annotations,
+		})
+		layers = append(layers, layer.Digest.String())
+	}
+
+	// Extract created time
+	createdTime := configFile.Created.Time
+
+	// Initialize empty maps/slices if nil to ensure compatibility
+	labels := configFile.Config.Labels
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	
+	env := configFile.Config.Env
+	if env == nil {
+		env = make([]string, 0)
+	}
+	
+	exposedPorts := configFile.Config.ExposedPorts
+	if exposedPorts == nil {
+		exposedPorts = make(map[string]struct{})
+	}
+	
+	volumes := configFile.Config.Volumes
+	if volumes == nil {
+		volumes = make(map[string]struct{})
+	}
+
+	// Build metadata structure
+	metadata := &common.ImageMetadata{
+		Name:          imageRef,
+		Digest:        digest.String(),
+		Created:       createdTime,
+		DockerVersion: configFile.DockerVersion,
+		Architecture:  configFile.Architecture,
+		Os:            configFile.OS,
+		Variant:       configFile.Variant,
+		Author:        configFile.Author,
+		Labels:        labels,
+		Env:           env,
+		Cmd:           configFile.Config.Cmd,
+		Entrypoint:    configFile.Config.Entrypoint,
+		User:          configFile.Config.User,
+		WorkingDir:    configFile.Config.WorkingDir,
+		ExposedPorts:  exposedPorts,
+		Volumes:       volumes,
+		StopSignal:    configFile.Config.StopSignal,
+		Layers:        layers,
+		LayersData:    layersData,
+	}
+
+	log.Info().
+		Str("architecture", metadata.Architecture).
+		Str("os", metadata.Os).
+		Time("created", metadata.Created).
+		Int("layers", len(metadata.Layers)).
+		Msg("Extracted image metadata")
+
+	return metadata, nil
+}

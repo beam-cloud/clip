@@ -6,6 +6,13 @@ import (
 	"github.com/beam-cloud/clip/pkg/common"
 )
 
+// ContentCache interface for layer caching (e.g., blobcache)
+// Supports range reads for lazy loading
+type ContentCache interface {
+	GetContent(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]byte, error)
+	StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error)
+}
+
 type ClipStorageInterface interface {
 	ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error)
 	Metadata() *common.ClipArchiveMetadata
@@ -18,11 +25,15 @@ type ClipStorageCredentials struct {
 }
 
 type ClipStorageOpts struct {
-	ArchivePath string
-	CachePath   string
-	Metadata    *common.ClipArchiveMetadata
-	StorageInfo *common.S3StorageInfo
-	Credentials ClipStorageCredentials
+	ArchivePath           string
+	CachePath             string
+	Metadata              *common.ClipArchiveMetadata
+	StorageInfo           *common.S3StorageInfo
+	Credentials           ClipStorageCredentials
+	ContentCache          ContentCache // For OCI storage remote caching
+	ContentCacheAvailable bool
+	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
+	RegistryCredProvider  interface{} // Registry authentication (for OCI storage)
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
@@ -33,9 +44,21 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	header := opts.Metadata.Header
 	metadata := opts.Metadata
 
-	// This a remote archive, so we have to load that particular storage implementation
+	// Determine storage type from header or metadata
 	if header.StorageInfoLength > 0 {
-		storageType = common.StorageModeS3
+		// Check the actual storage info type
+		if metadata.StorageInfo != nil {
+			switch metadata.StorageInfo.Type() {
+			case string(common.StorageModeOCI):
+				storageType = common.StorageModeOCI
+			case string(common.StorageModeS3):
+				storageType = common.StorageModeS3
+			default:
+				storageType = common.StorageModeS3 // default to S3 for backward compatibility
+			}
+		} else {
+			storageType = common.StorageModeS3
+		}
 	} else {
 		storageType = common.StorageModeLocal
 	}
@@ -63,6 +86,23 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 			CachePath:      opts.CachePath,
 			AccessKey:      opts.Credentials.S3.AccessKey,
 			SecretKey:      opts.Credentials.S3.SecretKey,
+		})
+	case common.StorageModeOCI:
+		// Convert interface{} to RegistryCredentialProvider if provided
+		var credProvider common.RegistryCredentialProvider
+		if opts.RegistryCredProvider != nil {
+			if provider, ok := opts.RegistryCredProvider.(common.RegistryCredentialProvider); ok {
+				credProvider = provider
+			}
+		}
+
+		storage, err = NewOCIClipStorage(OCIClipStorageOpts{
+			Metadata:              metadata,
+			CredProvider:          credProvider,
+			ContentCache:          opts.ContentCache,
+			ContentCacheAvailable: opts.ContentCacheAvailable,
+			DiskCacheDir:          opts.CachePath,
+			UseCheckpoints:        opts.UseCheckpoints,
 		})
 	case common.StorageModeLocal:
 		storage, err = NewLocalClipStorage(metadata, LocalClipStorageOpts{

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	log "github.com/rs/zerolog/log"
@@ -31,10 +32,15 @@ func init() {
 	gob.Register(&common.ClipNode{})
 	gob.Register(&common.StorageInfoWrapper{})
 	gob.Register(&common.S3StorageInfo{})
+	gob.Register(&common.OCIStorageInfo{})
+	gob.Register(&common.RemoteRef{})
+	gob.Register(&common.GzipCheckpoint{})
+	gob.Register(&common.GzipIndex{})
+	gob.Register(&common.ZstdFrame{})
+	gob.Register(&common.ZstdIndex{})
 }
 
 type ClipArchiverOptions struct {
-	Verbose     bool
 	Compress    bool
 	ArchivePath string
 	SourcePath  string
@@ -68,11 +74,27 @@ func (ig *InodeGenerator) Next() uint64 {
 
 // populateIndex creates a representation of the filesystem/folder being archived
 func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) error {
+	// Create root directory
+	now := time.Now()
 	root := &common.ClipNode{
 		Path:     "/",
 		NodeType: common.DirNode,
 		Attr: fuse.Attr{
-			Mode: uint32(os.ModeDir | 0755),
+			Ino:       1,
+			Size:      0,
+			Blocks:    0,
+			Atime:     uint64(now.Unix()),
+			Atimensec: uint32(now.Nanosecond()),
+			Mtime:     uint64(now.Unix()),
+			Mtimensec: uint32(now.Nanosecond()),
+			Ctime:     uint64(now.Unix()),
+			Ctimensec: uint32(now.Nanosecond()),
+			Mode:      uint32(syscall.S_IFDIR | 0755),
+			Nlink:     2, // Directories start with link count of 2 (. and ..)
+			Owner: fuse.Owner{
+				Uid: 0, // root
+				Gid: 0, // root
+			},
 		},
 	}
 	index.Set(root)
@@ -431,6 +453,12 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 				return nil, fmt.Errorf("error decoding s3 storage info: %v", err)
 			}
 			storageInfo = s3Info
+		case string(common.StorageModeOCI):
+			var ociInfo common.OCIStorageInfo
+			if err := gob.NewDecoder(bytes.NewReader(wrapper.Data)).Decode(&ociInfo); err != nil {
+				return nil, fmt.Errorf("error decoding oci storage info: %v", err)
+			}
+			storageInfo = ociInfo
 		default:
 			return nil, fmt.Errorf("unsupported storage info type: %s", wrapper.Type)
 		}
@@ -496,10 +524,7 @@ func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
 	// Iterate over the index and extract every node
 	index.Ascend(index.Min(), func(a interface{}) bool {
 		node := a.(*common.ClipNode)
-
-		if opts.Verbose {
-			log.Info().Msgf("Extracting... %s", node.Path)
-		}
+		log.Debug().Str("path", node.Path).Msg("Extracting")
 
 		if node.NodeType == common.FileNode {
 			// Seek to the position of the file in the archive
@@ -599,9 +624,7 @@ func (ca *ClipArchiver) writeBlocks(index *btree.BTree, sourcePath string, outFi
 }
 
 func (ca *ClipArchiver) processNode(node *common.ClipNode, writer *bufio.Writer, sourcePath string, pos *int64, opts ClipArchiverOptions) bool {
-	if opts.Verbose {
-		log.Info().Msgf("Archiving... %s", node.Path)
-	}
+	log.Debug().Str("path", node.Path).Msg("Archiving")
 
 	f, err := os.Open(path.Join(sourcePath, node.Path))
 	if err != nil {
