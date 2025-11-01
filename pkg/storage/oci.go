@@ -515,7 +515,7 @@ func streamFileInChunks(filePath string, chunks chan []byte) error {
 func (s *OCIClipStorage) tryRangeReadFromContentCache(decompressedHash string, offset, length int64) ([]byte, error) {
 	// Use GetContent for range reads (offset + length)
 	// This is the KEY optimization: we only fetch the bytes we need!
-	data, err := s.contentCache.GetContent(decompressedHash, offset, length, struct{ RoutingKey string }{})
+	data, err := s.contentCache.GetContent(decompressedHash, offset, length, struct{ RoutingKey string }{RoutingKey: decompressedHash})
 	if err != nil {
 		return nil, fmt.Errorf("content cache range read failed: %w", err)
 	}
@@ -559,7 +559,7 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 		}
 	}()
 
-	storedHash, err := s.contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{})
+	storedHash, err := s.contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
 	if err != nil {
 		log.Error().
 			Err(err).

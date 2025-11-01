@@ -143,6 +143,7 @@ func TestContentCacheRangeRead(t *testing.T) {
 		diskCacheDir:          diskCacheDir,
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
+		contentCacheAvailable: true,
 	}
 
 	// Test: First read triggers decompression and caching
@@ -233,6 +234,7 @@ func TestDiskCacheThenContentCache(t *testing.T) {
 		diskCacheDir:          diskCacheDir,
 		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
+		contentCacheAvailable: true,
 	}
 
 	node := &common.ClipNode{
@@ -324,12 +326,13 @@ func TestRangeReadOnlyFetchesNeededBytes(t *testing.T) {
 	storageInfo.DecompressedHashByLayer[digest.String()] = decompressedHash
 
 	storage := &OCIClipStorage{
-		metadata:            metadata,
-		storageInfo:         storageInfo,
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:        diskCacheDir,
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        cache,
+		metadata:              metadata,
+		storageInfo:           storageInfo,
+		layerCache:            map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:          diskCacheDir,
+		layersDecompressing:   make(map[string]chan struct{}),
+		contentCache:          cache,
+		contentCacheAvailable: true,
 	}
 
 	// Read only a small portion (1 KB from a 10 MB layer)
