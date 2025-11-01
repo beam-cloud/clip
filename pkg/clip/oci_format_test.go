@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/stretchr/testify/assert"
@@ -113,6 +114,19 @@ func TestOCIArchiveIsMetadataOnly(t *testing.T) {
 	
 	t.Logf("OCI Info: registry=%s, repo=%s, ref=%s, layers=%d", 
 		ociInfo.RegistryURL, ociInfo.Repository, ociInfo.Reference, len(ociInfo.Layers))
+	
+	// Verify image metadata is embedded
+	require.NotNil(t, ociInfo.ImageMetadata, "should have embedded image metadata")
+	assert.NotEmpty(t, ociInfo.ImageMetadata.Architecture, "should have architecture")
+	assert.NotEmpty(t, ociInfo.ImageMetadata.Os, "should have OS")
+	assert.Greater(t, len(ociInfo.ImageMetadata.Layers), 0, "should have layers in metadata")
+	assert.Greater(t, len(ociInfo.ImageMetadata.LayersData), 0, "should have layer data")
+	
+	t.Logf("Image Metadata: arch=%s, os=%s, created=%s, env_count=%d", 
+		ociInfo.ImageMetadata.Architecture,
+		ociInfo.ImageMetadata.Os,
+		ociInfo.ImageMetadata.Created.Format("2006-01-02"),
+		len(ociInfo.ImageMetadata.Env))
 }
 
 // TestOCIArchiveNoRCLIP verifies that OCI mode does NOT create RCLIP files
@@ -392,4 +406,163 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestOCIImageMetadataExtraction tests that image metadata is properly extracted and stored
+func TestOCIImageMetadataExtraction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	
+	imageRef := "docker.io/library/alpine:3.18"
+	clipFile := filepath.Join(tempDir, "alpine.clip")
+	
+	// Create OCI index
+	err := CreateFromOCIImage(ctx, CreateFromOCIImageOptions{
+		ImageRef:      imageRef,
+		OutputPath:    clipFile,
+		CheckpointMiB: 2,
+	})
+	require.NoError(t, err)
+	
+	// Load metadata
+	archiver := NewClipArchiver()
+	metadata, err := archiver.ExtractMetadata(clipFile)
+	require.NoError(t, err)
+	
+	// Get OCI storage info
+	ociInfo, ok := metadata.StorageInfo.(*common.OCIStorageInfo)
+	if !ok {
+		if si, ok2 := metadata.StorageInfo.(common.OCIStorageInfo); ok2 {
+			ociInfoCopy := si
+			ociInfo = &ociInfoCopy
+		} else {
+			t.Fatalf("storage info should be OCIStorageInfo, got %T", metadata.StorageInfo)
+		}
+	}
+	
+	// Verify image metadata exists
+	require.NotNil(t, ociInfo.ImageMetadata, "image metadata should be present")
+	imgMeta := ociInfo.ImageMetadata
+	
+	// Verify image identification
+	assert.Equal(t, imageRef, imgMeta.Name, "image name should match")
+	assert.NotEmpty(t, imgMeta.Digest, "should have image digest")
+	t.Logf("Image: %s (digest: %s)", imgMeta.Name, imgMeta.Digest[:20]+"...")
+	
+	// Verify platform information
+	assert.Equal(t, "amd64", imgMeta.Architecture, "alpine should be amd64")
+	assert.Equal(t, "linux", imgMeta.Os, "alpine should be linux")
+	t.Logf("Platform: %s/%s", imgMeta.Os, imgMeta.Architecture)
+	
+	// Verify creation time
+	assert.False(t, imgMeta.Created.IsZero(), "should have creation time")
+	t.Logf("Created: %s", imgMeta.Created.Format(time.RFC3339))
+	
+	// Verify layer information
+	assert.Greater(t, len(imgMeta.Layers), 0, "should have at least one layer")
+	assert.Equal(t, len(imgMeta.Layers), len(imgMeta.LayersData), "layers and layer data should match")
+	t.Logf("Layers: %d", len(imgMeta.Layers))
+	
+	// Verify layer data details
+	for i, layerData := range imgMeta.LayersData {
+		assert.NotEmpty(t, layerData.Digest, "layer %d should have digest", i)
+		assert.NotEmpty(t, layerData.MIMEType, "layer %d should have MIME type", i)
+		assert.Greater(t, layerData.Size, int64(0), "layer %d should have size", i)
+		t.Logf("  Layer %d: %s (size: %d, type: %s)", 
+			i, layerData.Digest[:20]+"...", layerData.Size, layerData.MIMEType)
+	}
+	
+	// Verify runtime configuration
+	// Alpine typically has minimal env vars
+	t.Logf("Env vars: %d", len(imgMeta.Env))
+	if len(imgMeta.Env) > 0 {
+		t.Logf("  First env: %s", imgMeta.Env[0])
+	}
+	
+	// Verify command configuration
+	if len(imgMeta.Cmd) > 0 {
+		t.Logf("Cmd: %v", imgMeta.Cmd)
+	}
+	
+	// Verify labels (if any)
+	t.Logf("Labels: %d", len(imgMeta.Labels))
+	for key, value := range imgMeta.Labels {
+		t.Logf("  %s: %s", key, value)
+	}
+}
+
+// TestOCIImageMetadataCompatibility verifies metadata format matches beta9 expectations
+func TestOCIImageMetadataCompatibility(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	
+	imageRef := "docker.io/library/alpine:3.18"
+	clipFile := filepath.Join(tempDir, "alpine.clip")
+	
+	// Create OCI index
+	err := CreateFromOCIImage(ctx, CreateFromOCIImageOptions{
+		ImageRef:      imageRef,
+		OutputPath:    clipFile,
+		CheckpointMiB: 2,
+	})
+	require.NoError(t, err)
+	
+	// Load metadata
+	archiver := NewClipArchiver()
+	metadata, err := archiver.ExtractMetadata(clipFile)
+	require.NoError(t, err)
+	
+	// Get OCI storage info
+	ociInfo, ok := metadata.StorageInfo.(*common.OCIStorageInfo)
+	if !ok {
+		if si, ok2 := metadata.StorageInfo.(common.OCIStorageInfo); ok2 {
+			ociInfoCopy := si
+			ociInfo = &ociInfoCopy
+		} else {
+			t.Fatalf("storage info should be OCIStorageInfo, got %T", metadata.StorageInfo)
+		}
+	}
+	
+	require.NotNil(t, ociInfo.ImageMetadata, "image metadata should be present")
+	imgMeta := ociInfo.ImageMetadata
+	
+	// Verify all beta9 required fields are present
+	// From the user's ImageMetadata struct:
+	assert.NotEmpty(t, imgMeta.Name, "Name should be set")
+	assert.NotEmpty(t, imgMeta.Digest, "Digest should be set")
+	// RepoTags is optional
+	assert.False(t, imgMeta.Created.IsZero(), "Created should be set")
+	// DockerVersion is optional
+	// Labels is optional but should be non-nil map
+	assert.NotNil(t, imgMeta.Labels, "Labels should be a non-nil map")
+	assert.NotEmpty(t, imgMeta.Architecture, "Architecture should be set")
+	assert.NotEmpty(t, imgMeta.Os, "Os should be set")
+	assert.NotEmpty(t, imgMeta.Layers, "Layers should be set")
+	assert.NotEmpty(t, imgMeta.LayersData, "LayersData should be set")
+	// Env is optional but should be non-nil slice
+	assert.NotNil(t, imgMeta.Env, "Env should be a non-nil slice")
+	
+	// Verify LayersData has required fields
+	for i, layerData := range imgMeta.LayersData {
+		assert.NotEmpty(t, layerData.MIMEType, "layer %d should have MIMEType", i)
+		assert.NotEmpty(t, layerData.Digest, "layer %d should have Digest", i)
+		assert.Greater(t, layerData.Size, int64(0), "layer %d should have Size > 0", i)
+		// Annotations is optional
+	}
+	
+	t.Logf("? Image metadata is compatible with beta9 format")
+	t.Logf("  Name: %s", imgMeta.Name)
+	t.Logf("  Digest: %s", imgMeta.Digest)
+	t.Logf("  Architecture: %s", imgMeta.Architecture)
+	t.Logf("  OS: %s", imgMeta.Os)
+	t.Logf("  Layers: %d", len(imgMeta.Layers))
+	t.Logf("  Created: %s", imgMeta.Created.Format(time.RFC3339))
 }

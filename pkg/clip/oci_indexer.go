@@ -17,6 +17,7 @@ import (
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	log "github.com/rs/zerolog/log"
@@ -62,6 +63,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	registryURL string,
 	repository string,
 	reference string,
+	imageMetadata *common.ImageMetadata,
 	err error,
 ) {
 	if opts.CheckpointMiB == 0 {
@@ -71,7 +73,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	// Parse image reference
 	ref, err := name.ParseReference(opts.ImageRef)
 	if err != nil {
-		return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to parse image reference: %w", err)
+		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to parse image reference: %w", err)
 	}
 
 	// Extract registry and repository info
@@ -118,13 +120,20 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	// Fetch image
 	img, err := remote.Image(ref, remoteOpts...)
 	if err != nil {
-		return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to fetch image: %w", err)
+		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to fetch image: %w", err)
+	}
+
+	// Extract image metadata
+	imageMetadata, err = ca.extractImageMetadata(img, opts.ImageRef)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to extract image metadata, continuing without it")
+		imageMetadata = nil
 	}
 
 	// Get image layers
 	layers, err := img.Layers()
 	if err != nil {
-		return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to get layers: %w", err)
+		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to get layers: %w", err)
 	}
 
 	// Initialize index and maps
@@ -164,7 +173,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	for i, layer := range layers {
 		digest, err := layer.Digest()
 		if err != nil {
-			return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to get layer digest: %w", err)
+			return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to get layer digest: %w", err)
 		}
 
 		layerDigestStr := digest.String()
@@ -186,14 +195,14 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		// Get compressed layer stream
 		compressedRC, err := layer.Compressed()
 		if err != nil {
-			return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to get compressed layer: %w", err)
+			return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to get compressed layer: %w", err)
 		}
 
 		// Index this layer with optimizations
 		gzipIndex, decompressedHash, err := ca.indexLayerOptimized(ctx, compressedRC, layerDigestStr, index, opts)
 		compressedRC.Close()
 		if err != nil {
-			return nil, nil, nil, nil, "", "", "", fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
+			return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
 		}
 
 		gzipIdx[layerDigestStr] = gzipIndex
@@ -216,7 +225,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 
 	log.Info().Msgf("Successfully indexed image with %d files", index.Len())
 
-	return index, layerDigests, gzipIdx, decompressedHashes, registryURL, repository, reference, nil
+	return index, layerDigests, gzipIdx, decompressedHashes, registryURL, repository, reference, imageMetadata, nil
 }
 
 // indexLayerOptimized processes a single layer with optimizations
@@ -418,7 +427,7 @@ func (ca *ClipArchiver) generateInode(digest string, path string) uint64 {
 // CreateFromOCI creates a metadata-only .clip file from an OCI image
 func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOptions, clipOut string) error {
 	// Index the OCI image
-	index, layers, gzipIdx, decompressedHashes, registryURL, repository, reference, err := ca.IndexOCIImage(ctx, opts)
+	index, layers, gzipIdx, decompressedHashes, registryURL, repository, reference, imageMetadata, err := ca.IndexOCIImage(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to index OCI image: %w", err)
 	}
@@ -432,6 +441,7 @@ func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOpt
 		GzipIdxByLayer:          gzipIdx,
 		ZstdIdxByLayer:          nil, // P1 feature
 		DecompressedHashByLayer: decompressedHashes,
+		ImageMetadata:           imageMetadata,
 	}
 
 	// Create metadata
@@ -613,4 +623,101 @@ func (ca *ClipArchiver) processHardLink(index *btree.BTree, hdr *tar.Header, cle
 		}
 		index.Set(node)
 	}
+}
+
+// extractImageMetadata extracts comprehensive metadata from an OCI image
+func (ca *ClipArchiver) extractImageMetadata(imgInterface interface{}, imageRef string) (*common.ImageMetadata, error) {
+	// Type assert to v1.Image from go-containerregistry
+	img, ok := imgInterface.(v1.Image)
+	if !ok {
+		return nil, fmt.Errorf("image does not implement v1.Image interface, got type %T", imgInterface)
+	}
+
+	// Get config file
+	configFile, err := img.ConfigFile()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get config file: %w", err)
+	}
+
+	// Get digest
+	digest, err := img.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get digest: %w", err)
+	}
+
+	// Get manifest for layer information
+	manifest, err := img.Manifest()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get manifest: %w", err)
+	}
+
+	// Extract layer metadata from manifest
+	layersData := make([]common.LayerMetadata, 0, len(manifest.Layers))
+	layers := make([]string, 0, len(manifest.Layers))
+
+	for _, layer := range manifest.Layers {
+		layersData = append(layersData, common.LayerMetadata{
+			MIMEType:    string(layer.MediaType),
+			Digest:      layer.Digest.String(),
+			Size:        layer.Size,
+			Annotations: layer.Annotations,
+		})
+		layers = append(layers, layer.Digest.String())
+	}
+
+	// Extract created time
+	createdTime := configFile.Created.Time
+
+	// Initialize empty maps/slices if nil to ensure compatibility
+	labels := configFile.Config.Labels
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	
+	env := configFile.Config.Env
+	if env == nil {
+		env = make([]string, 0)
+	}
+	
+	exposedPorts := configFile.Config.ExposedPorts
+	if exposedPorts == nil {
+		exposedPorts = make(map[string]struct{})
+	}
+	
+	volumes := configFile.Config.Volumes
+	if volumes == nil {
+		volumes = make(map[string]struct{})
+	}
+
+	// Build metadata structure
+	metadata := &common.ImageMetadata{
+		Name:          imageRef,
+		Digest:        digest.String(),
+		Created:       createdTime,
+		DockerVersion: configFile.DockerVersion,
+		Architecture:  configFile.Architecture,
+		Os:            configFile.OS,
+		Variant:       configFile.Variant,
+		Author:        configFile.Author,
+		Labels:        labels,
+		Env:           env,
+		Cmd:           configFile.Config.Cmd,
+		Entrypoint:    configFile.Config.Entrypoint,
+		User:          configFile.Config.User,
+		WorkingDir:    configFile.Config.WorkingDir,
+		ExposedPorts:  exposedPorts,
+		Volumes:       volumes,
+		StopSignal:    configFile.Config.StopSignal,
+		Layers:        layers,
+		LayersData:    layersData,
+	}
+
+	log.Info().
+		Str("architecture", metadata.Architecture).
+		Str("os", metadata.Os).
+		Time("created", metadata.Created).
+		Int("layers", len(metadata.Layers)).
+		Msg("Extracted image metadata")
+
+	return metadata, nil
 }
