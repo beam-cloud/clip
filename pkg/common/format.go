@@ -100,14 +100,14 @@ type ImageMetadata struct {
 	Author        string            `json:"Author,omitempty"`
 
 	// Runtime configuration
-	Env        []string          `json:"Env,omitempty"`
-	Cmd        []string          `json:"Cmd,omitempty"`
-	Entrypoint []string          `json:"Entrypoint,omitempty"`
-	User       string            `json:"User,omitempty"`
-	WorkingDir string            `json:"WorkingDir,omitempty"`
+	Env          []string            `json:"Env,omitempty"`
+	Cmd          []string            `json:"Cmd,omitempty"`
+	Entrypoint   []string            `json:"Entrypoint,omitempty"`
+	User         string              `json:"User,omitempty"`
+	WorkingDir   string              `json:"WorkingDir,omitempty"`
 	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
 	Volumes      map[string]struct{} `json:"Volumes,omitempty"`
-	StopSignal   string            `json:"StopSignal,omitempty"`
+	StopSignal   string              `json:"StopSignal,omitempty"`
 
 	// Layer information
 	Layers     []string        `json:"Layers"`     // Layer digests
@@ -123,9 +123,7 @@ type OCIStorageInfo struct {
 	GzipIdxByLayer          map[string]*GzipIndex // per-layer gzip decompression index
 	ZstdIdxByLayer          map[string]*ZstdIndex // per-layer zstd index (P1)
 	DecompressedHashByLayer map[string]string     // maps layer digest -> SHA256 hash of decompressed data
-
-	// Image metadata - embedded to avoid runtime lookups
-	ImageMetadata *ImageMetadata `json:"ImageMetadata,omitempty"`
+	ImageMetadata           *ImageMetadata        `json:"ImageMetadata,omitempty"` // Image metadata - embedded to avoid runtime lookups
 }
 
 func (osi OCIStorageInfo) Type() string {
