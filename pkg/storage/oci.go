@@ -411,6 +411,7 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	defer os.Remove(tempPath) // Clean up on error
 
 	// Decompress directly to disk (streaming, low memory!)
+	// Also compute hash while decompressing to verify it matches expected
 	gzr, err := gzip.NewReader(compressedRC)
 	if err != nil {
 		tempFile.Close()
@@ -418,11 +419,34 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	}
 	defer gzr.Close()
 
-	written, err := io.Copy(tempFile, gzr)
+	// Hash the decompressed data as we write it
+	hasher := sha256.New()
+	multiWriter := io.MultiWriter(tempFile, hasher)
+	
+	written, err := io.Copy(multiWriter, gzr)
 	tempFile.Close()
 
 	if err != nil {
 		return fmt.Errorf("failed to decompress layer to disk: %w", err)
+	}
+
+	// Compute the actual hash of what we just wrote
+	actualHash := hex.EncodeToString(hasher.Sum(nil))
+	expectedHash := s.getDecompressedHash(digest)
+	
+	if expectedHash != "" && actualHash != expectedHash {
+		log.Error().
+			Str("layer_digest", digest).
+			Str("expected_hash", expectedHash).
+			Str("actual_hash", actualHash).
+			Int64("bytes", written).
+			Msg("CRITICAL: decompressed data hash mismatch! Indexed hash doesn't match actual decompressed data.")
+	} else if expectedHash != "" {
+		log.Debug().
+			Str("layer_digest", digest).
+			Str("hash", actualHash).
+			Int64("bytes", written).
+			Msg("decompressed data hash verified")
 	}
 
 	// Atomic rename
