@@ -2,6 +2,7 @@ package clip
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -251,13 +252,23 @@ func (ca *ClipArchiver) indexLayerOptimized(
 	defer gzr.Close()
 
 	// Hash the decompressed data as we read it
+	// IMPORTANT: We must hash ALL decompressed bytes, not just what tar.Reader exposes
+	// TAR has padding/EOF blocks that tar.Reader consumes but doesn't expose via Next()
 	hasher := sha256.New()
-	hashingReader := io.TeeReader(gzr, hasher)
+	
+	// Use MultiWriter to hash EVERYTHING while also reading through tar
+	// First, we need to buffer the entire decompressed stream
+	decompressedBuffer := new(bytes.Buffer)
+	hashingWriter := io.MultiWriter(decompressedBuffer, hasher)
+	
+	// Read all decompressed data and hash it
+	decompressedBytes, err := io.Copy(hashingWriter, gzr)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read decompressed data: %w", err)
+	}
 
-	// Wrap uncompressed stream with counting reader
-	uncompressedCounter := &countingReader{r: hashingReader}
-
-	// Create tar reader
+	// Now create tar reader from the buffered data
+	uncompressedCounter := &countingReader{r: decompressedBuffer, n: 0}
 	tr := tar.NewReader(uncompressedCounter)
 
 	// Track checkpoints
@@ -319,7 +330,8 @@ func (ca *ClipArchiver) indexLayerOptimized(
 		Str("layer_digest", layerDigest).
 		Str("decompressed_hash_computed", decompressedHash).
 		Int("checkpoints", len(checkpoints)).
-		Int64("decompressed_bytes", uncompressedCounter.n).
+		Int64("decompressed_bytes_total", decompressedBytes).
+		Int64("tar_bytes_read", uncompressedCounter.n).
 		Msgf("? INDEXING: Computed decompressed_hash=%s for layer=%s (this will be the disk cache filename)", 
 			decompressedHash, layerDigest)
 
