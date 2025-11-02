@@ -251,9 +251,9 @@ func TestHashWithDiskFile(t *testing.T) {
 	indexedHash, err := computeHashDuringIndexing(compressedData)
 	require.NoError(t, err)
 
-	// Write to disk like oci.go does
+	// Write to disk like oci.go does, using the indexed hash as the filename
 	tmpDir := t.TempDir()
-	diskPath := tmpDir + "/layer.tar"
+	diskPath := tmpDir + "/" + indexedHash  // Name file with the indexed hash (like production does)
 	
 	gzr, err := gzip.NewReader(bytes.NewReader(compressedData))
 	require.NoError(t, err)
@@ -270,14 +270,23 @@ func TestHashWithDiskFile(t *testing.T) {
 	
 	diskWriteHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Read back from disk and compute hash
+	// Read back from disk and compute hash (simulating sha256sum command)
 	diskData, err := os.ReadFile(diskPath)
 	require.NoError(t, err)
 	
 	diskReadHash := computeContentCacheHash(diskData)
+	
+	t.Logf("File named: %s", indexedHash)
+	t.Logf("SHA256 of file contents: %s", diskReadHash)
 
 	// All hashes must match
 	assert.Equal(t, indexedHash, diskWriteHash, "Indexed hash must match hash computed while writing to disk")
 	assert.Equal(t, diskWriteHash, diskReadHash, "Hash while writing to disk must match hash when reading from disk")
-	assert.Equal(t, indexedHash, diskReadHash, "Indexed hash must match hash of data on disk")
+	assert.Equal(t, indexedHash, diskReadHash, "CRITICAL: Indexed hash must match hash of data on disk (filename must match content hash)")
+	
+	// This is the key assertion that mirrors the user's finding:
+	// The file is named with indexedHash, and sha256sum of that file should equal indexedHash
+	assert.Equal(t, indexedHash, diskReadHash, 
+		"File named '%s' should have SHA256 hash '%s' but has '%s'",
+		indexedHash, indexedHash, diskReadHash)
 }

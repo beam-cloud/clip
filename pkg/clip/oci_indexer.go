@@ -208,7 +208,10 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		gzipIdx[layerDigestStr] = gzipIndex
 		decompressedHashes[layerDigestStr] = decompressedHash
 
-		log.Info().Msgf("Layer %s: decompressed_hash=%s", layerDigestStr, decompressedHash)
+		log.Info().
+			Str("layer_digest", layerDigestStr).
+			Str("decompressed_hash", decompressedHash).
+			Msgf("Storing decompressed hash in metadata - layer_digest=%s -> decompressed_hash=%s", layerDigestStr, decompressedHash)
 
 		// Send progress update: completed layer
 		if opts.ProgressChan != nil {
