@@ -434,19 +434,29 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
 	expectedHash := s.getDecompressedHash(digest)
 	
+	log.Warn().
+		Str("layer_digest", digest).
+		Str("expected_hash_from_metadata", expectedHash).
+		Str("actual_hash_of_decompressed_data", actualHash).
+		Str("disk_path", diskPath).
+		Bool("hashes_match", actualHash == expectedHash).
+		Int64("bytes", written).
+		Msg("HASH CHECK: Filename uses expected_hash, file contents hash to actual_hash")
+	
 	if expectedHash != "" && actualHash != expectedHash {
 		log.Error().
 			Str("layer_digest", digest).
-			Str("expected_hash", expectedHash).
-			Str("actual_hash", actualHash).
+			Str("expected_hash_from_metadata", expectedHash).
+			Str("actual_hash_of_decompressed_data", actualHash).
+			Str("file_will_be_named", diskPath).
 			Int64("bytes", written).
-			Msg("CRITICAL: decompressed data hash mismatch! Indexed hash doesn't match actual decompressed data.")
+			Msg("? CRITICAL BUG: File named with WRONG hash! Metadata has wrong decompressed_hash! Re-index the image!")
 	} else if expectedHash != "" {
 		log.Debug().
 			Str("layer_digest", digest).
 			Str("hash", actualHash).
 			Int64("bytes", written).
-			Msg("decompressed data hash verified")
+			Msg("? decompressed data hash verified - filename matches content")
 	}
 
 	// Atomic rename

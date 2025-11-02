@@ -314,8 +314,14 @@ func (ca *ClipArchiver) indexLayerOptimized(
 	// Compute final hash of all decompressed data
 	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Log summary
-	log.Info().Msgf("Layer indexed with %d checkpoints, decompressed_hash=%s", len(checkpoints), decompressedHash)
+	// Log summary with VERY clear messaging
+	log.Warn().
+		Str("layer_digest", layerDigest).
+		Str("decompressed_hash_computed", decompressedHash).
+		Int("checkpoints", len(checkpoints)).
+		Int64("decompressed_bytes", uncompressedCounter.n).
+		Msgf("? INDEXING: Computed decompressed_hash=%s for layer=%s (this will be the disk cache filename)", 
+			decompressedHash, layerDigest)
 
 	// Return gzip index and decompressed hash
 	return &common.GzipIndex{
