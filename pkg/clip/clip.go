@@ -262,16 +262,21 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 
 // CreateFromOCIImageOptions configures OCI image indexing
 type CreateFromOCIImageOptions struct {
-	ImageRef      string
-	OutputPath    string
-	CheckpointMiB int64
-	CredProvider  interface{}
-	ProgressChan  chan<- OCIIndexProgress // optional channel for progress updates
+	ImageRef        string                  // Source image to index (can be local)
+	StorageImageRef string                  // Optional: image reference to store in metadata (defaults to ImageRef)
+	OutputPath      string
+	CheckpointMiB   int64
+	CredProvider    interface{}
+	ProgressChan    chan<- OCIIndexProgress // optional channel for progress updates
 }
 
 // CreateFromOCIImage creates a metadata-only index (.clip) file from an OCI image
 func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) error {
-	log.Info().Msgf("creating OCI archive index from %s to %s", options.ImageRef, options.OutputPath)
+	if options.StorageImageRef != "" && options.StorageImageRef != options.ImageRef {
+		log.Info().Msgf("creating OCI archive index: indexing from %s, storing reference to %s", options.ImageRef, options.StorageImageRef)
+	} else {
+		log.Info().Msgf("creating OCI archive index from %s to %s", options.ImageRef, options.OutputPath)
+	}
 
 	if options.CheckpointMiB == 0 {
 		options.CheckpointMiB = 2 // default
@@ -287,10 +292,11 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 
 	archiver := NewClipArchiver()
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
-		ImageRef:      options.ImageRef,
-		CheckpointMiB: options.CheckpointMiB,
-		CredProvider:  credProvider,
-		ProgressChan:  options.ProgressChan,
+		ImageRef:        options.ImageRef,
+		StorageImageRef: options.StorageImageRef,
+		CheckpointMiB:   options.CheckpointMiB,
+		CredProvider:    credProvider,
+		ProgressChan:    options.ProgressChan,
 	}, options.OutputPath)
 
 	if err != nil {

@@ -392,6 +392,129 @@ func TestOCIStorageReadFile(t *testing.T) {
 	}
 }
 
+// TestOCISeparateSourceAndStorageRefs tests indexing from one ref while storing another
+func TestOCISeparateSourceAndStorageRefs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	// Simulate the real-world scenario:
+	// - We have a local image (e.g., after build)
+	// - We want to index from local (fast, no network)
+	// - But store the remote registry reference in metadata (for later use)
+	
+	// For testing, we'll use the same image but simulate different references
+	sourceRef := "docker.io/library/alpine:3.18"  // Source to index from
+	storageRef := "myregistry.example.com:5000/myapp/alpine:production-v1"  // Reference to store
+
+	tempDir := t.TempDir()
+	outputFile := filepath.Join(tempDir, "alpine-split-ref.clip")
+
+	// Create index using separate source and storage references
+	archiver := NewClipArchiver()
+	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
+		ImageRef:        sourceRef,
+		StorageImageRef: storageRef,
+		CheckpointMiB:   2,
+	}, outputFile)
+
+	require.NoError(t, err, "Failed to index OCI image with separate references")
+
+	// Verify output file exists
+	info, err := os.Stat(outputFile)
+	require.NoError(t, err, "Output file should exist")
+	assert.Greater(t, info.Size(), int64(0), "Output file should not be empty")
+
+	t.Logf("Created index file: %s (size: %d bytes)", outputFile, info.Size())
+
+	// Load and verify metadata
+	metadata, err := archiver.ExtractMetadata(outputFile)
+	require.NoError(t, err, "Should be able to extract metadata")
+
+	assert.NotNil(t, metadata.Index, "Index should not be nil")
+	assert.Greater(t, metadata.Index.Len(), 0, "Index should contain nodes")
+
+	// Verify storage info contains the STORAGE reference, not the source
+	require.NotNil(t, metadata.StorageInfo, "Storage info should not be nil")
+
+	ociInfo, ok := metadata.StorageInfo.(common.OCIStorageInfo)
+	if !ok {
+		ociInfoPtr, ok := metadata.StorageInfo.(*common.OCIStorageInfo)
+		require.True(t, ok, "Storage info should be OCIStorageInfo")
+		ociInfo = *ociInfoPtr
+	}
+
+	// Parse expected storage reference parts
+	expectedRegistry := "myregistry.example.com:5000"
+	expectedRepo := "myapp/alpine"
+	expectedRef := "production-v1"
+
+	// Verify metadata contains the storage reference, NOT the source reference
+	assert.Equal(t, expectedRegistry, ociInfo.RegistryURL, 
+		"Registry URL should be from storage ref, not source ref")
+	assert.Equal(t, expectedRepo, ociInfo.Repository, 
+		"Repository should be from storage ref, not source ref")
+	assert.Equal(t, expectedRef, ociInfo.Reference, 
+		"Reference should be from storage ref, not source ref")
+
+	// Verify the index was actually populated (meaning we successfully indexed from source)
+	assert.Greater(t, len(ociInfo.Layers), 0, "Should have indexed layers from source image")
+	assert.NotNil(t, ociInfo.GzipIdxByLayer, "Should have gzip indexes from source image")
+
+	t.Logf("✓ Successfully indexed from: %s", sourceRef)
+	t.Logf("✓ Metadata correctly stores: %s/%s:%s", expectedRegistry, expectedRepo, expectedRef)
+	t.Logf("✓ Index contains %d files across %d layers", metadata.Index.Len(), len(ociInfo.Layers))
+}
+
+// TestOCIDefaultStorageRef tests that StorageImageRef defaults to ImageRef when not provided
+func TestOCIDefaultStorageRef(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	// Test default behavior (backward compatibility)
+	imageRef := "docker.io/library/alpine:3.18"
+
+	tempDir := t.TempDir()
+	outputFile := filepath.Join(tempDir, "alpine-default.clip")
+
+	// Create index WITHOUT specifying StorageImageRef (should default to ImageRef)
+	archiver := NewClipArchiver()
+	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
+		ImageRef:      imageRef,
+		// StorageImageRef not specified - should default to ImageRef
+		CheckpointMiB: 2,
+	}, outputFile)
+
+	require.NoError(t, err, "Failed to index OCI image")
+
+	// Load metadata
+	metadata, err := archiver.ExtractMetadata(outputFile)
+	require.NoError(t, err, "Should be able to extract metadata")
+
+	ociInfo, ok := metadata.StorageInfo.(common.OCIStorageInfo)
+	if !ok {
+		ociInfoPtr, ok := metadata.StorageInfo.(*common.OCIStorageInfo)
+		require.True(t, ok, "Storage info should be OCIStorageInfo")
+		ociInfo = *ociInfoPtr
+	}
+
+	// Verify metadata contains the same reference as source
+	// Note: Docker normalizes "docker.io" to "index.docker.io"
+	assert.Equal(t, "index.docker.io", ociInfo.RegistryURL, 
+		"Registry should default to source ref")
+	assert.Equal(t, "library/alpine", ociInfo.Repository, 
+		"Repository should default to source ref")
+	assert.Equal(t, "3.18", ociInfo.Reference, 
+		"Reference should default to source ref")
+
+	t.Logf("✓ Default behavior works: metadata matches source reference")
+}
+
 // TestLayerCaching verifies that layers are properly cached after first read
 func TestLayerCaching(t *testing.T) {
 	if testing.Short() {
