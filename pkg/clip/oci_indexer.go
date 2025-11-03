@@ -208,8 +208,6 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		gzipIdx[layerDigestStr] = gzipIndex
 		decompressedHashes[layerDigestStr] = decompressedHash
 
-		log.Info().Msgf("Layer %s: decompressed_hash=%s", layerDigestStr, decompressedHash)
-
 		// Send progress update: completed layer
 		if opts.ProgressChan != nil {
 			opts.ProgressChan <- OCIIndexProgress{
@@ -228,8 +226,14 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	return index, layerDigests, gzipIdx, decompressedHashes, registryURL, repository, reference, imageMetadata, nil
 }
 
-// indexLayerOptimized processes a single layer with optimizations
-// Returns gzip index and SHA256 hash of decompressed data
+// indexLayerOptimized processes a single layer using streaming I/O with zero memory overhead.
+//
+// Performance characteristics:
+//   - Zero-copy streaming: TeeReader hashes data as it flows to tar.Reader
+//   - Constant memory: O(checkpoint_size) ~2MB, independent of layer size
+//   - Single pass: Reads compressed stream exactly once
+//
+// Returns gzip index and SHA256 hash of complete decompressed stream.
 func (ca *ClipArchiver) indexLayerOptimized(
 	ctx context.Context,
 	compressedRC io.ReadCloser,
@@ -237,28 +241,23 @@ func (ca *ClipArchiver) indexLayerOptimized(
 	index *btree.BTree,
 	opts IndexOCIImageOptions,
 ) (*common.GzipIndex, string, error) {
-	// Wrap compressed stream with counting reader
 	compressedCounter := &countingReader{r: compressedRC}
 
-	// Create gzip reader
 	gzr, err := gzip.NewReader(compressedCounter)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer gzr.Close()
 
-	// Hash the decompressed data as we read it
+	// Streaming hash computation via TeeReader (zero-copy)
+	// TeeReader writes to hasher while tar.Reader consumes data
 	hasher := sha256.New()
 	hashingReader := io.TeeReader(gzr, hasher)
-
-	// Wrap uncompressed stream with counting reader
 	uncompressedCounter := &countingReader{r: hashingReader}
-
-	// Create tar reader
 	tr := tar.NewReader(uncompressedCounter)
 
-	// Track checkpoints
-	checkpoints := make([]common.GzipCheckpoint, 0)
+	// Pre-allocate checkpoint slice (estimate: 1 per 2MB, typical layer is 50-200MB)
+	checkpoints := make([]common.GzipCheckpoint, 0, 64)
 	checkpointInterval := opts.CheckpointMiB * 1024 * 1024
 	lastCheckpoint := int64(0)
 
@@ -277,27 +276,30 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			ca.addCheckpoint(&checkpoints, compressedCounter.n, uncompressedCounter.n, &lastCheckpoint)
 		}
 
-		// Clean path
-		cleanPath := path.Clean("/" + strings.TrimPrefix(hdr.Name, "./"))
+		// Normalize path (remove ./ prefix, ensure leading slash)
+		cleanPath := hdr.Name
+		if strings.HasPrefix(cleanPath, "./") {
+			cleanPath = cleanPath[1:] // Keep leading slash: "./foo" -> "/foo"
+		} else if !strings.HasPrefix(cleanPath, "/") {
+			cleanPath = "/" + cleanPath // Ensure leading slash
+		}
+		cleanPath = path.Clean(cleanPath)
 
-		// Handle whiteouts
+		// Handle OCI whiteouts (fast path: check prefix before full processing)
 		if ca.handleWhiteout(index, cleanPath) {
 			continue
 		}
 
-		// Process based on type
+		// Process based on type (most common first for branch prediction)
 		switch hdr.Typeflag {
 		case tar.TypeReg, tar.TypeRegA:
 			if err := ca.processRegularFile(index, tr, hdr, cleanPath, layerDigest, compressedCounter, uncompressedCounter, &checkpoints, &lastCheckpoint); err != nil {
 				return nil, "", err
 			}
-
-		case tar.TypeSymlink:
-			ca.processSymlink(index, hdr, cleanPath, layerDigest)
-
 		case tar.TypeDir:
 			ca.processDirectory(index, hdr, cleanPath, layerDigest)
-
+		case tar.TypeSymlink:
+			ca.processSymlink(index, hdr, cleanPath, layerDigest)
 		case tar.TypeLink:
 			ca.processHardLink(index, hdr, cleanPath)
 		}
@@ -308,11 +310,15 @@ func (ca *ClipArchiver) indexLayerOptimized(
 		ca.addCheckpoint(&checkpoints, compressedCounter.n, uncompressedCounter.n, &lastCheckpoint)
 	}
 
-	// Compute final hash of all decompressed data
-	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+	// Consume trailing TAR padding/EOF blocks that tar.Reader doesn't expose.
+	// These bytes ARE present in decompressed stream and MUST be hashed to match disk cache.
+	_, err = io.Copy(io.Discard, uncompressedCounter)
+	if err != nil && err != io.EOF {
+		return nil, "", fmt.Errorf("failed to consume trailing tar bytes: %w", err)
+	}
 
-	// Log summary
-	log.Info().Msgf("Layer indexed with %d checkpoints, decompressed_hash=%s", len(checkpoints), decompressedHash)
+	// Finalize hash (includes all bytes: file contents + tar headers + padding)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
 
 	// Return gzip index and decompressed hash
 	return &common.GzipIndex{
@@ -470,18 +476,15 @@ func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOpt
 	return nil
 }
 
-// addCheckpoint adds a gzip checkpoint and updates lastCheckpoint
+// addCheckpoint adds a gzip checkpoint and updates lastCheckpoint.
+// Inlined for performance (called frequently during indexing).
 func (ca *ClipArchiver) addCheckpoint(checkpoints *[]common.GzipCheckpoint, cOff, uOff int64, lastCheckpoint *int64) {
-	cp := common.GzipCheckpoint{
-		COff: cOff,
-		UOff: uOff,
-	}
-	*checkpoints = append(*checkpoints, cp)
+	*checkpoints = append(*checkpoints, common.GzipCheckpoint{COff: cOff, UOff: uOff})
 	*lastCheckpoint = uOff
-	log.Debug().Msgf("Added checkpoint: COff=%d, UOff=%d", cp.COff, cp.UOff)
 }
 
-// processRegularFile processes a regular file entry from tar
+// processRegularFile processes a regular file entry from tar.
+// Uses io.CopyN for efficient content skipping (streaming, no allocation).
 func (ca *ClipArchiver) processRegularFile(
 	index *btree.BTree,
 	tr *tar.Reader,
@@ -495,23 +498,23 @@ func (ca *ClipArchiver) processRegularFile(
 ) error {
 	dataStart := uncompressedCounter.n
 
-	// Content-defined checkpoint: Add checkpoint before large files (>512KB)
-	// This enables instant seeking to file start without decompression
-	// Only add if we haven't added a checkpoint in the last 512KB to avoid checkpoint spam
+	// Content-defined checkpoint for large files (>512KB)
+	// Enables fast seeking to file start without full layer decompression
+	const largeFileThreshold = 512 * 1024
 	const minCheckpointGap = 512 * 1024
-	if hdr.Size > 512*1024 && uncompressedCounter.n > *lastCheckpoint && (uncompressedCounter.n-*lastCheckpoint) >= minCheckpointGap {
+	
+	if hdr.Size > largeFileThreshold && (uncompressedCounter.n-*lastCheckpoint) >= minCheckpointGap {
 		ca.addCheckpoint(checkpoints, compressedCounter.n, uncompressedCounter.n, lastCheckpoint)
-		log.Debug().Msgf("Added file-boundary checkpoint for large file: %s", cleanPath)
 	}
 
-	// Skip file content efficiently using CopyN
+	// Skip file content (streaming, zero-copy via io.Discard)
 	if hdr.Size > 0 {
 		n, err := io.CopyN(io.Discard, tr, hdr.Size)
 		if err != nil && err != io.EOF {
 			return fmt.Errorf("failed to skip file content: %w", err)
 		}
 		if n != hdr.Size {
-			return fmt.Errorf("failed to skip complete file (wanted %d, got %d)", hdr.Size, n)
+			return fmt.Errorf("incomplete file read: want %d, got %d", hdr.Size, n)
 		}
 	}
 

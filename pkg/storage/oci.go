@@ -408,7 +408,7 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	}
 	defer os.Remove(tempPath) // Clean up on error
 
-	// Decompress directly to disk (streaming, low memory!)
+	// Decompress directly to disk (streaming)
 	gzr, err := gzip.NewReader(compressedRC)
 	if err != nil {
 		tempFile.Close()
@@ -428,28 +428,19 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
-	inflateDuration := time.Since(inflateStart)
-	metrics.RecordInflateCPU(inflateDuration)
+	duration := time.Since(inflateStart)
+	metrics.RecordInflateCPU(duration)
 
 	log.Info().
-		Str("layer_digest", digest).
-		Int64("decompressed_bytes", written).
-		Str("disk_path", diskPath).
-		Dur("duration", inflateDuration).
-		Msg("Layer decompressed and cached to disk")
+		Str("layer", digest).
+		Int64("bytes", written).
+		Dur("duration", duration).
+		Msg("layer decompressed and cached")
 
-	// Store in remote cache (if configured) for other workers
+	// Upload to content cache for cluster sharing
 	if s.contentCache != nil {
 		decompressedHash := s.getDecompressedHash(digest)
-		log.Info().
-			Str("layer_digest", digest).
-			Str("decompressed_hash", decompressedHash).
-			Msg("storing decompressed layer in content cache")
 		go s.storeDecompressedInRemoteCache(decompressedHash, diskPath)
-	} else {
-		log.Warn().
-			Str("layer_digest", digest).
-			Msg("content cache not configured - layer will NOT be shared across cluster")
 	}
 
 	return nil
@@ -515,7 +506,7 @@ func streamFileInChunks(filePath string, chunks chan []byte) error {
 func (s *OCIClipStorage) tryRangeReadFromContentCache(decompressedHash string, offset, length int64) ([]byte, error) {
 	// Use GetContent for range reads (offset + length)
 	// This is the KEY optimization: we only fetch the bytes we need!
-	data, err := s.contentCache.GetContent(decompressedHash, offset, length, struct{ RoutingKey string }{})
+	data, err := s.contentCache.GetContent(decompressedHash, offset, length, struct{ RoutingKey string }{RoutingKey: decompressedHash})
 	if err != nil {
 		return nil, fmt.Errorf("content cache range read failed: %w", err)
 	}
@@ -523,55 +514,20 @@ func (s *OCIClipStorage) tryRangeReadFromContentCache(decompressedHash string, o
 	return data, nil
 }
 
-// storeDecompressedInRemoteCache stores decompressed layer in remote cache (async safe)
-// Stores the ENTIRE layer so other nodes can do range reads from it
-// Streams content in chunks to avoid loading the entire layer into memory
-// decompressedHash is the hash of the decompressed layer data (used as cache key)
+// storeDecompressedInRemoteCache uploads decompressed layer to remote cache for cluster sharing.
+// Streams file in 32MB chunks with constant memory usage O(32MB).
 func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string, diskPath string) {
-	log.Debug().
-		Str("decompressed_hash", decompressedHash).
-		Str("disk_path", diskPath).
-		Msg("storeDecompressedInRemoteCache goroutine started")
-
-	// Get file size for logging
-	fileInfo, err := os.Stat(diskPath)
-	if err != nil {
-		log.Error().
-			Err(err).
-			Str("decompressed_hash", decompressedHash).
-			Str("disk_path", diskPath).
-			Msg("failed to stat disk cache for content cache storage")
-		return
-	}
-	totalSize := fileInfo.Size()
-
-	// Stream the file in chunks (similar to clipfs.go)
 	chunks := make(chan []byte, 1)
-
 	go func() {
 		defer close(chunks)
-
 		if err := streamFileInChunks(diskPath, chunks); err != nil {
-			log.Error().
-				Err(err).
-				Str("decompressed_hash", decompressedHash).
-				Msg("failed to stream file for content cache storage")
+			log.Error().Err(err).Str("hash", decompressedHash).Msg("failed to stream file")
 		}
 	}()
 
-	storedHash, err := s.contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{})
+	_, err := s.contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
 	if err != nil {
-		log.Error().
-			Err(err).
-			Str("decompressed_hash", decompressedHash).
-			Int64("bytes", totalSize).
-			Msg("failed to store layer in content cache")
-	} else {
-		log.Info().
-			Str("decompressed_hash", decompressedHash).
-			Str("stored_hash", storedHash).
-			Int64("bytes", totalSize).
-			Msg("successfully stored decompressed layer in content cache")
+		log.Error().Err(err).Str("hash", decompressedHash).Msg("content cache store failed")
 	}
 }
 
