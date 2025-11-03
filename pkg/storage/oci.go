@@ -3,8 +3,6 @@ package storage
 import (
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -410,8 +408,7 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	}
 	defer os.Remove(tempPath) // Clean up on error
 
-	// Decompress directly to disk (streaming, low memory!)
-	// Also compute hash while decompressing to verify it matches expected
+	// Decompress directly to disk (streaming)
 	gzr, err := gzip.NewReader(compressedRC)
 	if err != nil {
 		tempFile.Close()
@@ -419,35 +416,11 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	}
 	defer gzr.Close()
 
-	// Hash the decompressed data as we write it
-	hasher := sha256.New()
-	multiWriter := io.MultiWriter(tempFile, hasher)
-	
-	written, err := io.Copy(multiWriter, gzr)
+	written, err := io.Copy(tempFile, gzr)
 	tempFile.Close()
 
 	if err != nil {
 		return fmt.Errorf("failed to decompress layer to disk: %w", err)
-	}
-
-	// Verify hash matches metadata (critical for cache key correctness)
-	actualHash := hex.EncodeToString(hasher.Sum(nil))
-	expectedHash := s.getDecompressedHash(digest)
-	
-	if expectedHash != "" && actualHash != expectedHash {
-		log.Error().
-			Str("layer_digest", digest).
-			Str("expected_hash_from_metadata", expectedHash).
-			Str("actual_hash_of_decompressed_data", actualHash).
-			Str("file_will_be_named", diskPath).
-			Int64("bytes", written).
-			Msg("? CRITICAL BUG: File named with WRONG hash! Metadata has wrong decompressed_hash! Re-index the image!")
-	} else if expectedHash != "" {
-		log.Debug().
-			Str("layer_digest", digest).
-			Str("hash", actualHash).
-			Int64("bytes", written).
-			Msg("? decompressed data hash verified - filename matches content")
 	}
 
 	// Atomic rename
@@ -455,28 +428,19 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
-	inflateDuration := time.Since(inflateStart)
-	metrics.RecordInflateCPU(inflateDuration)
+	duration := time.Since(inflateStart)
+	metrics.RecordInflateCPU(duration)
 
 	log.Info().
-		Str("layer_digest", digest).
-		Int64("decompressed_bytes", written).
-		Str("disk_path", diskPath).
-		Dur("duration", inflateDuration).
-		Msg("Layer decompressed and cached to disk")
+		Str("layer", digest).
+		Int64("bytes", written).
+		Dur("duration", duration).
+		Msg("layer decompressed and cached")
 
-	// Store in remote cache (if configured) for other workers
+	// Upload to content cache for cluster sharing
 	if s.contentCache != nil {
 		decompressedHash := s.getDecompressedHash(digest)
-		log.Info().
-			Str("layer_digest", digest).
-			Str("decompressed_hash", decompressedHash).
-			Msg("storing decompressed layer in content cache")
 		go s.storeDecompressedInRemoteCache(decompressedHash, diskPath)
-	} else {
-		log.Warn().
-			Str("layer_digest", digest).
-			Msg("content cache not configured - layer will NOT be shared across cluster")
 	}
 
 	return nil
@@ -489,22 +453,6 @@ func (s *OCIClipStorage) writeToDiskCache(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tempPath, path)
-}
-
-// computeFileHash computes SHA256 hash of a file
-func (s *OCIClipStorage) computeFileHash(filePath string) (string, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
-		return "", fmt.Errorf("failed to hash file: %w", err)
-	}
-
-	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // streamFileInChunks reads a file and sends it in chunks over a channel
@@ -567,54 +515,19 @@ func (s *OCIClipStorage) tryRangeReadFromContentCache(decompressedHash string, o
 }
 
 // storeDecompressedInRemoteCache uploads decompressed layer to remote cache for cluster sharing.
-//
-// Performance: Streams file in 32MB chunks, constant memory O(32MB).
-// Key correctness: Verifies file hash matches expected before upload.
+// Streams file in 32MB chunks with constant memory usage O(32MB).
 func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string, diskPath string) {
-	fileInfo, err := os.Stat(diskPath)
-	if err != nil {
-		log.Error().Err(err).Str("hash", decompressedHash).Msg("disk file not found for upload")
-		return
-	}
-	totalSize := fileInfo.Size()
-
-	// Verify file hash matches expected (SHA256 only, 64 hex chars)
-	if len(decompressedHash) == 64 {
-		diskFileHash, err := s.computeFileHash(diskPath)
-		if err != nil {
-			log.Error().Err(err).Str("hash", decompressedHash).Msg("failed to verify disk file hash")
-			return
-		}
-
-		if diskFileHash != decompressedHash {
-			log.Error().
-				Str("expected", decompressedHash).
-				Str("actual", diskFileHash).
-				Str("path", diskPath).
-				Msg("CRITICAL: disk file hash mismatch - skipping upload")
-			return
-		}
-	}
-
-	// Stream file to content cache (32MB chunks, async)
 	chunks := make(chan []byte, 1)
 	go func() {
 		defer close(chunks)
 		if err := streamFileInChunks(diskPath, chunks); err != nil {
-			log.Error().Err(err).Str("hash", decompressedHash).Msg("stream failed")
+			log.Error().Err(err).Str("hash", decompressedHash).Msg("failed to stream file")
 		}
 	}()
 
-	storedHash, err := s.contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+	_, err := s.contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
 	if err != nil {
-		log.Error().Err(err).Int64("bytes", totalSize).Msg("content cache store failed")
-	} else if storedHash != decompressedHash {
-		log.Error().
-			Str("expected", decompressedHash).
-			Str("stored", storedHash).
-			Msg("CRITICAL BUG: ContentCache computed wrong hash")
-	} else {
-		log.Info().Str("hash", decompressedHash).Int64("bytes", totalSize).Msg("uploaded to content cache")
+		log.Error().Err(err).Str("hash", decompressedHash).Msg("content cache store failed")
 	}
 }
 

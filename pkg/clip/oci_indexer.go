@@ -312,26 +312,13 @@ func (ca *ClipArchiver) indexLayerOptimized(
 
 	// Consume trailing TAR padding/EOF blocks that tar.Reader doesn't expose.
 	// These bytes ARE present in decompressed stream and MUST be hashed to match disk cache.
-	trailingBytes, err := io.Copy(io.Discard, uncompressedCounter)
+	_, err = io.Copy(io.Discard, uncompressedCounter)
 	if err != nil && err != io.EOF {
 		return nil, "", fmt.Errorf("failed to consume trailing tar bytes: %w", err)
 	}
 
 	// Finalize hash (includes all bytes: file contents + tar headers + padding)
 	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
-
-	if trailingBytes > 0 {
-		log.Debug().
-			Int64("trailing_bytes", trailingBytes).
-			Str("layer", layerDigest).
-			Msg("consumed tar trailing padding")
-	}
-
-	log.Info().
-		Int("checkpoints", len(checkpoints)).
-		Int64("bytes", uncompressedCounter.n).
-		Str("hash", decompressedHash).
-		Msgf("Layer %s indexed", layerDigest)
 
 	// Return gzip index and decompressed hash
 	return &common.GzipIndex{
