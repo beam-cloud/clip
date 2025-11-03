@@ -430,18 +430,9 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 		return fmt.Errorf("failed to decompress layer to disk: %w", err)
 	}
 
-	// Compute the actual hash of what we just wrote
+	// Verify hash matches metadata (critical for cache key correctness)
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
 	expectedHash := s.getDecompressedHash(digest)
-	
-	log.Warn().
-		Str("layer_digest", digest).
-		Str("expected_hash_from_metadata", expectedHash).
-		Str("actual_hash_of_decompressed_data", actualHash).
-		Str("disk_path", diskPath).
-		Bool("hashes_match", actualHash == expectedHash).
-		Int64("bytes", written).
-		Msg("HASH CHECK: Filename uses expected_hash, file contents hash to actual_hash")
 	
 	if expectedHash != "" && actualHash != expectedHash {
 		log.Error().
@@ -561,55 +552,6 @@ func streamFileInChunks(filePath string, chunks chan []byte) error {
 	return nil
 }
 
-// streamFileInChunksWithHash reads a file, sends it in chunks, and computes hash of streamed data
-// This is used to verify that the data being sent matches what we expect
-func (s *OCIClipStorage) streamFileInChunksWithHash(filePath string, chunks chan []byte) (string, error) {
-	const chunkSize = int64(1 << 25) // 32MB chunks
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	// Get file size
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return "", fmt.Errorf("failed to stat file: %w", err)
-	}
-	fileSize := fileInfo.Size()
-
-	// Hash the data as we stream it
-	hasher := sha256.New()
-
-	// Stream in chunks
-	for offset := int64(0); offset < fileSize; {
-		// Calculate chunk size for this iteration
-		currentChunkSize := chunkSize
-		if remaining := fileSize - offset; remaining < chunkSize {
-			currentChunkSize = remaining
-		}
-
-		// Read chunk
-		buffer := make([]byte, currentChunkSize)
-		nRead, err := io.ReadFull(file, buffer)
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-			return "", fmt.Errorf("failed to read chunk at offset %d: %w", offset, err)
-		}
-
-		// Send chunk and hash it
-		if nRead > 0 {
-			chunk := buffer[:nRead]
-			chunks <- chunk
-			hasher.Write(chunk)
-		}
-
-		offset += int64(nRead)
-	}
-
-	return hex.EncodeToString(hasher.Sum(nil)), nil
-}
-
 // tryRangeReadFromContentCache attempts a ranged read from remote ContentCache
 // This enables lazy loading: we fetch only the bytes we need, not the entire layer
 // decompressedHash is the hash of the decompressed layer data
@@ -624,117 +566,55 @@ func (s *OCIClipStorage) tryRangeReadFromContentCache(decompressedHash string, o
 	return data, nil
 }
 
-// storeDecompressedInRemoteCache stores decompressed layer in remote cache (async safe)
-// Stores the ENTIRE layer so other nodes can do range reads from it
-// Streams content in chunks to avoid loading the entire layer into memory
-// decompressedHash is the hash of the decompressed layer data (used as cache key)
+// storeDecompressedInRemoteCache uploads decompressed layer to remote cache for cluster sharing.
+//
+// Performance: Streams file in 32MB chunks, constant memory O(32MB).
+// Key correctness: Verifies file hash matches expected before upload.
 func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string, diskPath string) {
-	log.Debug().
-		Str("decompressed_hash", decompressedHash).
-		Str("disk_path", diskPath).
-		Msg("storeDecompressedInRemoteCache goroutine started")
-
-	// Get file size for logging
 	fileInfo, err := os.Stat(diskPath)
 	if err != nil {
-		log.Error().
-			Err(err).
-			Str("decompressed_hash", decompressedHash).
-			Str("disk_path", diskPath).
-			Msg("failed to stat disk cache for content cache storage")
+		log.Error().Err(err).Str("hash", decompressedHash).Msg("disk file not found for upload")
 		return
 	}
 	totalSize := fileInfo.Size()
 
-	// Verify the disk file hash matches our expected hash before uploading
-	// Only verify if decompressedHash looks like a real SHA256 hash (64 hex chars)
-	isRealHash := len(decompressedHash) == 64
-	for _, c := range decompressedHash {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			isRealHash = false
-			break
-		}
-	}
-
-	var diskFileHash string
-	if isRealHash {
-		var err error
-		diskFileHash, err = s.computeFileHash(diskPath)
+	// Verify file hash matches expected (SHA256 only, 64 hex chars)
+	if len(decompressedHash) == 64 {
+		diskFileHash, err := s.computeFileHash(diskPath)
 		if err != nil {
-			log.Error().
-				Err(err).
-				Str("decompressed_hash", decompressedHash).
-				Str("disk_path", diskPath).
-				Msg("failed to compute disk file hash")
+			log.Error().Err(err).Str("hash", decompressedHash).Msg("failed to verify disk file hash")
 			return
 		}
 
 		if diskFileHash != decompressedHash {
 			log.Error().
-				Str("expected_hash", decompressedHash).
-				Str("disk_file_hash", diskFileHash).
-				Str("disk_path", diskPath).
-				Int64("bytes", totalSize).
-				Msg("CRITICAL: disk cache file hash mismatch - will not upload to content cache")
+				Str("expected", decompressedHash).
+				Str("actual", diskFileHash).
+				Str("path", diskPath).
+				Msg("CRITICAL: disk file hash mismatch - skipping upload")
 			return
 		}
-
-		log.Debug().
-			Str("decompressed_hash", decompressedHash).
-			Str("verified_hash", diskFileHash).
-			Msg("disk file hash verified, proceeding with content cache upload")
-	} else {
-		log.Debug().
-			Str("decompressed_hash", decompressedHash).
-			Msg("skipping disk file hash verification (test mode)")
-		diskFileHash = "skipped"
 	}
 
-	// Stream the file in chunks and compute hash during streaming for verification
+	// Stream file to content cache (32MB chunks, async)
 	chunks := make(chan []byte, 1)
-	hashChan := make(chan string, 1)
-
 	go func() {
 		defer close(chunks)
-
-		streamedHash, err := s.streamFileInChunksWithHash(diskPath, chunks)
-		if err != nil {
-			log.Error().
-				Err(err).
-				Str("decompressed_hash", decompressedHash).
-				Msg("failed to stream file for content cache storage")
-			hashChan <- ""
-		} else {
-			hashChan <- streamedHash
+		if err := streamFileInChunks(diskPath, chunks); err != nil {
+			log.Error().Err(err).Str("hash", decompressedHash).Msg("stream failed")
 		}
 	}()
 
 	storedHash, err := s.contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
-	streamedHash := <-hashChan
-
 	if err != nil {
+		log.Error().Err(err).Int64("bytes", totalSize).Msg("content cache store failed")
+	} else if storedHash != decompressedHash {
 		log.Error().
-			Err(err).
-			Str("decompressed_hash", decompressedHash).
-			Int64("bytes", totalSize).
-			Msg("failed to store layer in content cache")
+			Str("expected", decompressedHash).
+			Str("stored", storedHash).
+			Msg("CRITICAL BUG: ContentCache computed wrong hash")
 	} else {
-		// Verify the stored hash matches our expected decompressed hash
-		if storedHash != decompressedHash {
-			log.Error().
-				Str("expected_hash", decompressedHash).
-				Str("stored_hash", storedHash).
-				Str("streamed_hash", streamedHash).
-				Str("disk_file_hash", diskFileHash).
-				Int64("bytes", totalSize).
-				Msg("CRITICAL: content cache stored under different hash - cache lookups will fail! This indicates a bug in the ContentCache implementation.")
-		} else {
-			log.Info().
-				Str("decompressed_hash", decompressedHash).
-				Str("stored_hash", storedHash).
-				Int64("bytes", totalSize).
-				Msg("successfully stored decompressed layer in content cache")
-		}
+		log.Info().Str("hash", decompressedHash).Int64("bytes", totalSize).Msg("uploaded to content cache")
 	}
 }
 
