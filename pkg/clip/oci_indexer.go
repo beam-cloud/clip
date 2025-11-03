@@ -36,10 +36,11 @@ type OCIIndexProgress struct {
 
 // IndexOCIImageOptions configures the OCI indexer
 type IndexOCIImageOptions struct {
-	ImageRef      string
-	CheckpointMiB int64                             // Checkpoint every N MiB (default 2)
-	CredProvider  common.RegistryCredentialProvider // optional credential provider for registry authentication
-	ProgressChan  chan<- OCIIndexProgress           // optional channel for progress updates
+	ImageRef        string                            // Source image to index (can be local)
+	StorageImageRef string                            // Optional: image reference to store in metadata (defaults to ImageRef)
+	CheckpointMiB   int64                             // Checkpoint every N MiB (default 2)
+	CredProvider    common.RegistryCredentialProvider // optional credential provider for registry authentication
+	ProgressChan    chan<- OCIIndexProgress           // optional channel for progress updates
 }
 
 // countingReader tracks bytes read from an io.Reader
@@ -70,16 +71,34 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		opts.CheckpointMiB = 2 // default
 	}
 
-	// Parse image reference
+	// Parse image reference for fetching
 	ref, err := name.ParseReference(opts.ImageRef)
 	if err != nil {
 		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to parse image reference: %w", err)
 	}
 
-	// Extract registry and repository info
-	registryURL = ref.Context().RegistryStr()
-	repository = ref.Context().RepositoryStr()
-	reference = ref.Identifier()
+	// Determine which image reference to store in metadata
+	// If StorageImageRef is provided, use it; otherwise use ImageRef
+	storageRef := opts.ImageRef
+	if opts.StorageImageRef != "" {
+		storageRef = opts.StorageImageRef
+	}
+
+	// Parse storage reference for metadata
+	storageRefParsed, err := name.ParseReference(storageRef)
+	if err != nil {
+		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to parse storage image reference: %w", err)
+	}
+
+	// Extract registry and repository info from storage reference
+	registryURL = storageRefParsed.Context().RegistryStr()
+	repository = storageRefParsed.Context().RepositoryStr()
+	reference = storageRefParsed.Identifier()
+
+	// Log the indexing strategy
+	if storageRef != opts.ImageRef {
+		log.Info().Msgf("Indexing from local: %s, will store reference to: %s", opts.ImageRef, storageRef)
+	}
 
 	// Determine which credential provider to use
 	credProvider := opts.CredProvider
