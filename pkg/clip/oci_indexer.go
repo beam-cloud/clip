@@ -109,12 +109,17 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	// Build remote options with authentication
 	remoteOpts := []remote.Option{remote.WithContext(ctx)}
 
+	// IMPORTANT: Get credentials for the SOURCE registry (where we're fetching from),
+	// not the storage reference (which is just stored in metadata)
+	fetchRegistryURL := ref.Context().RegistryStr()
+	fetchRepository := ref.Context().RepositoryStr()
+	
 	// Try to get credentials from provider
-	authConfig, err := credProvider.GetCredentials(ctx, registryURL, repository)
+	authConfig, err := credProvider.GetCredentials(ctx, fetchRegistryURL, fetchRepository)
 	if err != nil && err != common.ErrNoCredentials {
 		log.Warn().
 			Err(err).
-			Str("registry", registryURL).
+			Str("registry", fetchRegistryURL).
 			Str("provider", credProvider.Name()).
 			Msg("Failed to get credentials from provider, falling back to keychain")
 	}
@@ -122,7 +127,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	if authConfig != nil {
 		// Use provided credentials
 		log.Debug().
-			Str("registry", registryURL).
+			Str("registry", fetchRegistryURL).
 			Str("provider", credProvider.Name()).
 			Msg("Using credentials from provider")
 		// Convert AuthConfig to proper authenticator (handles all auth types: username/password, tokens, etc.)
@@ -131,7 +136,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	} else {
 		// Fall back to default keychain for anonymous or keychain-based auth
 		log.Debug().
-			Str("registry", registryURL).
+			Str("registry", fetchRegistryURL).
 			Msg("No credentials from provider, using default keychain")
 		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
 	}
