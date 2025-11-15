@@ -438,7 +438,7 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 		Msg("layer decompressed and cached")
 
 	// Upload to content cache for cluster sharing
-	if s.contentCache != nil {
+	if s.contentCache != nil && s.contentCacheAvailable {
 		decompressedHash := s.getDecompressedHash(digest)
 		go s.storeDecompressedInRemoteCache(decompressedHash, diskPath)
 	}
@@ -504,6 +504,11 @@ func streamFileInChunks(filePath string, chunks chan []byte) error {
 // This enables lazy loading: we fetch only the bytes we need, not the entire layer
 // decompressedHash is the hash of the decompressed layer data
 func (s *OCIClipStorage) tryRangeReadFromContentCache(decompressedHash string, offset, length int64) ([]byte, error) {
+	// Defensive nil check (should already be checked by caller)
+	if s.contentCache == nil {
+		return nil, fmt.Errorf("content cache is not available")
+	}
+
 	// Use GetContent for range reads (offset + length)
 	// This is the KEY optimization: we only fetch the bytes we need!
 	data, err := s.contentCache.GetContent(decompressedHash, offset, length, struct{ RoutingKey string }{RoutingKey: decompressedHash})
@@ -517,6 +522,16 @@ func (s *OCIClipStorage) tryRangeReadFromContentCache(decompressedHash string, o
 // storeDecompressedInRemoteCache uploads decompressed layer to remote cache for cluster sharing.
 // Streams file in 32MB chunks with constant memory usage O(32MB).
 func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string, diskPath string) {
+	// Guard against nil contentCache or unavailable cache
+	if s.contentCache == nil || !s.contentCacheAvailable {
+		log.Debug().
+			Str("hash", decompressedHash).
+			Bool("cache_nil", s.contentCache == nil).
+			Bool("cache_available", s.contentCacheAvailable).
+			Msg("skipping remote cache store - cache not available")
+		return
+	}
+
 	chunks := make(chan []byte, 1)
 	go func() {
 		defer close(chunks)
