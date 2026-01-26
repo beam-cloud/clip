@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -148,6 +149,19 @@ func (s *OCIClipStorage) initLayers(ctx context.Context) error {
 		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
 	}
 
+	// Add platform option to match the architecture used during indexing
+	// Without this, go-containerregistry defaults to amd64 which may have different layer digests
+	platform := v1.Platform{
+		OS:           "linux",
+		Architecture: runtime.GOARCH,
+	}
+	remoteOpts = append(remoteOpts, remote.WithPlatform(platform))
+
+	log.Debug().
+		Str("image_ref", imageRef).
+		Str("platform", platform.Architecture).
+		Msg("fetching image layers from registry")
+
 	img, err := remote.Image(ref, remoteOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to fetch image: %w", err)
@@ -278,22 +292,32 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, string, error
 
 	layerPath := s.getDecompressedCachePath(decompressedHash)
 
-	// Check if already cached on disk
+	// Fast path: check if already cached on disk (outside lock for performance)
 	if _, err := os.Stat(layerPath); err == nil {
 		log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit")
 		return decompressedHash, layerPath, nil
 	}
 
-	// Check if another goroutine is already decompressing this layer
+	// Acquire lock for decompression coordination
 	s.layerDecompressMu.Lock()
+
+	// Double-check disk cache under lock (another goroutine may have just finished)
+	if _, err := os.Stat(layerPath); err == nil {
+		s.layerDecompressMu.Unlock()
+		log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit (after lock)")
+		return decompressedHash, layerPath, nil
+	}
+
+	// Check if another goroutine is already decompressing this layer
 	if waitChan, inProgress := s.layersDecompressing[digest]; inProgress {
 		// Another goroutine is decompressing - wait for it
 		s.layerDecompressMu.Unlock()
-		log.Debug().Str("digest", digest).Msg("waiting for in-progress decompression")
+		log.Info().Str("digest", digest).Msg("waiting for in-progress layer decompression")
 		<-waitChan
 
 		// Now it should be on disk
 		if _, err := os.Stat(layerPath); err == nil {
+			log.Debug().Str("digest", digest).Msg("layer ready after waiting")
 			return decompressedHash, layerPath, nil
 		}
 		return "", "", fmt.Errorf("decompression failed for layer: %s", digest)
@@ -319,6 +343,7 @@ func (s *OCIClipStorage) ensureLayerCached(digest string) (string, string, error
 	s.layerDecompressMu.Unlock()
 
 	if err != nil {
+		log.Error().Err(err).Str("digest", digest).Msg("layer decompression failed")
 		return "", "", err
 	}
 

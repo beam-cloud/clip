@@ -10,6 +10,7 @@ import (
 	"hash/fnv"
 	"io"
 	"path"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +42,7 @@ type IndexOCIImageOptions struct {
 	CheckpointMiB   int64                             // Checkpoint every N MiB (default 2)
 	CredProvider    common.RegistryCredentialProvider // optional credential provider for registry authentication
 	ProgressChan    chan<- OCIIndexProgress           // optional channel for progress updates
+	Platform        *v1.Platform                      // Target platform (defaults to linux/runtime.GOARCH)
 }
 
 // countingReader tracks bytes read from an io.Reader
@@ -140,6 +142,20 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 			Msg("No credentials from provider, using default keychain")
 		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
 	}
+
+	// Add platform option (default to host architecture)
+	platform := opts.Platform
+	if platform == nil {
+		platform = &v1.Platform{
+			OS:           "linux",
+			Architecture: runtime.GOARCH,
+		}
+	}
+	remoteOpts = append(remoteOpts, remote.WithPlatform(*platform))
+	log.Debug().
+		Str("os", platform.OS).
+		Str("arch", platform.Architecture).
+		Msg("Using platform for image fetch")
 
 	// Fetch image
 	img, err := remote.Image(ref, remoteOpts...)
@@ -526,7 +542,7 @@ func (ca *ClipArchiver) processRegularFile(
 	// Enables fast seeking to file start without full layer decompression
 	const largeFileThreshold = 512 * 1024
 	const minCheckpointGap = 512 * 1024
-	
+
 	if hdr.Size > largeFileThreshold && (uncompressedCounter.n-*lastCheckpoint) >= minCheckpointGap {
 		ca.addCheckpoint(checkpoints, compressedCounter.n, uncompressedCounter.n, lastCheckpoint)
 	}
@@ -700,17 +716,17 @@ func (ca *ClipArchiver) extractImageMetadata(imgInterface interface{}, imageRef 
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	
+
 	env := configFile.Config.Env
 	if env == nil {
 		env = make([]string, 0)
 	}
-	
+
 	exposedPorts := configFile.Config.ExposedPorts
 	if exposedPorts == nil {
 		exposedPorts = make(map[string]struct{})
 	}
-	
+
 	volumes := configFile.Config.Volumes
 	if volumes == nil {
 		volumes = make(map[string]struct{})

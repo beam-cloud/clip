@@ -10,6 +10,7 @@ import (
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/rs/zerolog"
@@ -262,12 +263,13 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 
 // CreateFromOCIImageOptions configures OCI image indexing
 type CreateFromOCIImageOptions struct {
-	ImageRef        string                  // Source image to index (can be local)
-	StorageImageRef string                  // Optional: image reference to store in metadata (defaults to ImageRef)
+	ImageRef        string // Source image to index (can be local)
+	StorageImageRef string // Optional: image reference to store in metadata (defaults to ImageRef)
 	OutputPath      string
 	CheckpointMiB   int64
 	CredProvider    interface{}
 	ProgressChan    chan<- OCIIndexProgress // optional channel for progress updates
+	Platform        *v1.Platform            // Target platform (defaults to linux/runtime.GOARCH)
 }
 
 // CreateFromOCIImage creates a metadata-only index (.clip) file from an OCI image
@@ -297,6 +299,7 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 		CheckpointMiB:   options.CheckpointMiB,
 		CredProvider:    credProvider,
 		ProgressChan:    options.ProgressChan,
+		Platform:        options.Platform,
 	}, options.OutputPath)
 
 	if err != nil {
