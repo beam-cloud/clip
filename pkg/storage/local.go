@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -36,6 +37,27 @@ func (s *LocalClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int6
 		return n, fmt.Errorf("unable to read data from file: %w", err)
 	}
 	return n, nil
+}
+
+func (s *LocalClipStorage) LocalFileRegion(ctx context.Context, node *common.ClipNode, off int64, length int64) (LocalFileRegion, bool, error) {
+	if node == nil || node.NodeType != common.FileNode || length <= 0 || off < 0 {
+		return LocalFileRegion{}, false, nil
+	}
+	if off >= node.DataLen {
+		return LocalFileRegion{}, false, nil
+	}
+	if off+length > node.DataLen {
+		length = node.DataLen - off
+	}
+	if length <= 0 || length > int64(int(^uint(0)>>1)) {
+		return LocalFileRegion{}, false, nil
+	}
+	return LocalFileRegion{
+		Path:   s.archivePath,
+		Offset: node.DataPos + off,
+		Length: int(length),
+		Source: "local_archive_fd",
+	}, true, nil
 }
 
 func (s *LocalClipStorage) CachedLocally() bool {

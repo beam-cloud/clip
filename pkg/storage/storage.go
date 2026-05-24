@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 
 	"github.com/beam-cloud/clip/pkg/common"
@@ -13,11 +14,46 @@ type ContentCache interface {
 	StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error)
 }
 
+type ContentCacheReadInto interface {
+	ReadContentInto(hash string, offset int64, dest []byte, opts struct{ RoutingKey string }) (int64, error)
+}
+
+type ContentCacheExists interface {
+	ContentExists(hash string, opts struct{ RoutingKey string }) (bool, error)
+}
+
+type LocalPageRegion struct {
+	Path   string
+	Offset int64
+	Length int
+}
+
+type ContentCacheLocalPageRegions interface {
+	LocalPageRegions(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]LocalPageRegion, error)
+}
+
+type LocalFileRegion struct {
+	Path             string
+	Offset           int64
+	Length           int
+	Source           string
+	LayerDigest      string
+	DecompressedHash string
+}
+
 type ClipStorageInterface interface {
 	ReadFile(node *common.ClipNode, dest []byte, offset int64) (int, error)
 	Metadata() *common.ClipArchiveMetadata
 	CachedLocally() bool
 	Cleanup() error
+}
+
+type ContextClipStorageInterface interface {
+	ReadFileContext(ctx context.Context, node *common.ClipNode, dest []byte, offset int64) (int, error)
+}
+
+type LocalFileRegioner interface {
+	LocalFileRegion(ctx context.Context, node *common.ClipNode, offset int64, length int64) (LocalFileRegion, bool, error)
 }
 
 type ClipStorageCredentials struct {
@@ -34,6 +70,7 @@ type ClipStorageOpts struct {
 	ContentCacheAvailable bool
 	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
 	RegistryCredProvider  interface{} // Registry authentication (for OCI storage)
+	ReadTraceObserver     common.ReadTraceObserver
 }
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
@@ -103,6 +140,7 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 			ContentCacheAvailable: opts.ContentCacheAvailable,
 			DiskCacheDir:          opts.CachePath,
 			UseCheckpoints:        opts.UseCheckpoints,
+			ReadTraceObserver:     opts.ReadTraceObserver,
 		})
 	case common.StorageModeLocal:
 		storage, err = NewLocalClipStorage(metadata, LocalClipStorageOpts{

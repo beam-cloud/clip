@@ -2,10 +2,15 @@ package clip
 
 import (
 	"context"
+	"os"
 	"path"
+	"strconv"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/rs/zerolog/log"
@@ -16,6 +21,98 @@ type FSNode struct {
 	filesystem *ClipFileSystem
 	clipNode   *common.ClipNode
 	attr       fuse.Attr
+}
+
+const clipFileHandleFDCacheSize = 2048
+
+type clipFileHandle struct {
+	node  *FSNode
+	mu    sync.Mutex
+	files map[string]*os.File
+}
+
+func newClipFileHandle(node *FSNode) *clipFileHandle {
+	return &clipFileHandle{
+		node:  node,
+		files: make(map[string]*os.File),
+	}
+}
+
+func (fh *clipFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
+		ctx = common.WithReadTraceCallerPID(ctx, caller.Pid)
+	}
+	if res, ok, errno := fh.readLocalRegion(ctx, dest, off); ok || errno != fs.OK {
+		return res, errno
+	}
+	return fh.node.readData(ctx, dest, off)
+}
+
+func (fh *clipFileHandle) Release(ctx context.Context) syscall.Errno {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	var firstErr syscall.Errno
+	for path, file := range fh.files {
+		if err := file.Close(); err != nil && firstErr == fs.OK {
+			firstErr = fs.ToErrno(err)
+		}
+		delete(fh.files, path)
+	}
+	return firstErr
+}
+
+func (fh *clipFileHandle) openRegionFile(path string) (*os.File, error) {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if file := fh.files[path]; file != nil {
+		return file, nil
+	}
+	if len(fh.files) >= clipFileHandleFDCacheSize {
+		return nil, syscall.EMFILE
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	fh.files[path] = file
+	return file, nil
+}
+
+func (fh *clipFileHandle) readLocalRegion(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, bool, syscall.Errno) {
+	if fh == nil || fh.node == nil || fh.node.filesystem == nil || len(dest) == 0 {
+		return nil, false, fs.OK
+	}
+	regioner, ok := fh.node.filesystem.storage.(storage.LocalFileRegioner)
+	if !ok || regioner == nil {
+		return nil, false, fs.OK
+	}
+
+	readLen := fh.node.clampedReadLength(off, int64(len(dest)))
+	if readLen <= 0 {
+		return fuse.ReadResultData(dest[:0]), true, fs.OK
+	}
+
+	started := time.Now()
+	region, ok, err := regioner.LocalFileRegion(ctx, fh.node.clipNode, off, readLen)
+	if err != nil {
+		fh.node.observeRead(ctx, fh.node.regionReadTrace(region, off, readLen, 0, started, err))
+		return nil, false, fs.OK
+	}
+	if !ok || region.Path == "" || region.Length <= 0 {
+		return nil, false, fs.OK
+	}
+	if int64(region.Length) != readLen {
+		return nil, false, fs.OK
+	}
+
+	file, err := fh.openRegionFile(region.Path)
+	if err != nil {
+		fh.node.observeRead(ctx, fh.node.regionReadTrace(region, off, readLen, 0, started, err))
+		return nil, false, fs.OK
+	}
+
+	fh.node.observeRead(ctx, fh.node.regionReadTrace(region, off, readLen, int64(region.Length), started, nil))
+	return fuse.ReadResultFd(file.Fd(), region.Offset, region.Length), true, fs.OK
 }
 
 func (n *FSNode) OnAdd(ctx context.Context) {
@@ -85,36 +182,53 @@ func (n *FSNode) Opendir(ctx context.Context) syscall.Errno {
 
 func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	log.Debug().Str("path", n.clipNode.Path).Uint32("flags", flags).Msg("Open called")
-	return nil, 0, fs.OK
+	if n.clipNode == nil || n.clipNode.NodeType != common.FileNode {
+		return nil, 0, fs.OK
+	}
+	return newClipFileHandle(n), fuse.FOPEN_KEEP_CACHE, fs.OK
 }
 
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	if fh, ok := f.(*clipFileHandle); ok && fh != nil {
+		return fh.Read(ctx, dest, off)
+	}
+	return n.readData(ctx, dest, off)
+}
+
+func (n *FSNode) readData(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Msg("Read called")
-
-	// Determine file size (support both legacy and v2 RemoteRef)
-	var fileSize int64
-	if n.clipNode.Remote != nil {
-		// v2: Use RemoteRef
-		fileSize = n.clipNode.Remote.ULength
-	} else {
-		// Legacy: Use DataLen
-		fileSize = n.clipNode.DataLen
+	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
+		ctx = common.WithReadTraceCallerPID(ctx, caller.Pid)
 	}
 
-	// Immediately return zeroed buffer if read is completely beyond EOF or file is empty
-	if off >= fileSize || fileSize == 0 {
+	readLen := n.clampedReadLength(off, int64(len(dest)))
+	if readLen <= 0 {
 		return fuse.ReadResultData(dest[:0]), fs.OK
-	}
-
-	// Determine readable length
-	maxReadable := fileSize - off
-	readLen := int64(len(dest))
-	if readLen > maxReadable {
-		readLen = maxReadable
 	}
 
 	var nRead int
 	var err error
+	readStart := time.Now()
+	readSource := "unknown"
+
+	defer func() {
+		if n.clipNode.Remote != nil {
+			return
+		}
+		n.observeLegacyRead(ctx, common.ReadTraceEvent{
+			Operation: "clip.read",
+			Source:    readSource,
+			Path:      n.clipNode.Path,
+			Offset:    off,
+			Length:    readLen,
+			BytesRead: int64(nRead),
+			StartedAt: readStart,
+			Duration:  time.Since(readStart),
+			Success:   err == nil,
+			Error:     errorString(err),
+			Attrs:     n.legacyReadAttrs(),
+		})
+	}()
 
 	// For OCI images (v2 with Remote), delegate ALL caching to the storage layer
 	// The storage layer (oci.go) handles the proper 3-tier cache hierarchy:
@@ -123,7 +237,11 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 	//   3. OCI registry (download + decompress)
 	if n.clipNode.Remote != nil {
 		// OCI mode - storage layer handles all caching
-		nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
+		if contextStorage, ok := n.filesystem.storage.(storage.ContextClipStorageInterface); ok {
+			nRead, err = contextStorage.ReadFileContext(ctx, n.clipNode, dest[:readLen], off)
+		} else {
+			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
+		}
 		if err != nil {
 			return nil, syscall.EIO
 		}
@@ -131,14 +249,54 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 		// Legacy mode - use file-level ContentCache
 		// Attempt to read from cache first for legacy archives
 		if n.filesystem.contentCacheAvailable && n.clipNode.ContentHash != "" && !n.filesystem.storage.CachedLocally() {
-			content, cacheErr := n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
+			var cacheErr error
+			cacheStart := time.Now()
+			if readInto, ok := n.filesystem.contentCache.(storage.ContentCacheReadInto); ok {
+				var n64 int64
+				n64, cacheErr = readInto.ReadContentInto(n.clipNode.ContentHash, off, dest[:readLen], struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
+				nRead = int(n64)
+				if cacheErr == nil && n64 != readLen {
+					cacheErr = syscall.EIO
+				}
+			} else {
+				var content []byte
+				content, cacheErr = n.filesystem.contentCache.GetContent(n.clipNode.ContentHash, off, readLen, struct{ RoutingKey string }{RoutingKey: n.clipNode.ContentHash})
+				if cacheErr == nil {
+					nRead = copy(dest, content)
+				}
+			}
 			if cacheErr == nil {
+				readSource = "content_cache"
+				n.observeLegacyRead(ctx, common.ReadTraceEvent{
+					Operation: "clip.content_cache_read",
+					Source:    "content_cache",
+					Path:      n.clipNode.Path,
+					Offset:    off,
+					Length:    readLen,
+					BytesRead: int64(nRead),
+					StartedAt: cacheStart,
+					Duration:  time.Since(cacheStart),
+					Success:   true,
+					Attrs:     n.legacyReadAttrsWith("cache_hit", "true"),
+				})
 				// Cache hit - use cached content
-				nRead = copy(dest, content)
 				log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Int64("length", readLen).Msg("Cache hit")
 			} else {
+				n.observeLegacyRead(ctx, common.ReadTraceEvent{
+					Operation: "clip.content_cache_read",
+					Source:    "content_cache",
+					Path:      n.clipNode.Path,
+					Offset:    off,
+					Length:    readLen,
+					StartedAt: cacheStart,
+					Duration:  time.Since(cacheStart),
+					Success:   false,
+					Error:     errorString(cacheErr),
+					Attrs:     n.legacyReadAttrsWith("cache_hit", "false"),
+				})
 				// Cache miss - read from storage and populate cache
-				nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
+				readSource = n.legacyArchiveSource()
+				nRead, err = n.readLegacyArchiveObserved(ctx, dest[:readLen], off, readLen)
 				if err != nil {
 					return nil, syscall.EIO
 				}
@@ -151,20 +309,150 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 			}
 		} else {
 			// No cache available or local storage - read directly
-			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
+			readSource = n.legacyArchiveSource()
+			nRead, err = n.readLegacyArchiveObserved(ctx, dest[:readLen], off, readLen)
 			if err != nil {
 				return nil, syscall.EIO
 			}
 		}
 	}
 
-	// Null-terminate immediately after last read byte if buffer is not fully filled
-	if nRead < len(dest) {
-		dest[nRead] = 0
-		nRead++
+	return fuse.ReadResultData(dest[:nRead]), fs.OK
+}
+
+func (n *FSNode) clampedReadLength(off int64, requested int64) int64 {
+	if n == nil || n.clipNode == nil || off < 0 || requested <= 0 {
+		return 0
+	}
+	fileSize := n.fileSize()
+	if off >= fileSize || fileSize == 0 {
+		return 0
+	}
+	maxReadable := fileSize - off
+	if requested > maxReadable {
+		return maxReadable
+	}
+	return requested
+}
+
+func (n *FSNode) fileSize() int64 {
+	if n == nil || n.clipNode == nil {
+		return 0
+	}
+	if n.clipNode.Remote != nil {
+		return n.clipNode.Remote.ULength
+	}
+	return n.clipNode.DataLen
+}
+
+func (n *FSNode) regionReadTrace(region storage.LocalFileRegion, off int64, readLen int64, bytesRead int64, started time.Time, err error) common.ReadTraceEvent {
+	operation := "clip.read"
+	attrs := map[string]string{}
+	if n != nil && n.clipNode != nil && n.clipNode.Remote != nil {
+		operation = "clip.oci_read"
+		attrs["storage_mode"] = "oci"
+		attrs["content_cache_available"] = strconv.FormatBool(n.filesystem != nil && n.filesystem.contentCacheAvailable)
+	} else if n != nil {
+		attrs = n.legacyReadAttrs()
+	}
+	attrs["fd_fast_path"] = "true"
+	if region.Path != "" {
+		attrs["region_path"] = region.Path
 	}
 
-	return fuse.ReadResultData(dest[:nRead]), fs.OK
+	success := err == nil
+	return common.ReadTraceEvent{
+		Operation:        operation,
+		Source:           region.Source,
+		Path:             n.clipNode.Path,
+		LayerDigest:      region.LayerDigest,
+		DecompressedHash: region.DecompressedHash,
+		Offset:           off,
+		Length:           readLen,
+		BytesRead:        bytesRead,
+		StartedAt:        started,
+		Duration:         time.Since(started),
+		Success:          success,
+		Error:            errorString(err),
+		Attrs:            attrs,
+	}
+}
+
+func (n *FSNode) observeRead(ctx context.Context, event common.ReadTraceEvent) {
+	if n.filesystem == nil || n.filesystem.readTraceObserver == nil {
+		return
+	}
+	if event.StartedAt.IsZero() {
+		event.StartedAt = time.Now().Add(-event.Duration)
+	}
+	if event.CallerPID == 0 {
+		event.CallerPID = common.ReadTraceCallerPID(ctx)
+	}
+	n.filesystem.readTraceObserver(event)
+}
+
+func (n *FSNode) readLegacyArchiveObserved(ctx context.Context, dest []byte, off int64, readLen int64) (int, error) {
+	startedAt := time.Now()
+	nRead, err := n.filesystem.storage.ReadFile(n.clipNode, dest, off)
+	n.observeLegacyRead(ctx, common.ReadTraceEvent{
+		Operation: "clip.archive_read",
+		Source:    n.legacyArchiveSource(),
+		Path:      n.clipNode.Path,
+		Offset:    off,
+		Length:    readLen,
+		BytesRead: int64(nRead),
+		StartedAt: startedAt,
+		Duration:  time.Since(startedAt),
+		Success:   err == nil,
+		Error:     errorString(err),
+		Attrs:     n.legacyReadAttrs(),
+	})
+	return nRead, err
+}
+
+func (n *FSNode) observeLegacyRead(ctx context.Context, event common.ReadTraceEvent) {
+	n.observeRead(ctx, event)
+}
+
+func (n *FSNode) legacyReadAttrs() map[string]string {
+	attrs := map[string]string{
+		"storage_mode": "legacy",
+	}
+	if n.filesystem != nil {
+		attrs["content_cache_available"] = strconv.FormatBool(n.filesystem.contentCacheAvailable)
+	}
+	if n.clipNode.ContentHash != "" {
+		attrs["content_hash"] = n.clipNode.ContentHash
+		if len(n.clipNode.ContentHash) > 12 {
+			attrs["content_hash_short"] = n.clipNode.ContentHash[:12]
+		}
+	}
+	if n.filesystem != nil && n.filesystem.storage != nil {
+		attrs["cached_locally"] = strconv.FormatBool(n.filesystem.storage.CachedLocally())
+	}
+	return attrs
+}
+
+func (n *FSNode) legacyReadAttrsWith(key, value string) map[string]string {
+	attrs := n.legacyReadAttrs()
+	if key != "" {
+		attrs[key] = value
+	}
+	return attrs
+}
+
+func (n *FSNode) legacyArchiveSource() string {
+	if n.filesystem != nil && n.filesystem.storage != nil && n.filesystem.storage.CachedLocally() {
+		return "local_archive"
+	}
+	return "remote_archive"
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
