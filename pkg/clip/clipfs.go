@@ -15,6 +15,7 @@ type ClipFileSystemOpts struct {
 	Verbose               bool
 	ContentCache          storage.ContentCache
 	ContentCacheAvailable bool
+	ReadTraceObserver     common.ReadTraceObserver
 }
 
 type ClipFileSystem struct {
@@ -23,6 +24,7 @@ type ClipFileSystem struct {
 	lookupCache           map[string]*lookupCacheEntry
 	contentCache          storage.ContentCache
 	contentCacheAvailable bool
+	readTraceObserver     common.ReadTraceObserver
 	cacheMutex            sync.RWMutex
 	cachingStatus         map[string]bool
 	cacheEventChan        chan cacheEvent
@@ -46,6 +48,7 @@ func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*Cl
 		cacheEventChan:        make(chan cacheEvent, 10000),
 		cachingStatus:         make(map[string]bool),
 		contentCacheAvailable: opts.ContentCacheAvailable,
+		readTraceObserver:     opts.ReadTraceObserver,
 	}
 
 	metadata := s.Metadata()
@@ -113,12 +116,12 @@ func (cfs *ClipFileSystem) processCacheEvents() {
 						chunkSize = clipNode.DataLen - offset
 					}
 
-				fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
-				nRead, err := cfs.storage.ReadFile(clipNode, fileContent, offset)
-				if err != nil {
-					log.Error().Err(err).Str("path", clipNode.Path).Msg("error reading file for caching")
-					break
-				}
+					fileContent := make([]byte, chunkSize) // Create a new buffer for each chunk
+					nRead, err := cfs.storage.ReadFile(clipNode, fileContent, offset)
+					if err != nil {
+						log.Error().Err(err).Str("path", clipNode.Path).Msg("error reading file for caching")
+						break
+					}
 
 					chunks <- fileContent[:nRead]
 					fileContent = nil

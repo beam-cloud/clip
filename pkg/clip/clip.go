@@ -45,6 +45,7 @@ type CreateOptions struct {
 	OutputPath   string
 	Credentials  storage.ClipStorageCredentials
 	ProgressChan chan<- int
+	ContentCache storage.ContentCache
 }
 
 type CreateRemoteOptions struct {
@@ -67,6 +68,7 @@ type MountOptions struct {
 	Credentials           storage.ClipStorageCredentials
 	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
 	RegistryCredProvider  interface{} // Registry authentication (for OCI archives)
+	ReadTraceObserver     common.ReadTraceObserver
 }
 
 type StoreS3Options struct {
@@ -85,8 +87,9 @@ func CreateArchive(options CreateOptions) error {
 
 	a := NewClipArchiver()
 	err := a.Create(ClipArchiverOptions{
-		SourcePath: options.InputPath,
-		OutputFile: options.OutputPath,
+		SourcePath:   options.InputPath,
+		OutputFile:   options.OutputPath,
+		ContentCache: options.ContentCache,
 	})
 	if err != nil {
 		return err
@@ -108,8 +111,9 @@ func CreateAndUploadArchive(ctx context.Context, options CreateOptions, si commo
 
 	localArchiver := NewClipArchiver()
 	err = localArchiver.Create(ClipArchiverOptions{
-		SourcePath: options.InputPath,
-		OutputFile: tempFile.Name(),
+		SourcePath:   options.InputPath,
+		OutputFile:   tempFile.Name(),
+		ContentCache: options.ContentCache,
 	})
 	if err != nil {
 		return err
@@ -184,12 +188,17 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		UseCheckpoints:        options.UseCheckpoints,
 		ContentCacheAvailable: options.ContentCacheAvailable,
 		RegistryCredProvider:  options.RegistryCredProvider,
+		ReadTraceObserver:     options.ReadTraceObserver,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
 	}
 
-	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{ContentCache: options.ContentCache, ContentCacheAvailable: options.ContentCacheAvailable})
+	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{
+		ContentCache:          options.ContentCache,
+		ContentCacheAvailable: options.ContentCacheAvailable,
+		ReadTraceObserver:     options.ReadTraceObserver,
+	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
@@ -207,7 +216,8 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		EnableSymlinkCaching: true,
 		SyncRead:             false,
 		RememberInodes:       true,
-		MaxReadAhead:         1024 * 128, // 128KB
+		MaxWrite:             1024 * 1024,
+		MaxReadAhead:         1024 * 1024,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create server: %v", err)
@@ -263,13 +273,15 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 
 // CreateFromOCIImageOptions configures OCI image indexing
 type CreateFromOCIImageOptions struct {
-	ImageRef        string // Source image to index (can be local)
-	StorageImageRef string // Optional: image reference to store in metadata (defaults to ImageRef)
-	OutputPath      string
-	CheckpointMiB   int64
-	CredProvider    interface{}
-	ProgressChan    chan<- OCIIndexProgress // optional channel for progress updates
-	Platform        *v1.Platform            // Target platform (defaults to linux/runtime.GOARCH)
+	ImageRef        string      // Source image to index (can be local)
+	StorageImageRef string      // Optional: image reference to store in metadata (defaults to ImageRef)
+	OutputPath      string      // Path for the metadata-only .clip archive
+	CheckpointMiB   int64       // Gzip checkpoint interval
+	CredProvider    interface{} // Optional registry credential provider
+	ProgressChan    chan<- OCIIndexProgress
+	Platform        *v1.Platform
+	ContentCache    storage.ContentCache // Optional cache to warm with decompressed layer streams
+	ContentCacheDir string               // Optional temp directory for layer cache upload spooling
 }
 
 // CreateFromOCIImage creates a metadata-only index (.clip) file from an OCI image
@@ -300,6 +312,8 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 		CredProvider:    credProvider,
 		ProgressChan:    options.ProgressChan,
 		Platform:        options.Platform,
+		ContentCache:    options.ContentCache,
+		ContentCacheDir: options.ContentCacheDir,
 	}, options.OutputPath)
 
 	if err != nil {

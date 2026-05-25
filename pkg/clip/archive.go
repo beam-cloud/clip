@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	common "github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/clip/pkg/storage"
 
 	"github.com/karrick/godirwalk"
 	"github.com/tidwall/btree"
@@ -41,11 +42,12 @@ func init() {
 }
 
 type ClipArchiverOptions struct {
-	Compress    bool
-	ArchivePath string
-	SourcePath  string
-	OutputFile  string
-	OutputPath  string
+	Compress     bool
+	ArchivePath  string
+	SourcePath   string
+	OutputFile   string
+	OutputPath   string
+	ContentCache storage.ContentCache
 }
 
 type ClipArchiver struct {
@@ -651,13 +653,8 @@ func (ca *ClipArchiver) processNode(node *common.ClipNode, writer *bufio.Writer,
 	// Update data position
 	node.DataPos = *pos
 
-	// Create a multi-writer that writes to both the checksum and the writer
-	multi := io.MultiWriter(hash, writer)
-
-	// Use io.Copy to simultaneously write the file to the output and update the checksum
-	copied, err := io.Copy(multi, f)
-	if err != nil {
-		log.Error().Msgf("error copying file %s: %v", node.Path, err)
+	copied, ok := ca.copyNodeContent(node, f, writer, hash, opts)
+	if !ok {
 		return false
 	}
 
@@ -679,6 +676,91 @@ func (ca *ClipArchiver) processNode(node *common.ClipNode, writer *bufio.Writer,
 	*pos += copied
 
 	return true
+}
+
+func (ca *ClipArchiver) copyNodeContent(node *common.ClipNode, f *os.File, writer *bufio.Writer, hash io.Writer, opts ClipArchiverOptions) (int64, bool) {
+	if opts.ContentCache == nil || node.ContentHash == "" {
+		multi := io.MultiWriter(hash, writer)
+		copied, err := io.Copy(multi, f)
+		if err != nil {
+			log.Error().Msgf("error copying file %s: %v", node.Path, err)
+			return copied, false
+		}
+		return copied, true
+	}
+
+	chunks := make(chan []byte, 2)
+	type storeResult struct {
+		hash string
+		err  error
+	}
+	storeDone := make(chan storeResult, 1)
+	go func() {
+		actualHash, err := opts.ContentCache.StoreContent(chunks, node.ContentHash, struct{ RoutingKey string }{RoutingKey: node.ContentHash})
+		storeDone <- storeResult{hash: actualHash, err: err}
+	}()
+
+	buf := make([]byte, indexedLayerContentCacheChunkSize)
+	var copied int64
+	var copyOK bool
+	var result *storeResult
+	for {
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			data := buf[:n]
+			if _, err := hash.Write(data); err != nil {
+				log.Error().Err(err).Str("path", node.Path).Msg("error hashing file while archiving")
+				break
+			}
+			if _, err := writer.Write(data); err != nil {
+				log.Error().Err(err).Str("path", node.Path).Msg("error writing file to archive")
+				break
+			}
+			chunk := make([]byte, n)
+			copy(chunk, data)
+			if chunks != nil {
+				select {
+				case chunks <- chunk:
+				case r := <-storeDone:
+					result = &r
+					chunks = nil
+					log.Warn().
+						Err(r.err).
+						Str("path", node.Path).
+						Str("hash", node.ContentHash).
+						Str("actual_hash", r.hash).
+						Msg("file content cache store ended before archive copy completed")
+				}
+			}
+			copied += int64(n)
+		}
+		if readErr == io.EOF {
+			copyOK = true
+			break
+		}
+		if readErr != nil {
+			log.Error().Err(readErr).Str("path", node.Path).Msg("error reading file while archiving")
+			break
+		}
+	}
+
+	if chunks != nil {
+		close(chunks)
+	}
+	if result == nil && chunks != nil {
+		r := <-storeDone
+		result = &r
+	}
+	if result != nil && (result.err != nil || result.hash != node.ContentHash) {
+		log.Warn().
+			Err(result.err).
+			Str("path", node.Path).
+			Str("hash", node.ContentHash).
+			Str("actual_hash", result.hash).
+			Msg("error warming file content cache")
+	}
+
+	return copied, copyOK
 }
 
 func (ca *ClipArchiver) EncodeHeader(header *common.ClipArchiveHeader) ([]byte, error) {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"os"
 	"path"
 	"runtime"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -43,6 +45,69 @@ type IndexOCIImageOptions struct {
 	CredProvider    common.RegistryCredentialProvider // optional credential provider for registry authentication
 	ProgressChan    chan<- OCIIndexProgress           // optional channel for progress updates
 	Platform        *v1.Platform                      // Target platform (defaults to linux/runtime.GOARCH)
+	ContentCache    storage.ContentCache              // optional remote cache for fully decompressed layers
+	ContentCacheDir string                            // optional temp directory for cache upload spooling
+}
+
+const indexedLayerContentCacheChunkSize = 4 * 1024 * 1024
+
+type indexedLayerContentCacheSpool struct {
+	file *os.File
+	path string
+	err  error
+}
+
+func newIndexedLayerContentCacheSpool(dir, layerDigest string) *indexedLayerContentCacheSpool {
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Warn().Err(err).Str("dir", dir).Msg("failed to create layer content cache temp dir")
+		}
+	}
+
+	file, err := os.CreateTemp(dir, "clip-index-layer-*.tar")
+	if err != nil {
+		log.Warn().Err(err).Str("layer_digest", layerDigest).Msg("failed to create layer content cache temp file")
+		return nil
+	}
+
+	return &indexedLayerContentCacheSpool{file: file, path: file.Name()}
+}
+
+func (s *indexedLayerContentCacheSpool) Write(p []byte) (int, error) {
+	if s == nil || s.file == nil {
+		return len(p), nil
+	}
+
+	n, err := s.file.Write(p)
+	if err != nil || n != len(p) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		s.err = err
+		s.closeAndRemove()
+		return len(p), nil
+	}
+
+	return len(p), nil
+}
+
+func (s *indexedLayerContentCacheSpool) close() error {
+	if s == nil || s.file == nil {
+		return nil
+	}
+	err := s.file.Close()
+	s.file = nil
+	return err
+}
+
+func (s *indexedLayerContentCacheSpool) closeAndRemove() {
+	if s == nil {
+		return
+	}
+	_ = s.close()
+	if s.path != "" {
+		_ = os.Remove(s.path)
+	}
 }
 
 // countingReader tracks bytes read from an io.Reader
@@ -115,7 +180,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	// not the storage reference (which is just stored in metadata)
 	fetchRegistryURL := ref.Context().RegistryStr()
 	fetchRepository := ref.Context().RepositoryStr()
-	
+
 	// Try to get credentials from provider
 	authConfig, err := credProvider.GetCredentials(ctx, fetchRegistryURL, fetchRepository)
 	if err != nil && err != common.ErrNoCredentials {
@@ -289,10 +354,21 @@ func (ca *ClipArchiver) indexLayerOptimized(
 	}
 	defer gzr.Close()
 
-	// Streaming hash computation via TeeReader (zero-copy)
-	// TeeReader writes to hasher while tar.Reader consumes data
+	var cacheSpool *indexedLayerContentCacheSpool
+	if opts.ContentCache != nil {
+		cacheSpool = newIndexedLayerContentCacheSpool(opts.ContentCacheDir, layerDigest)
+		defer cacheSpool.closeAndRemove()
+	}
+
+	// Streaming hash computation via TeeReader.
+	// When a content cache is configured, the same decompressed byte stream is
+	// also spooled once so the runtime does not decompress this layer again.
 	hasher := sha256.New()
-	hashingReader := io.TeeReader(gzr, hasher)
+	hashWriter := io.Writer(hasher)
+	if cacheSpool != nil {
+		hashWriter = io.MultiWriter(hasher, cacheSpool)
+	}
+	hashingReader := io.TeeReader(gzr, hashWriter)
 	uncompressedCounter := &countingReader{r: hashingReader}
 	tr := tar.NewReader(uncompressedCounter)
 
@@ -360,11 +436,118 @@ func (ca *ClipArchiver) indexLayerOptimized(
 	// Finalize hash (includes all bytes: file contents + tar headers + padding)
 	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
 
+	if opts.ContentCache != nil && cacheSpool != nil && cacheSpool.err == nil && cacheSpool.path != "" {
+		if err := cacheSpool.close(); err != nil {
+			return nil, "", fmt.Errorf("failed to close layer content cache temp file: %w", err)
+		}
+
+		if err := ca.storeIndexedLayerInContentCache(ctx, opts.ContentCache, cacheSpool.path, decompressedHash, layerDigest); err != nil {
+			log.Warn().
+				Err(err).
+				Str("layer_digest", layerDigest).
+				Str("decompressed_hash", decompressedHash).
+				Msg("failed to store indexed layer in content cache")
+		}
+	} else if cacheSpool != nil && cacheSpool.err != nil {
+		log.Warn().
+			Err(cacheSpool.err).
+			Str("layer_digest", layerDigest).
+			Msg("skipping indexed layer content cache store after spool write failure")
+	}
+
 	// Return gzip index and decompressed hash
 	return &common.GzipIndex{
 		LayerDigest: layerDigest,
 		Checkpoints: checkpoints,
 	}, decompressedHash, nil
+}
+
+func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, contentCache storage.ContentCache, filePath, decompressedHash, layerDigest string) error {
+	if contentCache == nil {
+		return nil
+	}
+
+	if existsCache, ok := contentCache.(storage.ContentCacheExists); ok {
+		exists, err := existsCache.ContentExists(decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Str("layer_digest", layerDigest).
+				Str("decompressed_hash", decompressedHash).
+				Msg("failed to check indexed layer content cache")
+		} else if exists {
+			log.Info().
+				Str("layer_digest", layerDigest).
+				Str("decompressed_hash", decompressedHash).
+				Msg("indexed layer already present in content cache")
+			return nil
+		}
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open indexed layer temp file: %w", err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat indexed layer temp file: %w", err)
+	}
+
+	storeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	chunks := make(chan []byte, 2)
+	readErrCh := make(chan error, 1)
+	go func() {
+		defer close(chunks)
+		buf := make([]byte, indexedLayerContentCacheChunkSize)
+		for {
+			n, readErr := file.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				select {
+				case chunks <- chunk:
+				case <-storeCtx.Done():
+					readErrCh <- storeCtx.Err()
+					return
+				}
+			}
+			if readErr == io.EOF {
+				readErrCh <- nil
+				return
+			}
+			if readErr != nil {
+				readErrCh <- readErr
+				return
+			}
+		}
+	}()
+
+	started := time.Now()
+	actualHash, storeErr := contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+	cancel()
+	readErr := <-readErrCh
+	if storeErr != nil {
+		return storeErr
+	}
+	if readErr != nil {
+		return readErr
+	}
+	if actualHash != "" && actualHash != decompressedHash {
+		return fmt.Errorf("indexed layer content cache hash mismatch: expected %s, got %s", decompressedHash, actualHash)
+	}
+
+	log.Info().
+		Str("layer_digest", layerDigest).
+		Str("decompressed_hash", decompressedHash).
+		Int64("bytes", info.Size()).
+		Dur("duration", time.Since(started)).
+		Msg("stored indexed layer in content cache")
+
+	return nil
 }
 
 // handleWhiteout processes OCI whiteout files

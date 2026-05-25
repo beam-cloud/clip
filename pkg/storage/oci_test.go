@@ -3,12 +3,14 @@ package storage
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -22,21 +24,26 @@ import (
 
 // Mock ContentCache for testing (implements range read interface)
 type mockCache struct {
-	mu    sync.Mutex
-	store map[string][]byte
+	mu           sync.Mutex
+	store        map[string][]byte
+	localRegions map[string][]LocalPageRegion
 
 	// Error injection
 	getError error
 	setError error
 
 	// Call tracking
-	getCalls int
-	setCalls int
+	getCalls              int
+	setCalls              int
+	localPageRegionCalls  int
+	localPageRegionOffset int64
+	localPageRegionLength int64
 }
 
 func newMockCache() *mockCache {
 	return &mockCache{
-		store: make(map[string][]byte),
+		store:        make(map[string][]byte),
+		localRegions: make(map[string][]LocalPageRegion),
 	}
 }
 
@@ -88,13 +95,31 @@ func (m *mockCache) StoreContent(chunks chan []byte, hash string, opts struct{ R
 	return hash, nil
 }
 
+func (m *mockCache) LocalPageRegions(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]LocalPageRegion, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.localPageRegionCalls++
+	m.localPageRegionOffset = offset
+	m.localPageRegionLength = length
+	regions := m.localRegions[hash]
+	if len(regions) == 0 {
+		return nil, fmt.Errorf("not found in cache")
+	}
+	return append([]LocalPageRegion(nil), regions...), nil
+}
+
 func (m *mockCache) reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.store = make(map[string][]byte)
+	m.localRegions = make(map[string][]LocalPageRegion)
 	m.getCalls = 0
 	m.setCalls = 0
+	m.localPageRegionCalls = 0
+	m.localPageRegionOffset = 0
+	m.localPageRegionLength = 0
 	m.getError = nil
 	m.setError = nil
 }
@@ -215,6 +240,98 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 	// Verify cache was hit (Get called, Set not called)
 	assert.Equal(t, 1, cache.getCalls, "cache.Get should be called once")
 	assert.Equal(t, 0, cache.setCalls, "cache.Set should not be called on cache hit")
+}
+
+func TestOCIStorage_LocalFileRegionUsesDiskCache(t *testing.T) {
+	testData := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	digest := v1.Hash{Algorithm: "sha256", Hex: "abc123"}
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+	cacheDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, decompressedHash), testData, 0644))
+
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{digest.String(): {}},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
+		},
+	}
+	storage := &OCIClipStorage{
+		metadata:              metadata,
+		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+		diskCacheDir:          cacheDir,
+		contentCacheAvailable: true,
+	}
+	node := &common.ClipNode{
+		Remote: &common.RemoteRef{
+			LayerDigest: digest.String(),
+			UOffset:     10,
+			ULength:     20,
+		},
+	}
+
+	region, ok, err := storage.LocalFileRegion(context.Background(), node, 3, 7)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, filepath.Join(cacheDir, decompressedHash), region.Path)
+	assert.Equal(t, int64(13), region.Offset)
+	assert.Equal(t, 7, region.Length)
+	assert.Equal(t, "disk_cache_fd", region.Source)
+	assert.Equal(t, digest.String(), region.LayerDigest)
+	assert.Equal(t, decompressedHash, region.DecompressedHash)
+}
+
+func TestOCIStorage_LocalFileRegionUsesContentCachePage(t *testing.T) {
+	testData := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	digest := v1.Hash{Algorithm: "sha256", Hex: "abc123"}
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+	pagePath := filepath.Join(t.TempDir(), "page")
+	require.NoError(t, os.WriteFile(pagePath, testData, 0644))
+
+	cache := newMockCache()
+	cache.localRegions[decompressedHash] = []LocalPageRegion{{
+		Path:   pagePath,
+		Offset: 1234,
+		Length: 9,
+	}}
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{digest.String(): {}},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
+		},
+	}
+	storage := &OCIClipStorage{
+		metadata:              metadata,
+		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+		diskCacheDir:          t.TempDir(),
+		contentCache:          cache,
+		contentCacheAvailable: true,
+	}
+	node := &common.ClipNode{
+		Remote: &common.RemoteRef{
+			LayerDigest: digest.String(),
+			UOffset:     4096,
+			ULength:     64,
+		},
+	}
+
+	region, ok, err := storage.LocalFileRegion(context.Background(), node, 5, 9)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, pagePath, region.Path)
+	assert.Equal(t, int64(1234), region.Offset)
+	assert.Equal(t, 9, region.Length)
+	assert.Equal(t, "content_cache_page_fd", region.Source)
+	assert.Equal(t, 1, cache.localPageRegionCalls)
+	assert.Equal(t, int64(4101), cache.localPageRegionOffset)
+	assert.Equal(t, int64(9), cache.localPageRegionLength)
 }
 
 func TestOCIStorage_CacheMiss(t *testing.T) {
@@ -1482,11 +1599,11 @@ func TestNearestCheckpoint(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name          string
-		wantUOffset   int64
-		expectedCOff  int64
-		expectedUOff  int64
-		description   string
+		name         string
+		wantUOffset  int64
+		expectedCOff int64
+		expectedUOff int64
+		description  string
 	}{
 		{"Before first checkpoint", 0, 100, 0, "should use first checkpoint"},
 		{"Exactly at checkpoint", 2 * 1024 * 1024, 200, 2 * 1024 * 1024, "should use exact checkpoint"},
