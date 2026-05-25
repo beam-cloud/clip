@@ -332,20 +332,20 @@ func (s3c *S3ClipStorage) ReadFile(node *common.ClipNode, dest []byte, off int64
 	return n, nil
 }
 
-func (s3c *S3ClipStorage) LocalFileRegion(ctx context.Context, node *common.ClipNode, off int64, length int64) (LocalFileRegion, bool, error) {
+func (s3c *S3ClipStorage) ClientLocalFileView(ctx context.Context, node *common.ClipNode, off int64, length int64) (ClientLocalFileView, bool, error) {
 	if node == nil || node.NodeType != common.FileNode || !s3c.cachedLocally || s3c.localCachePath == "" || length <= 0 || off < 0 {
-		return LocalFileRegion{}, false, nil
+		return ClientLocalFileView{}, false, nil
 	}
 	if off >= node.DataLen {
-		return LocalFileRegion{}, false, nil
+		return ClientLocalFileView{}, false, nil
 	}
 	if off+length > node.DataLen {
 		length = node.DataLen - off
 	}
 	if length <= 0 || length > int64(int(^uint(0)>>1)) {
-		return LocalFileRegion{}, false, nil
+		return ClientLocalFileView{}, false, nil
 	}
-	return LocalFileRegion{
+	return ClientLocalFileView{
 		Path:   s3c.localCachePath,
 		Offset: node.DataPos + off,
 		Length: int(length),

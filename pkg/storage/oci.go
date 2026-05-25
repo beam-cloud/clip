@@ -199,9 +199,9 @@ func (s *OCIClipStorage) ReadFile(node *common.ClipNode, dest []byte, offset int
 	return s.ReadFileContext(context.Background(), node, dest, offset)
 }
 
-func (s *OCIClipStorage) LocalFileRegion(ctx context.Context, node *common.ClipNode, offset int64, length int64) (LocalFileRegion, bool, error) {
+func (s *OCIClipStorage) ClientLocalFileView(ctx context.Context, node *common.ClipNode, offset int64, length int64) (ClientLocalFileView, bool, error) {
 	if node == nil || node.Remote == nil || length <= 0 || offset < 0 {
-		return LocalFileRegion{}, false, nil
+		return ClientLocalFileView{}, false, nil
 	}
 
 	remote := node.Remote
@@ -212,17 +212,17 @@ func (s *OCIClipStorage) LocalFileRegion(ctx context.Context, node *common.ClipN
 		readLen = wantUEnd - wantUStart
 	}
 	if readLen <= 0 || readLen > int64(int(^uint(0)>>1)) {
-		return LocalFileRegion{}, false, nil
+		return ClientLocalFileView{}, false, nil
 	}
 
 	decompressedHash := s.getDecompressedHash(remote.LayerDigest)
 	if decompressedHash == "" {
-		return LocalFileRegion{}, false, nil
+		return ClientLocalFileView{}, false, nil
 	}
 
 	layerPath := s.getDecompressedCachePath(decompressedHash)
 	if _, err := os.Stat(layerPath); err == nil {
-		return LocalFileRegion{
+		return ClientLocalFileView{
 			Path:             layerPath,
 			Offset:           wantUStart,
 			Length:           int(readLen),
@@ -231,28 +231,28 @@ func (s *OCIClipStorage) LocalFileRegion(ctx context.Context, node *common.ClipN
 			DecompressedHash: decompressedHash,
 		}, true, nil
 	} else if !os.IsNotExist(err) {
-		return LocalFileRegion{}, false, err
+		return ClientLocalFileView{}, false, err
 	}
 
-	pageCache, ok := s.contentCache.(ContentCacheLocalPageRegions)
+	pageCache, ok := s.contentCache.(ContentCacheClientLocalPageFileViews)
 	if !ok || pageCache == nil || !s.contentCacheAvailable {
-		return LocalFileRegion{}, false, nil
+		return ClientLocalFileView{}, false, nil
 	}
 
-	regions, err := pageCache.LocalPageRegions(decompressedHash, wantUStart, readLen, struct{ RoutingKey string }{RoutingKey: decompressedHash})
-	if err != nil || len(regions) != 1 {
-		return LocalFileRegion{}, false, err
+	views, err := pageCache.ClientLocalPageFileViews(decompressedHash, wantUStart, readLen, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+	if err != nil || len(views) != 1 {
+		return ClientLocalFileView{}, false, err
 	}
-	region := regions[0]
-	if region.Path == "" || region.Offset < 0 || region.Length != int(readLen) {
-		return LocalFileRegion{}, false, nil
+	view := views[0]
+	if view.Path == "" || view.Offset < 0 || view.Length != int(readLen) {
+		return ClientLocalFileView{}, false, nil
 	}
 
-	return LocalFileRegion{
-		Path:             region.Path,
-		Offset:           region.Offset,
-		Length:           region.Length,
-		Source:           "content_cache_page_fd",
+	return ClientLocalFileView{
+		Path:             view.Path,
+		Offset:           view.Offset,
+		Length:           view.Length,
+		Source:           "client_local_page_file_fd",
 		LayerDigest:      remote.LayerDigest,
 		DecompressedHash: decompressedHash,
 	}, true, nil

@@ -42,7 +42,7 @@ func (fh *clipFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
 		ctx = common.WithReadTraceCallerPID(ctx, caller.Pid)
 	}
-	if res, ok, errno := fh.readLocalRegion(ctx, dest, off); ok || errno != fs.OK {
+	if res, ok, errno := fh.readClientLocalFileView(ctx, dest, off); ok || errno != fs.OK {
 		return res, errno
 	}
 	return fh.node.readData(ctx, dest, off)
@@ -61,7 +61,7 @@ func (fh *clipFileHandle) Release(ctx context.Context) syscall.Errno {
 	return firstErr
 }
 
-func (fh *clipFileHandle) openRegionFile(path string) (*os.File, error) {
+func (fh *clipFileHandle) openViewFile(path string) (*os.File, error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 	if file := fh.files[path]; file != nil {
@@ -78,12 +78,12 @@ func (fh *clipFileHandle) openRegionFile(path string) (*os.File, error) {
 	return file, nil
 }
 
-func (fh *clipFileHandle) readLocalRegion(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, bool, syscall.Errno) {
+func (fh *clipFileHandle) readClientLocalFileView(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, bool, syscall.Errno) {
 	if fh == nil || fh.node == nil || fh.node.filesystem == nil || len(dest) == 0 {
 		return nil, false, fs.OK
 	}
-	regioner, ok := fh.node.filesystem.storage.(storage.LocalFileRegioner)
-	if !ok || regioner == nil {
+	viewer, ok := fh.node.filesystem.storage.(storage.ClientLocalFileViewer)
+	if !ok || viewer == nil {
 		return nil, false, fs.OK
 	}
 
@@ -93,26 +93,26 @@ func (fh *clipFileHandle) readLocalRegion(ctx context.Context, dest []byte, off 
 	}
 
 	started := time.Now()
-	region, ok, err := regioner.LocalFileRegion(ctx, fh.node.clipNode, off, readLen)
+	view, ok, err := viewer.ClientLocalFileView(ctx, fh.node.clipNode, off, readLen)
 	if err != nil {
-		fh.node.observeRead(ctx, fh.node.regionReadTrace(region, off, readLen, 0, started, err))
+		fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, 0, started, err))
 		return nil, false, fs.OK
 	}
-	if !ok || region.Path == "" || region.Length <= 0 {
+	if !ok || view.Path == "" || view.Length <= 0 {
 		return nil, false, fs.OK
 	}
-	if int64(region.Length) != readLen {
+	if int64(view.Length) != readLen {
 		return nil, false, fs.OK
 	}
 
-	file, err := fh.openRegionFile(region.Path)
+	file, err := fh.openViewFile(view.Path)
 	if err != nil {
-		fh.node.observeRead(ctx, fh.node.regionReadTrace(region, off, readLen, 0, started, err))
+		fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, 0, started, err))
 		return nil, false, fs.OK
 	}
 
-	fh.node.observeRead(ctx, fh.node.regionReadTrace(region, off, readLen, int64(region.Length), started, nil))
-	return fuse.ReadResultFd(file.Fd(), region.Offset, region.Length), true, fs.OK
+	fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, int64(view.Length), started, nil))
+	return fuse.ReadResultFd(file.Fd(), view.Offset, view.Length), true, fs.OK
 }
 
 func (n *FSNode) OnAdd(ctx context.Context) {
@@ -345,7 +345,7 @@ func (n *FSNode) fileSize() int64 {
 	return n.clipNode.DataLen
 }
 
-func (n *FSNode) regionReadTrace(region storage.LocalFileRegion, off int64, readLen int64, bytesRead int64, started time.Time, err error) common.ReadTraceEvent {
+func (n *FSNode) clientLocalFileViewReadTrace(view storage.ClientLocalFileView, off int64, readLen int64, bytesRead int64, started time.Time, err error) common.ReadTraceEvent {
 	operation := "clip.read"
 	attrs := map[string]string{}
 	if n != nil && n.clipNode != nil && n.clipNode.Remote != nil {
@@ -356,17 +356,17 @@ func (n *FSNode) regionReadTrace(region storage.LocalFileRegion, off int64, read
 		attrs = n.legacyReadAttrs()
 	}
 	attrs["fd_fast_path"] = "true"
-	if region.Path != "" {
-		attrs["region_path"] = region.Path
+	if view.Path != "" {
+		attrs["client_local_file_view_path"] = view.Path
 	}
 
 	success := err == nil
 	return common.ReadTraceEvent{
 		Operation:        operation,
-		Source:           region.Source,
+		Source:           view.Source,
 		Path:             n.clipNode.Path,
-		LayerDigest:      region.LayerDigest,
-		DecompressedHash: region.DecompressedHash,
+		LayerDigest:      view.LayerDigest,
+		DecompressedHash: view.DecompressedHash,
 		Offset:           off,
 		Length:           readLen,
 		BytesRead:        bytesRead,

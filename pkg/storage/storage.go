@@ -22,17 +22,17 @@ type ContentCacheExists interface {
 	ContentExists(hash string, opts struct{ RoutingKey string }) (bool, error)
 }
 
-type LocalPageRegion struct {
+type ClientLocalPageFileView struct {
 	Path   string
 	Offset int64
 	Length int
 }
 
-type ContentCacheLocalPageRegions interface {
-	LocalPageRegions(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]LocalPageRegion, error)
+type ContentCacheClientLocalPageFileViews interface {
+	ClientLocalPageFileViews(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]ClientLocalPageFileView, error)
 }
 
-type LocalFileRegion struct {
+type ClientLocalFileView struct {
 	Path             string
 	Offset           int64
 	Length           int
@@ -52,8 +52,8 @@ type ContextClipStorageInterface interface {
 	ReadFileContext(ctx context.Context, node *common.ClipNode, dest []byte, offset int64) (int, error)
 }
 
-type LocalFileRegioner interface {
-	LocalFileRegion(ctx context.Context, node *common.ClipNode, offset int64, length int64) (LocalFileRegion, bool, error)
+type ClientLocalFileViewer interface {
+	ClientLocalFileView(ctx context.Context, node *common.ClipNode, offset int64, length int64) (ClientLocalFileView, bool, error)
 }
 
 type ClipStorageCredentials struct {

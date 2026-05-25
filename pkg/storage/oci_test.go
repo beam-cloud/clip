@@ -24,26 +24,26 @@ import (
 
 // Mock ContentCache for testing (implements range read interface)
 type mockCache struct {
-	mu           sync.Mutex
-	store        map[string][]byte
-	localRegions map[string][]LocalPageRegion
+	mu                       sync.Mutex
+	store                    map[string][]byte
+	clientLocalPageFileViews map[string][]ClientLocalPageFileView
 
 	// Error injection
 	getError error
 	setError error
 
 	// Call tracking
-	getCalls              int
-	setCalls              int
-	localPageRegionCalls  int
-	localPageRegionOffset int64
-	localPageRegionLength int64
+	getCalls                      int
+	setCalls                      int
+	clientLocalPageFileViewCalls  int
+	clientLocalPageFileViewOffset int64
+	clientLocalPageFileViewLength int64
 }
 
 func newMockCache() *mockCache {
 	return &mockCache{
-		store:        make(map[string][]byte),
-		localRegions: make(map[string][]LocalPageRegion),
+		store:                    make(map[string][]byte),
+		clientLocalPageFileViews: make(map[string][]ClientLocalPageFileView),
 	}
 }
 
@@ -95,18 +95,18 @@ func (m *mockCache) StoreContent(chunks chan []byte, hash string, opts struct{ R
 	return hash, nil
 }
 
-func (m *mockCache) LocalPageRegions(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]LocalPageRegion, error) {
+func (m *mockCache) ClientLocalPageFileViews(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]ClientLocalPageFileView, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.localPageRegionCalls++
-	m.localPageRegionOffset = offset
-	m.localPageRegionLength = length
-	regions := m.localRegions[hash]
-	if len(regions) == 0 {
+	m.clientLocalPageFileViewCalls++
+	m.clientLocalPageFileViewOffset = offset
+	m.clientLocalPageFileViewLength = length
+	views := m.clientLocalPageFileViews[hash]
+	if len(views) == 0 {
 		return nil, fmt.Errorf("not found in cache")
 	}
-	return append([]LocalPageRegion(nil), regions...), nil
+	return append([]ClientLocalPageFileView(nil), views...), nil
 }
 
 func (m *mockCache) reset() {
@@ -114,12 +114,12 @@ func (m *mockCache) reset() {
 	defer m.mu.Unlock()
 
 	m.store = make(map[string][]byte)
-	m.localRegions = make(map[string][]LocalPageRegion)
+	m.clientLocalPageFileViews = make(map[string][]ClientLocalPageFileView)
 	m.getCalls = 0
 	m.setCalls = 0
-	m.localPageRegionCalls = 0
-	m.localPageRegionOffset = 0
-	m.localPageRegionLength = 0
+	m.clientLocalPageFileViewCalls = 0
+	m.clientLocalPageFileViewOffset = 0
+	m.clientLocalPageFileViewLength = 0
 	m.getError = nil
 	m.setError = nil
 }
@@ -242,7 +242,7 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 	assert.Equal(t, 0, cache.setCalls, "cache.Set should not be called on cache hit")
 }
 
-func TestOCIStorage_LocalFileRegionUsesDiskCache(t *testing.T) {
+func TestOCIStorage_ClientLocalFileViewUsesDiskCache(t *testing.T) {
 	testData := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
 	digest := v1.Hash{Algorithm: "sha256", Hex: "abc123"}
 	hasher := sha256.New()
@@ -273,7 +273,7 @@ func TestOCIStorage_LocalFileRegionUsesDiskCache(t *testing.T) {
 		},
 	}
 
-	region, ok, err := storage.LocalFileRegion(context.Background(), node, 3, 7)
+	region, ok, err := storage.ClientLocalFileView(context.Background(), node, 3, 7)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, filepath.Join(cacheDir, decompressedHash), region.Path)
@@ -284,7 +284,7 @@ func TestOCIStorage_LocalFileRegionUsesDiskCache(t *testing.T) {
 	assert.Equal(t, decompressedHash, region.DecompressedHash)
 }
 
-func TestOCIStorage_LocalFileRegionUsesContentCachePage(t *testing.T) {
+func TestOCIStorage_ClientLocalFileViewUsesContentCachePage(t *testing.T) {
 	testData := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
 	digest := v1.Hash{Algorithm: "sha256", Hex: "abc123"}
 	hasher := sha256.New()
@@ -294,7 +294,7 @@ func TestOCIStorage_LocalFileRegionUsesContentCachePage(t *testing.T) {
 	require.NoError(t, os.WriteFile(pagePath, testData, 0644))
 
 	cache := newMockCache()
-	cache.localRegions[decompressedHash] = []LocalPageRegion{{
+	cache.clientLocalPageFileViews[decompressedHash] = []ClientLocalPageFileView{{
 		Path:   pagePath,
 		Offset: 1234,
 		Length: 9,
@@ -322,16 +322,16 @@ func TestOCIStorage_LocalFileRegionUsesContentCachePage(t *testing.T) {
 		},
 	}
 
-	region, ok, err := storage.LocalFileRegion(context.Background(), node, 5, 9)
+	region, ok, err := storage.ClientLocalFileView(context.Background(), node, 5, 9)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, pagePath, region.Path)
 	assert.Equal(t, int64(1234), region.Offset)
 	assert.Equal(t, 9, region.Length)
-	assert.Equal(t, "content_cache_page_fd", region.Source)
-	assert.Equal(t, 1, cache.localPageRegionCalls)
-	assert.Equal(t, int64(4101), cache.localPageRegionOffset)
-	assert.Equal(t, int64(9), cache.localPageRegionLength)
+	assert.Equal(t, "client_local_page_file_fd", region.Source)
+	assert.Equal(t, 1, cache.clientLocalPageFileViewCalls)
+	assert.Equal(t, int64(4101), cache.clientLocalPageFileViewOffset)
+	assert.Equal(t, int64(9), cache.clientLocalPageFileViewLength)
 }
 
 func TestOCIStorage_CacheMiss(t *testing.T) {
