@@ -33,8 +33,44 @@ type OCIClipStorage struct {
 	useCheckpoints        bool                              // Enable checkpoint-based partial decompression
 	readTraceObserver     common.ReadTraceObserver
 	mu                    sync.RWMutex
-	layerDecompressMu     sync.Mutex               // Prevents duplicate decompression
-	layersDecompressing   map[string]chan struct{} // Tracks in-progress decompressions
+}
+
+var globalLayerDecompress = newLayerDecompressGroup()
+
+type layerDecompressGroup struct {
+	mu       sync.Mutex
+	inflight map[string]*layerDecompressCall
+}
+
+type layerDecompressCall struct {
+	done chan struct{}
+	err  error
+}
+
+func newLayerDecompressGroup() *layerDecompressGroup {
+	return &layerDecompressGroup{inflight: make(map[string]*layerDecompressCall)}
+}
+
+func (g *layerDecompressGroup) Do(key string, fn func() error) (shared bool, err error) {
+	g.mu.Lock()
+	if call := g.inflight[key]; call != nil {
+		g.mu.Unlock()
+		<-call.done
+		return true, call.err
+	}
+
+	call := &layerDecompressCall{done: make(chan struct{})}
+	g.inflight[key] = call
+	g.mu.Unlock()
+
+	call.err = fn()
+
+	g.mu.Lock()
+	delete(g.inflight, key)
+	close(call.done)
+	g.mu.Unlock()
+
+	return false, call.err
 }
 
 type OCIClipStorageOpts struct {
@@ -87,7 +123,6 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		contentCacheAvailable: opts.ContentCacheAvailable,
 		useCheckpoints:        opts.UseCheckpoints,
 		readTraceObserver:     opts.ReadTraceObserver,
-		layersDecompressing:   make(map[string]chan struct{}),
 	}
 
 	log.Info().
@@ -445,23 +480,37 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 		return decompressedHash, layerPath, nil
 	}
 
-	// Acquire lock for decompression coordination
-	s.layerDecompressMu.Lock()
+	waitStart := time.Now()
+	shared, err := globalLayerDecompress.Do(decompressedHash, func() error {
+		// Double-check disk cache inside the process-wide singleflight. A
+		// separate OCIClipStorage instance may have materialized the same layer
+		// between our fast-path stat and entering this call.
+		if _, err := os.Stat(layerPath); err == nil {
+			log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit (after global lock)")
+			return nil
+		}
 
-	// Double-check disk cache under lock (another goroutine may have just finished)
-	if _, err := os.Stat(layerPath); err == nil {
-		s.layerDecompressMu.Unlock()
-		log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit (after lock)")
-		return decompressedHash, layerPath, nil
-	}
+		log.Info().
+			Str("layer_digest", digest).
+			Str("decompressed_hash", decompressedHash).
+			Msg("oci cache miss - downloading and decompressing layer from registry")
 
-	// Check if another goroutine is already decompressing this layer
-	if waitChan, inProgress := s.layersDecompressing[digest]; inProgress {
-		// Another goroutine is decompressing - wait for it
-		s.layerDecompressMu.Unlock()
-		log.Info().Str("digest", digest).Msg("waiting for in-progress layer decompression")
-		waitStart := time.Now()
-		<-waitChan
+		decompressStart := time.Now()
+		err := s.decompressAndCacheLayer(digest, layerPath)
+		s.observeRead(ctx, common.ReadTraceEvent{
+			Operation:        "clip.layer_decompress",
+			Source:           "oci_registry",
+			LayerDigest:      digest,
+			DecompressedHash: decompressedHash,
+			StartedAt:        decompressStart,
+			Duration:         time.Since(decompressStart),
+			Success:          err == nil,
+			Error:            errorString(err),
+		})
+		return err
+	})
+	if shared {
+		log.Info().Str("digest", digest).Msg("waited for in-progress layer decompression")
 		s.observeRead(ctx, common.ReadTraceEvent{
 			Operation:        "clip.layer_decompress_wait",
 			Source:           "decompressed_layer",
@@ -469,50 +518,18 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 			DecompressedHash: decompressedHash,
 			StartedAt:        waitStart,
 			Duration:         time.Since(waitStart),
-			Success:          true,
+			Success:          err == nil,
+			Error:            errorString(err),
 		})
-
-		// Now it should be on disk
-		if _, err := os.Stat(layerPath); err == nil {
-			log.Debug().Str("digest", digest).Msg("layer ready after waiting")
-			return decompressedHash, layerPath, nil
-		}
-		return "", "", fmt.Errorf("decompression failed for layer: %s", digest)
 	}
-
-	// We're the first - mark as in-progress
-	doneChan := make(chan struct{})
-	s.layersDecompressing[digest] = doneChan
-	s.layerDecompressMu.Unlock()
-
-	// Decompress and cache the layer
-	log.Info().
-		Str("layer_digest", digest).
-		Str("decompressed_hash", decompressedHash).
-		Msg("oci cache miss - downloading and decompressing layer from registry")
-
-	decompressStart := time.Now()
-	err := s.decompressAndCacheLayer(digest, layerPath)
-	s.observeRead(ctx, common.ReadTraceEvent{
-		Operation:        "clip.layer_decompress",
-		Source:           "oci_registry",
-		LayerDigest:      digest,
-		DecompressedHash: decompressedHash,
-		StartedAt:        decompressStart,
-		Duration:         time.Since(decompressStart),
-		Success:          err == nil,
-		Error:            errorString(err),
-	})
-
-	// Clean up in-progress tracking
-	s.layerDecompressMu.Lock()
-	delete(s.layersDecompressing, digest)
-	close(doneChan)
-	s.layerDecompressMu.Unlock()
 
 	if err != nil {
 		log.Error().Err(err).Str("digest", digest).Msg("layer decompression failed")
 		return "", "", err
+	}
+
+	if _, err := os.Stat(layerPath); err != nil {
+		return "", "", fmt.Errorf("decompression did not materialize layer %s at %s: %w", digest, layerPath, err)
 	}
 
 	return decompressedHash, layerPath, nil

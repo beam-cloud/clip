@@ -13,9 +13,9 @@ import (
 // TestDecompressedHashMapping verifies that layer digest to decompressed hash mapping works
 func TestDecompressedHashMapping(t *testing.T) {
 	tests := []struct {
-		name              string
-		layerDigest       string
-		decompressedHash  string
+		name             string
+		layerDigest      string
+		decompressedHash string
 	}{
 		{
 			name:             "SHA256 layer",
@@ -40,11 +40,11 @@ func TestDecompressedHashMapping(t *testing.T) {
 			storage := &OCIClipStorage{
 				storageInfo: storageInfo,
 			}
-			
+
 			// Retrieve and verify
 			result := storage.getDecompressedHash(tc.layerDigest)
 			require.Equal(t, tc.decompressedHash, result)
-			
+
 			// Test getContentHash (alias for getDecompressedHash)
 			result2 := storage.getContentHash(tc.layerDigest)
 			require.Equal(t, tc.decompressedHash, result2)
@@ -141,7 +141,6 @@ func TestContentCacheRangeRead(t *testing.T) {
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          diskCacheDir,
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -166,7 +165,7 @@ func TestContentCacheRangeRead(t *testing.T) {
 		// Decompressed hash mapping should now be stored
 		decompHash := storage.getDecompressedHash(digest.String())
 		require.NotEmpty(t, decompHash, "Decompressed hash should be stored after first read")
-		
+
 		t.Logf("Layer digest: %s", digest.String())
 		t.Logf("Decompressed hash: %s", decompHash)
 	})
@@ -232,7 +231,6 @@ func TestDiskCacheThenContentCache(t *testing.T) {
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          diskCacheDir,
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -330,7 +328,6 @@ func TestRangeReadOnlyFetchesNeededBytes(t *testing.T) {
 		storageInfo:           storageInfo,
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          diskCacheDir,
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}

@@ -158,6 +158,31 @@ func (m *mockLayer) MediaType() (types.MediaType, error) {
 	return types.DockerLayer, nil
 }
 
+type blockingCountingLayer struct {
+	*mockLayer
+	mu      sync.Mutex
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	calls   int
+}
+
+func (m *blockingCountingLayer) Compressed() (io.ReadCloser, error) {
+	m.mu.Lock()
+	m.calls++
+	m.once.Do(func() { close(m.started) })
+	m.mu.Unlock()
+
+	<-m.release
+	return m.mockLayer.Compressed()
+}
+
+func (m *blockingCountingLayer) Calls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
 // Helper to create gzip-compressed test data
 func createGzipData(t *testing.T, data []byte) []byte {
 	var buf bytes.Buffer
@@ -214,7 +239,6 @@ func TestOCIStorage_CacheHit(t *testing.T) {
 		storageInfo:           storageInfo,
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          t.TempDir(),
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -375,7 +399,6 @@ func TestOCIStorage_CacheMiss(t *testing.T) {
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          t.TempDir(),
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -437,12 +460,11 @@ func TestOCIStorage_NoCache(t *testing.T) {
 	}
 
 	storage := &OCIClipStorage{
-		metadata:            metadata,
-		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:        t.TempDir(),
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        nil, // No cache
+		metadata:     metadata,
+		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:   map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir: t.TempDir(),
+		contentCache: nil, // No cache
 	}
 
 	// Create node
@@ -505,7 +527,6 @@ func TestOCIStorage_PartialRead(t *testing.T) {
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          t.TempDir(),
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -585,7 +606,6 @@ func TestOCIStorage_CacheError(t *testing.T) {
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          t.TempDir(),
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -649,7 +669,6 @@ func TestOCIStorage_LayerFetchError(t *testing.T) {
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          t.TempDir(),
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -713,7 +732,6 @@ func TestOCIStorage_ConcurrentReads(t *testing.T) {
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          t.TempDir(),
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -765,6 +783,67 @@ func TestOCIStorage_ConcurrentReads(t *testing.T) {
 	for err := range errors {
 		t.Errorf("Concurrent read error: %v", err)
 	}
+}
+
+func TestOCIStorage_GlobalLayerDecompressionSingleflightAcrossInstances(t *testing.T) {
+	testData := []byte("shared layer materialization across storage instances")
+	compressedData := createGzipData(t, testData)
+
+	digest := v1.Hash{
+		Algorithm: "sha256",
+		Hex:       "global-singleflight-layer",
+	}
+	sum := sha256.Sum256(testData)
+	decompressedHash := hex.EncodeToString(sum[:])
+	diskCacheDir := t.TempDir()
+
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
+		},
+	}
+	storageInfo := metadata.StorageInfo.(*common.OCIStorageInfo)
+	layer := &blockingCountingLayer{
+		mockLayer: &mockLayer{digest: digest, compressedData: compressedData},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+
+	storage1 := &OCIClipStorage{
+		metadata:     metadata,
+		storageInfo:  storageInfo,
+		layerCache:   map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir: diskCacheDir,
+	}
+	storage2 := &OCIClipStorage{
+		metadata:     metadata,
+		storageInfo:  storageInfo,
+		layerCache:   map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir: diskCacheDir,
+	}
+
+	errs := make(chan error, 2)
+	go func() {
+		_, _, err := storage1.ensureLayerCached(context.Background(), digest.String())
+		errs <- err
+	}()
+
+	<-layer.started
+	go func() {
+		_, _, err := storage2.ensureLayerCached(context.Background(), digest.String())
+		errs <- err
+	}()
+
+	close(layer.release)
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+	require.Equal(t, 1, layer.Calls(), "only one storage instance should decompress a shared layer")
+
+	got, err := os.ReadFile(filepath.Join(diskCacheDir, decompressedHash))
+	require.NoError(t, err)
+	require.Equal(t, testData, got)
 }
 
 // Test streaming functionality
@@ -1074,7 +1153,6 @@ func TestDecompressAndCacheLayerWaitsForContentCacheStore(t *testing.T) {
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:            map[string]v1.Layer{digest.String(): &mockLayer{digest: digest, compressedData: compressedData}},
 		diskCacheDir:          t.TempDir(),
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -1149,7 +1227,6 @@ func TestLayerCacheEliminatesRepeatedInflates(t *testing.T) {
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
 		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          diskCacheDir,
-		layersDecompressing:   make(map[string]chan struct{}),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 	}
@@ -1220,12 +1297,11 @@ func BenchmarkLayerCachePerformance(b *testing.B) {
 	diskCacheDir := b.TempDir()
 
 	storage := &OCIClipStorage{
-		metadata:            metadata,
-		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:        diskCacheDir,
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        nil, // No remote cache for benchmark
+		metadata:     metadata,
+		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:   map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir: diskCacheDir,
+		contentCache: nil, // No remote cache for benchmark
 	}
 
 	node := &common.ClipNode{
@@ -1290,12 +1366,11 @@ func TestCrossImageCacheSharing(t *testing.T) {
 	}
 
 	storage1 := &OCIClipStorage{
-		metadata:            metadata1,
-		storageInfo:         metadata1.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{sharedDigest.String(): image1Layer},
-		diskCacheDir:        diskCacheDir,
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        nil, // No remote cache for this test
+		metadata:     metadata1,
+		storageInfo:  metadata1.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:   map[string]v1.Layer{sharedDigest.String(): image1Layer},
+		diskCacheDir: diskCacheDir,
+		contentCache: nil, // No remote cache for this test
 	}
 
 	node1 := &common.ClipNode{
@@ -1338,12 +1413,11 @@ func TestCrossImageCacheSharing(t *testing.T) {
 	}
 
 	storage2 := &OCIClipStorage{
-		metadata:            metadata2,
-		storageInfo:         metadata2.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{sharedDigest.String(): image2Layer},
-		diskCacheDir:        diskCacheDir, // SAME disk cache directory!
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        nil,
+		metadata:     metadata2,
+		storageInfo:  metadata2.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:   map[string]v1.Layer{sharedDigest.String(): image2Layer},
+		diskCacheDir: diskCacheDir, // SAME disk cache directory!
+		contentCache: nil,
 	}
 
 	node2 := &common.ClipNode{
@@ -1471,13 +1545,12 @@ func TestCheckpointBasedReading(t *testing.T) {
 	}
 
 	storage := &OCIClipStorage{
-		metadata:            metadata,
-		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:        t.TempDir(),
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        nil,
-		useCheckpoints:      true, // Enable checkpoint-based reading
+		metadata:       metadata,
+		storageInfo:    metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:     map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:   t.TempDir(),
+		contentCache:   nil,
+		useCheckpoints: true, // Enable checkpoint-based reading
 	}
 
 	// Test reading from different positions (should use checkpoints)
@@ -1552,13 +1625,12 @@ func TestCheckpointFallback(t *testing.T) {
 	}
 
 	storage := &OCIClipStorage{
-		metadata:            metadata,
-		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:        t.TempDir(),
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        nil,
-		useCheckpoints:      true, // Enabled but no checkpoints
+		metadata:       metadata,
+		storageInfo:    metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:     map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:   t.TempDir(),
+		contentCache:   nil,
+		useCheckpoints: true, // Enabled but no checkpoints
 	}
 
 	node := &common.ClipNode{
@@ -1619,13 +1691,12 @@ func TestBackwardCompatibilityNoCheckpoints(t *testing.T) {
 	}
 
 	storage := &OCIClipStorage{
-		metadata:            metadata,
-		storageInfo:         metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:          map[string]v1.Layer{digest.String(): layer},
-		diskCacheDir:        t.TempDir(),
-		layersDecompressing: make(map[string]chan struct{}),
-		contentCache:        nil,
-		useCheckpoints:      false, // Checkpoints DISABLED (backward compatibility)
+		metadata:       metadata,
+		storageInfo:    metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:     map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:   t.TempDir(),
+		contentCache:   nil,
+		useCheckpoints: false, // Checkpoints DISABLED (backward compatibility)
 	}
 
 	node := &common.ClipNode{
