@@ -973,11 +973,7 @@ func TestStoreDecompressedInRemoteCache_StreamsInChunks(t *testing.T) {
 		contentCache: cache,
 	}
 
-	// Call storeDecompressedInRemoteCache
-	storage.storeDecompressedInRemoteCache(digest, tmpFile)
-
-	// Give async operation time to complete
-	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, storage.storeDecompressedInRemoteCache(digest, tmpFile))
 
 	// Verify chunking behavior
 	cache.mu.Lock()
@@ -1024,11 +1020,7 @@ func TestStoreDecompressedInRemoteCache_SmallFile(t *testing.T) {
 		contentCache: cache,
 	}
 
-	// Call storeDecompressedInRemoteCache
-	storage.storeDecompressedInRemoteCache(digest, tmpFile)
-
-	// Give async operation time to complete
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, storage.storeDecompressedInRemoteCache(digest, tmpFile))
 
 	// Verify
 	cache.mu.Lock()
@@ -1039,6 +1031,77 @@ func TestStoreDecompressedInRemoteCache_SmallFile(t *testing.T) {
 
 	// Verify content was stored with the digest as key (test calls storeDecompressedInRemoteCache with digest directly)
 	assert.Equal(t, testData, cache.store[digest], "cached content should match original")
+}
+
+type blockingStoreCache struct {
+	mockCache
+	started chan struct{}
+	release chan struct{}
+}
+
+func (c *blockingStoreCache) StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error) {
+	close(c.started)
+	<-c.release
+	return c.mockCache.StoreContent(chunks, hash, opts)
+}
+
+func TestDecompressAndCacheLayerWaitsForContentCacheStore(t *testing.T) {
+	testData := []byte("durable decompressed layer")
+	compressedData := createGzipData(t, testData)
+	digest := v1.Hash{Algorithm: "sha256", Hex: "syncstore123"}
+
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
+		},
+	}
+	cache := &blockingStoreCache{
+		mockCache: mockCache{store: make(map[string][]byte)},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	storage := &OCIClipStorage{
+		metadata:              metadata,
+		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:            map[string]v1.Layer{digest.String(): &mockLayer{digest: digest, compressedData: compressedData}},
+		diskCacheDir:          t.TempDir(),
+		layersDecompressing:   make(map[string]chan struct{}),
+		contentCache:          cache,
+		contentCacheAvailable: true,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- storage.decompressAndCacheLayer(digest.String(), storage.getDecompressedCachePath(decompressedHash))
+	}()
+
+	select {
+	case <-cache.started:
+	case <-time.After(time.Second):
+		t.Fatal("content cache store did not start")
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("decompressAndCacheLayer returned before content cache store completed: %v", err)
+	default:
+	}
+
+	close(cache.release)
+	require.NoError(t, <-done)
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	require.Equal(t, testData, cache.store[decompressedHash])
 }
 
 // TestLayerCacheEliminatesRepeatedInflates verifies that accessing the same layer

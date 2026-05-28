@@ -670,10 +670,19 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 		Dur("duration", duration).
 		Msg("layer decompressed and cached")
 
-	// Upload to content cache for cluster sharing
+	// Publish to the shared content cache before returning. This keeps the
+	// "layer cached" state durable across worker replacement; otherwise a short
+	// workload can finish, the worker can be deleted, and the background store
+	// can be lost before the next worker tries to reuse the layer.
 	if s.contentCache != nil && s.contentCacheAvailable {
 		decompressedHash := s.getDecompressedHash(digest)
-		go s.storeDecompressedInRemoteCache(decompressedHash, diskPath)
+		if err := s.storeDecompressedInRemoteCache(decompressedHash, diskPath); err != nil {
+			log.Warn().
+				Err(err).
+				Str("layer", digest).
+				Str("decompressed_hash", decompressedHash).
+				Msg("content cache store failed after layer decompression")
+		}
 	}
 
 	return nil
@@ -692,6 +701,10 @@ func (s *OCIClipStorage) writeToDiskCache(path string, data []byte) error {
 // This matches the behavior in clipfs.go for consistent streaming
 // Default chunk size is 32MB to balance memory usage and throughput
 func streamFileInChunks(filePath string, chunks chan []byte) error {
+	return streamFileInChunksUntil(filePath, chunks, nil)
+}
+
+func streamFileInChunksUntil(filePath string, chunks chan []byte, done <-chan struct{}) error {
 	const chunkSize = int64(1 << 25) // 32MB chunks
 
 	file, err := os.Open(filePath)
@@ -724,7 +737,15 @@ func streamFileInChunks(filePath string, chunks chan []byte) error {
 
 		// Send chunk
 		if nRead > 0 {
-			chunks <- buffer[:nRead]
+			if done == nil {
+				chunks <- buffer[:nRead]
+			} else {
+				select {
+				case chunks <- buffer[:nRead]:
+				case <-done:
+					return nil
+				}
+			}
 		}
 
 		offset += int64(nRead)
@@ -767,14 +788,14 @@ func (s *OCIClipStorage) tryRangeReadFromContentCache(decompressedHash string, o
 
 // storeDecompressedInRemoteCache uploads decompressed layer to remote cache for cluster sharing.
 // Streams file in 32MB chunks with constant memory usage O(32MB).
-func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string, diskPath string) {
+func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string, diskPath string) error {
 	// Guard against nil contentCache or unavailable cache
 	if s.contentCache == nil {
 		log.Debug().
 			Str("hash", decompressedHash).
 			Bool("cache_nil", true).
 			Msg("skipping remote cache store - cache not available")
-		return
+		return nil
 	}
 
 	if existsCache, ok := s.contentCache.(ContentCacheExists); ok {
@@ -783,22 +804,32 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 			log.Warn().Err(err).Str("hash", decompressedHash).Msg("failed to check content cache before layer store")
 		} else if exists {
 			log.Info().Str("hash", decompressedHash).Msg("decompressed layer already present in content cache")
-			return
+			return nil
 		}
 	}
 
 	chunks := make(chan []byte, 1)
+	done := make(chan struct{})
+	streamErr := make(chan error, 1)
 	go func() {
 		defer close(chunks)
-		if err := streamFileInChunks(diskPath, chunks); err != nil {
-			log.Error().Err(err).Str("hash", decompressedHash).Msg("failed to stream file")
-		}
+		streamErr <- streamFileInChunksUntil(diskPath, chunks, done)
 	}()
 
 	_, err := s.contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+	close(done)
 	if err != nil {
 		log.Error().Err(err).Str("hash", decompressedHash).Msg("content cache store failed")
+		if stream := <-streamErr; stream != nil {
+			return fmt.Errorf("content cache store failed: %w; stream failed: %v", err, stream)
+		}
+		return err
 	}
+	if err := <-streamErr; err != nil {
+		log.Error().Err(err).Str("hash", decompressedHash).Msg("failed to stream file")
+		return err
+	}
+	return nil
 }
 
 // readWithCheckpoint reads data from a compressed layer using gzip checkpoints
