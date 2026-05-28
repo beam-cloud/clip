@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -404,10 +405,10 @@ func TestOCISeparateSourceAndStorageRefs(t *testing.T) {
 	// - We have a local image (e.g., after build)
 	// - We want to index from local (fast, no network)
 	// - But store the remote registry reference in metadata (for later use)
-	
+
 	// For testing, we'll use the same image but simulate different references
-	sourceRef := "docker.io/library/alpine:3.18"  // Source to index from
-	storageRef := "myregistry.example.com:5000/myapp/alpine:production-v1"  // Reference to store
+	sourceRef := "docker.io/library/alpine:3.18"                           // Source to index from
+	storageRef := "myregistry.example.com:5000/myapp/alpine:production-v1" // Reference to store
 
 	tempDir := t.TempDir()
 	outputFile := filepath.Join(tempDir, "alpine-split-ref.clip")
@@ -449,22 +450,20 @@ func TestOCISeparateSourceAndStorageRefs(t *testing.T) {
 	// Parse expected storage reference parts
 	expectedRegistry := "myregistry.example.com:5000"
 	expectedRepo := "myapp/alpine"
-	expectedRef := "production-v1"
-
 	// Verify metadata contains the storage reference, NOT the source reference
-	assert.Equal(t, expectedRegistry, ociInfo.RegistryURL, 
+	assert.Equal(t, expectedRegistry, ociInfo.RegistryURL,
 		"Registry URL should be from storage ref, not source ref")
-	assert.Equal(t, expectedRepo, ociInfo.Repository, 
+	assert.Equal(t, expectedRepo, ociInfo.Repository,
 		"Repository should be from storage ref, not source ref")
-	assert.Equal(t, expectedRef, ociInfo.Reference, 
-		"Reference should be from storage ref, not source ref")
+	assert.True(t, strings.HasPrefix(ociInfo.Reference, "sha256:"),
+		"Reference should be the immutable image digest for the indexed image")
 
 	// Verify the index was actually populated (meaning we successfully indexed from source)
 	assert.Greater(t, len(ociInfo.Layers), 0, "Should have indexed layers from source image")
 	assert.NotNil(t, ociInfo.GzipIdxByLayer, "Should have gzip indexes from source image")
 
 	t.Logf("✓ Successfully indexed from: %s", sourceRef)
-	t.Logf("✓ Metadata correctly stores: %s/%s:%s", expectedRegistry, expectedRepo, expectedRef)
+	t.Logf("✓ Metadata correctly stores: %s/%s@%s", expectedRegistry, expectedRepo, ociInfo.Reference)
 	t.Logf("✓ Index contains %d files across %d layers", metadata.Index.Len(), len(ociInfo.Layers))
 }
 
@@ -485,7 +484,7 @@ func TestOCIDefaultStorageRef(t *testing.T) {
 	// Create index WITHOUT specifying StorageImageRef (should default to ImageRef)
 	archiver := NewClipArchiver()
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
-		ImageRef:      imageRef,
+		ImageRef: imageRef,
 		// StorageImageRef not specified - should default to ImageRef
 		CheckpointMiB: 2,
 	}, outputFile)
@@ -503,14 +502,16 @@ func TestOCIDefaultStorageRef(t *testing.T) {
 		ociInfo = *ociInfoPtr
 	}
 
-	// Verify metadata contains the same reference as source
+	// Verify metadata contains the same registry/repository as source and an
+	// immutable image digest reference. Runtime layer fallback uses this digest
+	// so old metadata-only archives are not broken by mutable tag drift.
 	// Note: Docker normalizes "docker.io" to "index.docker.io"
-	assert.Equal(t, "index.docker.io", ociInfo.RegistryURL, 
+	assert.Equal(t, "index.docker.io", ociInfo.RegistryURL,
 		"Registry should default to source ref")
-	assert.Equal(t, "library/alpine", ociInfo.Repository, 
+	assert.Equal(t, "library/alpine", ociInfo.Repository,
 		"Repository should default to source ref")
-	assert.Equal(t, "3.18", ociInfo.Reference, 
-		"Reference should default to source ref")
+	assert.True(t, strings.HasPrefix(ociInfo.Reference, "sha256:"),
+		"Reference should be the immutable image digest for the source ref")
 
 	t.Logf("✓ Default behavior works: metadata matches source reference")
 }

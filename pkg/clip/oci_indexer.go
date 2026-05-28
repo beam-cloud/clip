@@ -227,6 +227,11 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	if err != nil {
 		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to fetch image: %w", err)
 	}
+	imageDigest, err := img.Digest()
+	if err != nil {
+		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to get image digest: %w", err)
+	}
+	reference = imageDigest.String()
 
 	// Extract image metadata
 	imageMetadata, err = ca.extractImageMetadata(img, opts.ImageRef)

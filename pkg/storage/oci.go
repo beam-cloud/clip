@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -140,55 +141,14 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 
 // initLayers fetches layer descriptors from the registry
 func (s *OCIClipStorage) initLayers(ctx context.Context) error {
-	imageRef := fmt.Sprintf("%s/%s:%s", s.storageInfo.RegistryURL, s.storageInfo.Repository, s.storageInfo.Reference)
+	imageRef := s.imageReference()
 
 	ref, err := name.ParseReference(imageRef)
 	if err != nil {
 		return fmt.Errorf("failed to parse image reference: %w", err)
 	}
 
-	// Build remote options with authentication
-	remoteOpts := []remote.Option{remote.WithContext(ctx)}
-
-	// Try to get credentials from provider
-	authConfig, err := s.credProvider.GetCredentials(ctx, s.storageInfo.RegistryURL, s.storageInfo.Repository)
-	if err != nil && err != common.ErrNoCredentials {
-		log.Warn().
-			Err(err).
-			Str("registry", s.storageInfo.RegistryURL).
-			Str("repository", s.storageInfo.Repository).
-			Str("provider", s.credProvider.Name()).
-			Msg("Failed to get credentials from provider, falling back to keychain")
-	}
-
-	if authConfig != nil {
-		// Use provided credentials
-		log.Info().
-			Str("registry", s.storageInfo.RegistryURL).
-			Str("repository", s.storageInfo.Repository).
-			Str("provider", s.credProvider.Name()).
-			Bool("has_username", authConfig.Username != "").
-			Bool("has_password", authConfig.Password != "").
-			Bool("has_auth", authConfig.Auth != "").
-			Bool("has_identity_token", authConfig.IdentityToken != "").
-			Bool("has_registry_token", authConfig.RegistryToken != "").
-			Msg("Using credentials from provider for layer init")
-		// Convert AuthConfig to proper authenticator (handles all auth types: username/password, tokens, etc.)
-		auth := authn.FromConfig(*authConfig)
-		remoteOpts = append(remoteOpts, remote.WithAuth(auth))
-	} else {
-		// Fall back to default keychain for anonymous or keychain-based auth
-		log.Warn().
-			Err(err).
-			Str("registry", s.storageInfo.RegistryURL).
-			Str("repository", s.storageInfo.Repository).
-			Str("provider", s.credProvider.Name()).
-			Msg("No credentials from provider for layer init, using default keychain")
-		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
-	}
-
-	// Add platform option to match the architecture used during indexing
-	// Without this, go-containerregistry defaults to amd64 which may have different layer digests
+	remoteOpts := s.remoteOptions(ctx)
 	platform := v1.Platform{
 		OS:           "linux",
 		Architecture: runtime.GOARCH,
@@ -224,6 +184,64 @@ func (s *OCIClipStorage) initLayers(ctx context.Context) error {
 
 	log.Info().Int("layer_count", len(s.layerCache)).Msg("initialized OCI layers")
 	return nil
+}
+
+func (s *OCIClipStorage) imageReference() string {
+	if strings.HasPrefix(s.storageInfo.Reference, "sha256:") {
+		return fmt.Sprintf("%s/%s@%s", s.storageInfo.RegistryURL, s.storageInfo.Repository, s.storageInfo.Reference)
+	}
+	return fmt.Sprintf("%s/%s:%s", s.storageInfo.RegistryURL, s.storageInfo.Repository, s.storageInfo.Reference)
+}
+
+func (s *OCIClipStorage) remoteOptions(ctx context.Context) []remote.Option {
+	remoteOpts := []remote.Option{remote.WithContext(ctx)}
+
+	authConfig, err := s.credProvider.GetCredentials(ctx, s.storageInfo.RegistryURL, s.storageInfo.Repository)
+	if err != nil && err != common.ErrNoCredentials {
+		log.Warn().
+			Err(err).
+			Str("registry", s.storageInfo.RegistryURL).
+			Str("repository", s.storageInfo.Repository).
+			Str("provider", s.credProvider.Name()).
+			Msg("Failed to get credentials from provider, falling back to keychain")
+	}
+
+	if authConfig != nil {
+		log.Info().
+			Str("registry", s.storageInfo.RegistryURL).
+			Str("repository", s.storageInfo.Repository).
+			Str("provider", s.credProvider.Name()).
+			Bool("has_username", authConfig.Username != "").
+			Bool("has_password", authConfig.Password != "").
+			Bool("has_auth", authConfig.Auth != "").
+			Bool("has_identity_token", authConfig.IdentityToken != "").
+			Bool("has_registry_token", authConfig.RegistryToken != "").
+			Msg("Using credentials from provider for layer init")
+		remoteOpts = append(remoteOpts, remote.WithAuth(authn.FromConfig(*authConfig)))
+	} else {
+		log.Warn().
+			Err(err).
+			Str("registry", s.storageInfo.RegistryURL).
+			Str("repository", s.storageInfo.Repository).
+			Str("provider", s.credProvider.Name()).
+			Msg("No credentials from provider for layer init, using default keychain")
+		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	}
+
+	return remoteOpts
+}
+
+func (s *OCIClipStorage) fetchLayerByDigest(ctx context.Context, digest string) (v1.Layer, error) {
+	layerRef := fmt.Sprintf("%s/%s@%s", s.storageInfo.RegistryURL, s.storageInfo.Repository, digest)
+	ref, err := name.NewDigest(layerRef)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse layer digest reference %q: %w", layerRef, err)
+	}
+	layer, err := remote.Layer(ref, s.remoteOptions(ctx)...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch layer by digest %s: %w", digest, err)
+	}
+	return layer, nil
 }
 
 // ReadFile reads file content using ranged reads from disk or remote cache
@@ -638,7 +656,14 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	s.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("layer not found: %s", digest)
+		fetched, err := s.fetchLayerByDigest(context.Background(), digest)
+		if err != nil {
+			return fmt.Errorf("layer not found: %s: %w", digest, err)
+		}
+		layer = fetched
+		s.mu.Lock()
+		s.layerCache[digest] = layer
+		s.mu.Unlock()
 	}
 
 	inflateStart := time.Now()
