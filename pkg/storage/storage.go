@@ -22,6 +22,10 @@ type ContentCacheExists interface {
 	ContentExists(hash string, opts struct{ RoutingKey string }) (bool, error)
 }
 
+type ContentCacheStoreLocalPath interface {
+	StoreContentFromLocalPath(path string, hash string, opts struct{ RoutingKey string }) (string, error)
+}
+
 type ClientLocalPageFileView struct {
 	Path   string
 	Offset int64

@@ -489,6 +489,21 @@ func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, con
 		}
 	}
 
+	if localStore, ok := contentCache.(storage.ContentCacheStoreLocalPath); ok && localStore != nil {
+		actualHash, err := localStore.StoreContentFromLocalPath(filePath, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+		if err != nil {
+			return err
+		}
+		if actualHash != "" && actualHash != decompressedHash {
+			return fmt.Errorf("indexed layer content cache hash mismatch: expected %s, got %s", decompressedHash, actualHash)
+		}
+		log.Info().
+			Str("layer_digest", layerDigest).
+			Str("decompressed_hash", decompressedHash).
+			Msg("stored indexed layer in content cache")
+		return nil
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open indexed layer temp file: %w", err)

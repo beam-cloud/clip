@@ -3,6 +3,7 @@ package clip
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -305,6 +306,58 @@ func TestOCIWithContentCache(t *testing.T) {
 
 	assert.Equal(t, data1, data2, "File content should be consistent")
 	t.Logf("Read file successfully with cache enabled")
+}
+
+type localPathContentCache struct {
+	path       string
+	hash       string
+	routingKey string
+	streamed   bool
+}
+
+func (c *localPathContentCache) GetContent(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]byte, error) {
+	return nil, fmt.Errorf("not found")
+}
+
+func (c *localPathContentCache) GetContentStream(hash string, offset int64, length int64, opts struct {
+	RoutingKey string
+}) (chan []byte, error) {
+	return nil, fmt.Errorf("not found")
+}
+
+func (c *localPathContentCache) StoreContent(chunks chan []byte, hash string, opts struct{ RoutingKey string }) (string, error) {
+	c.streamed = true
+	for range chunks {
+	}
+	return hash, nil
+}
+
+func (c *localPathContentCache) StoreContentFromLocalPath(path string, hash string, opts struct{ RoutingKey string }) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	if _, err := io.Copy(io.Discard, file); err != nil {
+		return "", err
+	}
+	c.path = path
+	c.hash = hash
+	c.routingKey = opts.RoutingKey
+	return hash, nil
+}
+
+func TestStoreIndexedLayerInContentCachePrefersLocalPathStore(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "indexed-layer")
+	require.NoError(t, os.WriteFile(tmpFile, []byte("indexed layer bytes"), 0644))
+
+	cache := &localPathContentCache{}
+	err := NewClipArchiver().storeIndexedLayerInContentCache(context.Background(), cache, tmpFile, "hash", "sha256:layer")
+	require.NoError(t, err)
+	require.Equal(t, tmpFile, cache.path)
+	require.Equal(t, "hash", cache.hash)
+	require.Equal(t, "hash", cache.routingKey)
+	require.False(t, cache.streamed, "local path store should avoid streaming StoreContent fallback")
 }
 
 // TestProgrammaticAPI tests the programmatic API

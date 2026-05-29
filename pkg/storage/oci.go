@@ -846,6 +846,18 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 		}
 	}
 
+	if localStore, ok := s.contentCache.(ContentCacheStoreLocalPath); ok && localStore != nil {
+		actualHash, err := localStore.StoreContentFromLocalPath(diskPath, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+		if err != nil {
+			log.Error().Err(err).Str("hash", decompressedHash).Msg("content cache local-path store failed")
+			return err
+		}
+		if actualHash != "" && actualHash != decompressedHash {
+			return fmt.Errorf("content cache local-path hash mismatch: expected %s, got %s", decompressedHash, actualHash)
+		}
+		return nil
+	}
+
 	chunks := make(chan []byte, 1)
 	done := make(chan struct{})
 	streamErr := make(chan error, 1)

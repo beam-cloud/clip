@@ -1017,6 +1017,53 @@ func (c *chunkTrackingCache) StoreContent(chunks chan []byte, hash string, opts 
 	return hash, nil
 }
 
+type localPathTrackingCache struct {
+	mockCache
+	localPathCalls int
+	localPath      string
+	routingKey     string
+}
+
+func (c *localPathTrackingCache) StoreContentFromLocalPath(path string, hash string, opts struct{ RoutingKey string }) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.localPathCalls++
+	c.localPath = path
+	c.routingKey = opts.RoutingKey
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	c.store[hash] = data
+	return hash, nil
+}
+
+func TestStoreDecompressedInRemoteCachePrefersLocalPathStore(t *testing.T) {
+	testData := []byte("decompressed layer bytes")
+	tmpFile := filepath.Join(t.TempDir(), "layer.dat")
+	require.NoError(t, os.WriteFile(tmpFile, testData, 0644))
+
+	cache := &localPathTrackingCache{
+		mockCache: mockCache{
+			store: make(map[string][]byte),
+		},
+	}
+	storage := &OCIClipStorage{contentCache: cache}
+
+	const digest = "sha256:localpath123"
+	require.NoError(t, storage.storeDecompressedInRemoteCache(digest, tmpFile))
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	require.Equal(t, 1, cache.localPathCalls)
+	require.Equal(t, tmpFile, cache.localPath)
+	require.Equal(t, digest, cache.routingKey)
+	require.Equal(t, 0, cache.setCalls, "local path store should avoid streaming StoreContent fallback")
+	require.Equal(t, testData, cache.store[digest])
+}
+
 func TestStoreDecompressedInRemoteCache_StreamsInChunks(t *testing.T) {
 	// Create a large test file (100MB)
 	fileSize := int64(100 * 1024 * 1024) // 100MB
