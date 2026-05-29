@@ -129,12 +129,8 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 	log.Info().
 		Str("cache_dir", diskCacheDir).
 		Str("cred_provider", credProvider.Name()).
+		Bool("content_cache_available", opts.ContentCache != nil && opts.ContentCacheAvailable).
 		Msg("initialized OCI storage with disk cache")
-
-	// Pre-fetch layer descriptors
-	if err := storage.initLayers(context.Background()); err != nil {
-		return nil, fmt.Errorf("failed to initialize layers: %w", err)
-	}
 
 	return storage, nil
 }

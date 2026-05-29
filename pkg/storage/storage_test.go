@@ -97,6 +97,26 @@ func TestContentAddressedCaching(t *testing.T) {
 	t.Logf("This is the hash of the decompressed data - same content = same hash!")
 }
 
+func TestNewOCIClipStorageDoesNotFetchLayersEagerly(t *testing.T) {
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			RegistryURL: "not a valid registry URL",
+			Repository:  "repo",
+			Reference:   "tag",
+			DecompressedHashByLayer: map[string]string{
+				"sha256:layer": "239fb06d94222b78c6bf9f52b4ef8a0a92dd49e66d7f1ea0a9ea0450a0ba738c",
+			},
+		},
+	}
+
+	storage, err := NewOCIClipStorage(OCIClipStorageOpts{
+		Metadata:     metadata,
+		DiskCacheDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	require.Empty(t, storage.layerCache)
+}
+
 // TestContentCacheRangeRead verifies that we use decompressed hash for caching
 func TestContentCacheRangeRead(t *testing.T) {
 	// Create test layer data
