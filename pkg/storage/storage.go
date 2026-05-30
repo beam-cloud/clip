@@ -7,6 +7,11 @@ import (
 	"github.com/beam-cloud/clip/pkg/common"
 )
 
+var (
+	ErrContentCacheMiss        = errors.New("content cache miss")
+	ErrContentCacheUnavailable = errors.New("content cache unavailable")
+)
+
 // ContentCache interface for layer caching (e.g., blobcache)
 // Supports range reads for lazy loading
 type ContentCache interface {

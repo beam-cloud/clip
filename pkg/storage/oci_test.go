@@ -629,6 +629,59 @@ func TestOCIStorage_CacheError(t *testing.T) {
 	assert.Equal(t, testData, dest)
 }
 
+func TestOCIStorage_ContentCacheUnavailableDoesNotFetchLayer(t *testing.T) {
+	testData := []byte("Hello, World! This is test data for OCI storage.")
+	compressedData := createGzipData(t, testData)
+	digest := v1.Hash{
+		Algorithm: "sha256",
+		Hex:       "abc123",
+	}
+
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	cache := newMockCache()
+	cache.getError = ErrContentCacheUnavailable
+	layer := &mockLayer{
+		digest:         digest,
+		compressedData: compressedData,
+	}
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {},
+			},
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
+		},
+	}
+	storage := &OCIClipStorage{
+		metadata:              metadata,
+		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:            map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:          t.TempDir(),
+		contentCache:          cache,
+		contentCacheAvailable: true,
+	}
+	node := &common.ClipNode{
+		Remote: &common.RemoteRef{
+			LayerDigest: digest.String(),
+			UOffset:     0,
+			ULength:     int64(len(testData)),
+		},
+	}
+
+	dest := make([]byte, len(testData))
+	n, err := storage.ReadFile(node, dest, 0)
+
+	require.ErrorIs(t, err, ErrContentCacheUnavailable)
+	require.Zero(t, n)
+	_, statErr := os.Stat(storage.getDecompressedCachePath(decompressedHash))
+	require.True(t, os.IsNotExist(statErr))
+}
+
 func TestOCIStorage_LayerFetchError(t *testing.T) {
 	// Create test data
 	testData := []byte("Hello, World!")

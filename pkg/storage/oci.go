@@ -3,6 +3,7 @@ package storage
 import (
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -416,6 +417,13 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 			})
 			log.Debug().
 				Err(err).
+				Str("layer_digest", remote.LayerDigest).
+				Str("decompressed_hash", decompressedHash).
+				Msg("content cache range read failed")
+			if errors.Is(err, ErrContentCacheUnavailable) {
+				return 0, err
+			}
+			log.Debug().
 				Str("layer_digest", remote.LayerDigest).
 				Str("decompressed_hash", decompressedHash).
 				Msg("content cache miss - will decompress from OCI")
