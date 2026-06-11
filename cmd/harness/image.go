@@ -8,23 +8,26 @@ import (
 	"io"
 	"log"
 	"math/rand"
-	"net/http/httptest"
+	"net"
+	"net/http"
 	"path"
-	"sort"
 	"strings"
 	"time"
 
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
 
-// synthEntry describes one tar entry in a synthetic layer.
-type synthEntry struct {
+// referenceTime keeps every tar header in the reference image deterministic.
+var referenceTime = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// layerEntry describes one tar entry in a reference image layer.
+type layerEntry struct {
 	name     string
 	typeflag byte
 	content  []byte
@@ -32,20 +35,19 @@ type synthEntry struct {
 	mode     int64
 }
 
-// fixedTime keeps all synthetic tar headers deterministic.
-var fixedTime = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-
-// synthLayers returns layer definitions that exercise regular files,
-// directories, symlinks, hard links, whiteouts, opaque whiteouts, and a file
-// large enough to force multiple gzip checkpoints.
-func synthLayers() [][]synthEntry {
-	// Deterministic pseudo-random payload (~5 MiB) to force checkpoints.
+// referenceLayers defines an image that exercises every node type the indexer
+// handles: regular files, directories, symlinks, hard links, whiteouts,
+// opaque whiteouts, and a payload large enough to span multiple gzip
+// checkpoints.
+func referenceLayers() [][]layerEntry {
+	// Deterministic pseudo-random payload (~5 MiB) to force checkpoints
 	rng := rand.New(rand.NewSource(42))
-	bigPayload := make([]byte, 5*1024*1024)
-	rng.Read(bigPayload)
+	payload := make([]byte, 5*1024*1024)
+	rng.Read(payload)
 
-	return [][]synthEntry{
-		{ // layer 1: base filesystem
+	return [][]layerEntry{
+		// Layer 1: base filesystem
+		{
 			{name: "bin/", typeflag: tar.TypeDir, mode: 0755},
 			{name: "bin/tool", typeflag: tar.TypeReg, content: []byte("#!/bin/sh\necho tool\n"), mode: 0755},
 			{name: "bin/tool-alias", typeflag: tar.TypeLink, linkname: "bin/tool", mode: 0755},
@@ -58,15 +60,17 @@ func synthLayers() [][]synthEntry {
 			{name: "opt/sub/deep.txt", typeflag: tar.TypeReg, content: []byte("deep"), mode: 0644},
 			{name: "usr/", typeflag: tar.TypeDir, mode: 0755},
 			{name: "usr/lib/", typeflag: tar.TypeDir, mode: 0755},
-			{name: "usr/lib/big.bin", typeflag: tar.TypeReg, content: bigPayload, mode: 0644},
+			{name: "usr/lib/big.bin", typeflag: tar.TypeReg, content: payload, mode: 0644},
 		},
-		{ // layer 2: whiteout + opaque whiteout + replacement
+		// Layer 2: whiteout, opaque whiteout, and file replacement
+		{
 			{name: "etc/.wh.old.conf", typeflag: tar.TypeReg, mode: 0644},
 			{name: "etc/keep.conf", typeflag: tar.TypeReg, content: []byte("replaced"), mode: 0600},
 			{name: "opt/.wh..wh..opq", typeflag: tar.TypeReg, mode: 0644},
 			{name: "opt/fresh.txt", typeflag: tar.TypeReg, content: []byte("fresh"), mode: 0644},
 		},
-		{ // layer 3: symlinks and additions
+		// Layer 3: symlinks and additions
+		{
 			{name: "srv/", typeflag: tar.TypeDir, mode: 0755},
 			{name: "srv/app.txt", typeflag: tar.TypeReg, content: []byte("app"), mode: 0644},
 			{name: "srv/link-to-app", typeflag: tar.TypeSymlink, linkname: "app.txt", mode: 0777},
@@ -76,26 +80,26 @@ func synthLayers() [][]synthEntry {
 }
 
 // buildLayerBlob produces a deterministic gzipped tarball for the entries.
-func buildLayerBlob(entries []synthEntry) ([]byte, error) {
+func buildLayerBlob(entries []layerEntry) ([]byte, error) {
 	var tarBuf bytes.Buffer
 	tw := tar.NewWriter(&tarBuf)
-	for _, e := range entries {
+	for _, entry := range entries {
 		hdr := &tar.Header{
-			Name:     e.name,
-			Typeflag: e.typeflag,
-			Mode:     e.mode,
-			Linkname: e.linkname,
-			ModTime:  fixedTime,
+			Name:     entry.name,
+			Typeflag: entry.typeflag,
+			Mode:     entry.mode,
+			Linkname: entry.linkname,
+			ModTime:  referenceTime,
 			Format:   tar.FormatPAX,
 		}
-		if e.typeflag == tar.TypeReg {
-			hdr.Size = int64(len(e.content))
+		if entry.typeflag == tar.TypeReg {
+			hdr.Size = int64(len(entry.content))
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return nil, err
 		}
-		if e.typeflag == tar.TypeReg && len(e.content) > 0 {
-			if _, err := tw.Write(e.content); err != nil {
+		if entry.typeflag == tar.TypeReg && len(entry.content) > 0 {
+			if _, err := tw.Write(entry.content); err != nil {
 				return nil, err
 			}
 		}
@@ -115,11 +119,11 @@ func buildLayerBlob(entries []synthEntry) ([]byte, error) {
 	return gzBuf.Bytes(), nil
 }
 
-// buildSynthImage composes the synthetic layers into an OCI image with a
-// fixed created time so indexing output is fully deterministic.
-func buildSynthImage() (v1.Image, error) {
+// buildReferenceImage composes the reference layers into an OCI image with a
+// fixed created time so indexing output is fully reproducible.
+func buildReferenceImage() (v1.Image, error) {
 	img := empty.Image
-	for i, entries := range synthLayers() {
+	for i, entries := range referenceLayers() {
 		blob, err := buildLayerBlob(entries)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build layer %d: %w", i, err)
@@ -135,47 +139,69 @@ func buildSynthImage() (v1.Image, error) {
 			return nil, fmt.Errorf("failed to append layer %d: %w", i, err)
 		}
 	}
-	return mutate.CreatedAt(img, v1.Time{Time: fixedTime})
+	return mutate.CreatedAt(img, v1.Time{Time: referenceTime})
 }
 
-// startSynthRegistry serves an in-memory OCI registry, pushes the synthetic
-// image, and returns its reference plus a shutdown func.
-func startSynthRegistry() (string, func(), error) {
-	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
+// localRegistry serves an in-memory OCI registry on a loopback address.
+type localRegistry struct {
+	server   *http.Server
+	listener net.Listener
+}
 
-	img, err := buildSynthImage()
+func startLocalRegistry() (*localRegistry, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		server.Close()
-		return "", nil, err
+		return nil, fmt.Errorf("failed to start local registry listener: %w", err)
 	}
 
-	host := strings.TrimPrefix(server.URL, "http://")
-	imageRef := fmt.Sprintf("%s/harness/synth:latest", host)
+	server := &http.Server{
+		Handler: registry.New(registry.Logger(log.New(io.Discard, "", 0))),
+	}
+	go server.Serve(listener)
+
+	return &localRegistry{server: server, listener: listener}, nil
+}
+
+func (r *localRegistry) host() string {
+	return r.listener.Addr().String()
+}
+
+func (r *localRegistry) close() {
+	r.server.Close()
+}
+
+// pushReferenceImage builds the reference image and pushes it to the local
+// registry, returning its reference.
+func pushReferenceImage(reg *localRegistry) (string, error) {
+	img, err := buildReferenceImage()
+	if err != nil {
+		return "", err
+	}
+
+	imageRef := fmt.Sprintf("%s/harness/reference:latest", reg.host())
 	ref, err := name.ParseReference(imageRef)
 	if err != nil {
-		server.Close()
-		return "", nil, err
+		return "", err
 	}
 	if err := remote.Write(ref, img); err != nil {
-		server.Close()
-		return "", nil, fmt.Errorf("failed to push synthetic image: %w", err)
+		return "", fmt.Errorf("failed to push reference image: %w", err)
 	}
-
-	return imageRef, server.Close, nil
+	return imageRef, nil
 }
 
-// groundTruthNode is an independently computed expectation for one path.
-type groundTruthNode struct {
+// expectedNode is an independently computed expectation for one path in the
+// merged image filesystem.
+type expectedNode struct {
 	kind   string // "dir", "file", "symlink"
 	size   int64
 	target string
 }
 
-// computeGroundTruth applies OCI overlay semantics to the synthetic layer
+// expectedTree applies OCI overlay semantics to the reference layer
 // definitions using a simple map-based implementation, fully independent of
-// the clip indexer code paths under test.
-func computeGroundTruth() map[string]groundTruthNode {
-	tree := map[string]groundTruthNode{
+// the indexer code under test.
+func expectedTree() map[string]expectedNode {
+	tree := map[string]expectedNode{
 		"/": {kind: "dir"},
 	}
 
@@ -187,9 +213,9 @@ func computeGroundTruth() map[string]groundTruthNode {
 		}
 	}
 
-	for _, entries := range synthLayers() {
-		for _, e := range entries {
-			clean := path.Clean("/" + strings.TrimPrefix(e.name, "./"))
+	for _, entries := range referenceLayers() {
+		for _, entry := range entries {
+			clean := path.Clean("/" + strings.TrimPrefix(entry.name, "./"))
 			base := path.Base(clean)
 			dir := path.Dir(clean)
 
@@ -204,30 +230,21 @@ func computeGroundTruth() map[string]groundTruthNode {
 				continue
 			}
 
-			switch e.typeflag {
+			switch entry.typeflag {
 			case tar.TypeDir:
-				tree[clean] = groundTruthNode{kind: "dir"}
+				tree[clean] = expectedNode{kind: "dir"}
 			case tar.TypeReg:
-				tree[clean] = groundTruthNode{kind: "file", size: int64(len(e.content))}
+				tree[clean] = expectedNode{kind: "file", size: int64(len(entry.content))}
 			case tar.TypeSymlink:
-				tree[clean] = groundTruthNode{kind: "symlink", target: e.linkname, size: int64(len(e.linkname))}
+				tree[clean] = expectedNode{kind: "symlink", target: entry.linkname, size: int64(len(entry.linkname))}
 			case tar.TypeLink:
-				target := path.Clean("/" + strings.TrimPrefix(e.linkname, "./"))
-				if tn, ok := tree[target]; ok {
-					tree[clean] = groundTruthNode{kind: "file", size: tn.size}
+				target := path.Clean("/" + strings.TrimPrefix(entry.linkname, "./"))
+				if targetNode, ok := tree[target]; ok {
+					tree[clean] = expectedNode{kind: "file", size: targetNode.size}
 				}
 			}
 		}
 	}
 
 	return tree
-}
-
-func sortedPaths(m map[string]groundTruthNode) []string {
-	paths := make([]string, 0, len(m))
-	for p := range m {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-	return paths
 }

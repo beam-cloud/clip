@@ -15,10 +15,10 @@ e2e:
 	go build -o ./bin/e2e ./e2e/main.go
 
 harness:
-	go build -o ./bin/clip-harness ./cmd/clip-harness
+	go build -o ./bin/harness ./cmd/harness
 
 verify: harness
-	./bin/clip-harness verify
+	./bin/harness verify
 
 bench: harness
-	./bin/clip-harness bench
+	./bin/harness bench

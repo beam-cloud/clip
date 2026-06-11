@@ -5,11 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/beam-cloud/clip/pkg/clip"
 	"github.com/beam-cloud/clip/pkg/storage"
 )
 
+// runBench benchmarks indexing of a real image across three modes: cold
+// sequential, cold parallel, and warm (layer index cache), verifying that all
+// modes produce identical output.
 func runBench(args []string) error {
 	fs := flag.NewFlagSet("bench", flag.ExitOnError)
 	image := fs.String("image", "python:3.11-slim", "image reference to index")
@@ -33,7 +37,7 @@ func runBench(args []string) error {
 
 	cacheRoot := *cacheDir
 	if cacheRoot == "" {
-		cacheRoot = workDir + "/layer-cache"
+		cacheRoot = filepath.Join(workDir, "layer-cache")
 	}
 	diskCache, err := storage.NewDiskLayerIndexCache(cacheRoot)
 	if err != nil {
@@ -43,69 +47,49 @@ func runBench(args []string) error {
 	fmt.Printf("==> benchmarking index of %s (concurrency=%d)\n", *image, *concurrency)
 
 	fmt.Println("==> cold sequential run (no layer index cache, concurrency=1)")
-	coldSeq, err := indexImage(ctx, "bench-cold-seq", *image, workDir, nil, 1)
+	coldSequential, err := runIndex(ctx, "bench-cold-seq", *image, workDir, nil, 1)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("    %v (%s decompressed, %s)\n", coldSeq.duration, humanBytes(coldSeq.uncompressedBytes()), throughput(coldSeq))
+	fmt.Printf("    %v (%s decompressed, %s)\n", coldSequential.duration, humanBytes(coldSequential.uncompressedBytes()), coldSequential.throughput())
 
 	fmt.Println("==> cold parallel run (no layer index cache)")
-	cold, err := indexImage(ctx, "bench-cold", *image, workDir, nil, *concurrency)
+	coldParallel, err := runIndex(ctx, "bench-cold", *image, workDir, nil, *concurrency)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("    %v (%s)\n", cold.duration, throughput(cold))
+	fmt.Printf("    %v (%s)\n", coldParallel.duration, coldParallel.throughput())
 
 	fmt.Println("==> populate run (writes layer index cache)")
-	popCache := &countingLayerCache{inner: diskCache}
-	pop, err := indexImage(ctx, "bench-populate", *image, workDir, popCache, *concurrency)
+	populate, err := runIndex(ctx, "bench-populate", *image, workDir, &instrumentedLayerCache{inner: diskCache}, *concurrency)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("    %v (hits=%d puts=%d)\n", pop.duration, pop.cacheHits, pop.cachePuts)
+	fmt.Printf("    %v (hits=%d puts=%d)\n", populate.duration, populate.cacheHits, populate.cachePuts)
 
 	fmt.Println("==> warm run (layer index cache hits, no layer pulls)")
-	warmCache := &countingLayerCache{inner: diskCache}
-	warm, err := indexImage(ctx, "bench-warm", *image, workDir, warmCache, *concurrency)
+	warm, err := runIndex(ctx, "bench-warm", *image, workDir, &instrumentedLayerCache{inner: diskCache}, *concurrency)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("    %v (hits=%d puts=%d)\n", warm.duration, warm.cacheHits, warm.cachePuts)
 
-	if err := compareRuns(coldSeq, cold); err != nil {
+	if err := compareRuns(coldSequential, coldParallel); err != nil {
 		return fmt.Errorf("parallel cold run output differs from sequential cold run: %w", err)
 	}
-	if err := compareRuns(cold, warm); err != nil {
+	if err := compareRuns(coldParallel, warm); err != nil {
 		return fmt.Errorf("warm run output differs from cold run: %w", err)
 	}
 
 	fmt.Println()
 	fmt.Println("results:")
-	fmt.Printf("  image decompressed size: %s in %d layers\n", humanBytes(coldSeq.uncompressedBytes()), coldSeq.layerCount())
-	fmt.Printf("  cold sequential: %12v  (%s)\n", coldSeq.duration, throughput(coldSeq))
-	fmt.Printf("  cold parallel:   %12v  (%s, %.1fx vs sequential)\n", cold.duration, throughput(cold), float64(coldSeq.duration)/float64(cold.duration))
-	fmt.Printf("  populate:        %12v\n", pop.duration)
+	fmt.Printf("  image decompressed size: %s in %d layers\n", humanBytes(coldSequential.uncompressedBytes()), coldSequential.layerCount())
+	fmt.Printf("  cold sequential: %12v  (%s)\n", coldSequential.duration, coldSequential.throughput())
+	fmt.Printf("  cold parallel:   %12v  (%s, %.1fx vs sequential)\n",
+		coldParallel.duration, coldParallel.throughput(), float64(coldSequential.duration)/float64(coldParallel.duration))
+	fmt.Printf("  populate:        %12v\n", populate.duration)
 	fmt.Printf("  warm:            %12v  (%.1fx vs cold sequential, %d/%d layers from cache)\n",
-		warm.duration, float64(coldSeq.duration)/float64(warm.duration), warm.cacheHits, warm.cacheHits+warm.cachePuts)
+		warm.duration, float64(coldSequential.duration)/float64(warm.duration), warm.cacheHits, warm.cacheHits+warm.cachePuts)
 	fmt.Println("  outputs verified identical across all runs")
 	return nil
-}
-
-func humanBytes(n int64) string {
-	switch {
-	case n >= 1<<30:
-		return fmt.Sprintf("%.2f GiB", float64(n)/(1<<30))
-	case n >= 1<<20:
-		return fmt.Sprintf("%.2f MiB", float64(n)/(1<<20))
-	default:
-		return fmt.Sprintf("%d B", n)
-	}
-}
-
-func throughput(r *indexResult) string {
-	secs := r.duration.Seconds()
-	if secs <= 0 {
-		return "n/a"
-	}
-	return fmt.Sprintf("%.0f MiB/s", float64(r.uncompressedBytes())/(1<<20)/secs)
 }

@@ -14,15 +14,16 @@ import (
 	"github.com/beam-cloud/clip/pkg/storage"
 )
 
-// countingLayerCache wraps a LayerIndexCache and counts hits/misses/puts.
-type countingLayerCache struct {
+// instrumentedLayerCache wraps a LayerIndexCache and counts hits, misses, and
+// puts so runs can assert on cache behavior.
+type instrumentedLayerCache struct {
 	inner  storage.LayerIndexCache
 	hits   atomic.Int64
 	misses atomic.Int64
 	puts   atomic.Int64
 }
 
-func (c *countingLayerCache) GetLayerIndex(ctx context.Context, key string) ([]byte, error) {
+func (c *instrumentedLayerCache) GetLayerIndex(ctx context.Context, key string) ([]byte, error) {
 	data, err := c.inner.GetLayerIndex(ctx, key)
 	if err == nil && data != nil {
 		c.hits.Add(1)
@@ -32,13 +33,14 @@ func (c *countingLayerCache) GetLayerIndex(ctx context.Context, key string) ([]b
 	return data, err
 }
 
-func (c *countingLayerCache) PutLayerIndex(ctx context.Context, key string, data []byte) error {
+func (c *instrumentedLayerCache) PutLayerIndex(ctx context.Context, key string, data []byte) error {
 	c.puts.Add(1)
 	return c.inner.PutLayerIndex(ctx, key, data)
 }
 
-// indexResult captures everything needed to compare two indexing runs.
-type indexResult struct {
+// indexRun captures everything needed to compare and report on one indexing
+// pass over an image.
+type indexRun struct {
 	label      string
 	duration   time.Duration
 	indexBytes []byte
@@ -47,10 +49,10 @@ type indexResult struct {
 	cachePuts  int64
 }
 
-// indexImage runs clip.CreateFromOCIImage and extracts the encoded index
-// region plus decoded metadata from the resulting .clip file.
-func indexImage(ctx context.Context, label, imageRef, outDir string, layerCache storage.LayerIndexCache, concurrency int) (*indexResult, error) {
-	outputPath := filepath.Join(outDir, label+".clip")
+// runIndex indexes an image with clip.CreateFromOCIImage and extracts the
+// encoded index region plus decoded metadata from the resulting archive.
+func runIndex(ctx context.Context, label, imageRef, outputDir string, layerCache storage.LayerIndexCache, concurrency int) (*indexRun, error) {
+	outputPath := filepath.Join(outputDir, label+".clip")
 
 	started := time.Now()
 	err := clip.CreateFromOCIImage(ctx, clip.CreateFromOCIImageOptions{
@@ -70,32 +72,31 @@ func indexImage(ctx context.Context, label, imageRef, outDir string, layerCache 
 		return nil, fmt.Errorf("failed to extract metadata (%s): %w", label, err)
 	}
 
-	fileBytes, err := os.ReadFile(outputPath)
+	archiveBytes, err := os.ReadFile(outputPath)
 	if err != nil {
 		return nil, err
 	}
 	header := metadata.Header
-	if header.IndexPos+header.IndexLength > int64(len(fileBytes)) {
+	if header.IndexPos+header.IndexLength > int64(len(archiveBytes)) {
 		return nil, fmt.Errorf("invalid index region in %s", outputPath)
 	}
-	indexBytes := fileBytes[header.IndexPos : header.IndexPos+header.IndexLength]
 
-	result := &indexResult{
+	run := &indexRun{
 		label:      label,
 		duration:   duration,
-		indexBytes: indexBytes,
+		indexBytes: archiveBytes[header.IndexPos : header.IndexPos+header.IndexLength],
 		metadata:   metadata,
 	}
-	if counting, ok := layerCache.(*countingLayerCache); ok {
-		result.cacheHits = counting.hits.Load()
-		result.cachePuts = counting.puts.Load()
+	if instrumented, ok := layerCache.(*instrumentedLayerCache); ok {
+		run.cacheHits = instrumented.hits.Load()
+		run.cachePuts = instrumented.puts.Load()
 	}
-	return result, nil
+	return run, nil
 }
 
 // uncompressedBytes sums the decompressed sizes of all layers, derived from
 // each layer's final gzip checkpoint (recorded at end-of-stream).
-func (r *indexResult) uncompressedBytes() int64 {
+func (r *indexRun) uncompressedBytes() int64 {
 	info, ok := r.metadata.StorageInfo.(common.OCIStorageInfo)
 	if !ok {
 		return 0
@@ -109,12 +110,20 @@ func (r *indexResult) uncompressedBytes() int64 {
 	return total
 }
 
-func (r *indexResult) layerCount() int {
+func (r *indexRun) layerCount() int {
 	info, ok := r.metadata.StorageInfo.(common.OCIStorageInfo)
 	if !ok {
 		return 0
 	}
 	return len(info.Layers)
+}
+
+func (r *indexRun) throughput() string {
+	secs := r.duration.Seconds()
+	if secs <= 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.0f MiB/s", float64(r.uncompressedBytes())/(1<<20)/secs)
 }
 
 // compareRuns asserts two runs produced identical results. The index region
@@ -128,30 +137,28 @@ func (r *indexResult) layerCount() int {
 // by the optional UseCheckpoints read path); the uncompressed offsets (UOff),
 // which define checkpoint placement, are fully deterministic and compared
 // exactly.
-func compareRuns(a, b *indexResult) error {
-	if len(a.indexBytes) != len(b.indexBytes) {
-		return fmt.Errorf("index size mismatch: %s=%d bytes, %s=%d bytes", a.label, len(a.indexBytes), b.label, len(b.indexBytes))
+func compareRuns(a, b *indexRun) error {
+	if !reflect.DeepEqual(a.indexBytes, b.indexBytes) {
+		return fmt.Errorf("index bytes differ between %s (%d bytes) and %s (%d bytes)",
+			a.label, len(a.indexBytes), b.label, len(b.indexBytes))
 	}
-	for i := range a.indexBytes {
-		if a.indexBytes[i] != b.indexBytes[i] {
-			return fmt.Errorf("index bytes differ between %s and %s at offset %d", a.label, b.label, i)
-		}
-	}
+
 	infoA := normalizeStorageInfo(a.metadata.StorageInfo)
 	infoB := normalizeStorageInfo(b.metadata.StorageInfo)
 	if !reflect.DeepEqual(infoA, infoB) {
-		return fmt.Errorf("storage info differs between %s and %s: %s", a.label, b.label, diffStorageInfo(infoA, infoB))
+		return fmt.Errorf("storage info differs between %s and %s: %s", a.label, b.label, describeStorageInfoDiff(infoA, infoB))
 	}
 	return nil
 }
 
 // normalizeStorageInfo zeroes the buffering-dependent compressed offsets in
-// gzip checkpoints so that comparisons cover only deterministic fields.
+// gzip checkpoints so comparisons cover only deterministic fields.
 func normalizeStorageInfo(info interface{}) interface{} {
 	ociInfo, ok := info.(common.OCIStorageInfo)
 	if !ok {
 		return info
 	}
+
 	normalized := ociInfo
 	normalized.GzipIdxByLayer = make(map[string]*common.GzipIndex, len(ociInfo.GzipIdxByLayer))
 	for digest, idx := range ociInfo.GzipIdxByLayer {
@@ -159,19 +166,21 @@ func normalizeStorageInfo(info interface{}) interface{} {
 			normalized.GzipIdxByLayer[digest] = nil
 			continue
 		}
-		cps := make([]common.GzipCheckpoint, len(idx.Checkpoints))
+		checkpoints := make([]common.GzipCheckpoint, len(idx.Checkpoints))
 		for i, cp := range idx.Checkpoints {
-			cps[i] = common.GzipCheckpoint{COff: 0, UOff: cp.UOff}
+			checkpoints[i] = common.GzipCheckpoint{UOff: cp.UOff}
 		}
 		normalized.GzipIdxByLayer[digest] = &common.GzipIndex{
 			LayerDigest: idx.LayerDigest,
-			Checkpoints: cps,
+			Checkpoints: checkpoints,
 		}
 	}
 	return normalized
 }
 
-func diffStorageInfo(a, b interface{}) string {
+// describeStorageInfoDiff returns a human-readable summary of which storage
+// info fields differ between two runs.
+func describeStorageInfoDiff(a, b interface{}) string {
 	infoA, okA := a.(common.OCIStorageInfo)
 	infoB, okB := b.(common.OCIStorageInfo)
 	if !okA || !okB {
@@ -195,30 +204,24 @@ func diffStorageInfo(a, b interface{}) string {
 		diffs = append(diffs, fmt.Sprintf("DecompressedHashByLayer: %v vs %v", infoA.DecompressedHashByLayer, infoB.DecompressedHashByLayer))
 	}
 	if !reflect.DeepEqual(infoA.GzipIdxByLayer, infoB.GzipIdxByLayer) {
-		for digest, idxA := range infoA.GzipIdxByLayer {
-			idxB := infoB.GzipIdxByLayer[digest]
-			if !reflect.DeepEqual(idxA, idxB) {
-				diffs = append(diffs, fmt.Sprintf("GzipIdxByLayer[%s]: %d vs %d checkpoints", digest, checkpointCount(idxA), checkpointCount(idxB)))
-			}
-		}
-		for digest := range infoB.GzipIdxByLayer {
-			if _, ok := infoA.GzipIdxByLayer[digest]; !ok {
-				diffs = append(diffs, fmt.Sprintf("GzipIdxByLayer[%s]: missing in first", digest))
-			}
-		}
+		diffs = append(diffs, "GzipIdxByLayer differs")
 	}
 	if !reflect.DeepEqual(infoA.ImageMetadata, infoB.ImageMetadata) {
-		diffs = append(diffs, fmt.Sprintf("ImageMetadata: %+v vs %+v", infoA.ImageMetadata, infoB.ImageMetadata))
+		diffs = append(diffs, "ImageMetadata differs")
 	}
 	if len(diffs) == 0 {
-		return "(no field-level diff found; possible nil/empty mismatch)"
+		return "(no field-level diff found)"
 	}
 	return fmt.Sprintf("%v", diffs)
 }
 
-func checkpointCount(idx *common.GzipIndex) int {
-	if idx == nil {
-		return -1
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.2f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.2f MiB", float64(n)/(1<<20))
+	default:
+		return fmt.Sprintf("%d B", n)
 	}
-	return len(idx.Checkpoints)
 }
