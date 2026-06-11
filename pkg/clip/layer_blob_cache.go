@@ -165,7 +165,7 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 				// Consume any trailing bytes the gzip reader didn't request,
 				// then verify the full blob hash against the layer digest.
 				if _, drainErr := io.Copy(io.Discard, reader); drainErr == nil && reader.sum() == blobKey {
-					log.Info().
+					log.Debug().
 						Str("layer_digest", layerDigest).
 						Int64("compressed_bytes", compressedSize).
 						Msg("compressed layer cache hit: indexed without registry pull")

@@ -171,7 +171,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 
 	// Log the indexing strategy
 	if storageRef != opts.ImageRef {
-		log.Info().Msgf("Indexing from local: %s, will store reference to: %s", opts.ImageRef, storageRef)
+		log.Debug().Msgf("Indexing from local: %s, will store reference to: %s", opts.ImageRef, storageRef)
 	}
 
 	// Determine which credential provider to use
@@ -347,7 +347,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 					} else {
 						artifacts[i] = artifact
 						cacheHits[i] = true
-						log.Info().
+						log.Debug().
 							Str("layer_digest", layerDigestStr).
 							Int("entries", len(artifact.Entries)).
 							Msg("layer index cache hit: skipping layer pull")
@@ -356,7 +356,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 				}
 			}
 
-			log.Info().Msgf("Processing layer %d/%d: %s", i+1, len(layers), layerDigestStr)
+			log.Debug().Msgf("Processing layer %d/%d: %s", i+1, len(layers), layerDigestStr)
 
 			artifact, err := ca.indexLayerFromBestSource(gctx, layer, layerDigestStr, opts)
 			if err != nil {
@@ -579,37 +579,23 @@ func (ca *ClipArchiver) storeLayerBlobInContentCache(ctx context.Context, conten
 		return nil
 	}
 
-	// Prefer the size-aware completeness check: a positive answer guarantees
-	// the cached layer is complete, so the store can be skipped safely.
-	checkedExists := false
-	var exists bool
-	var existsErr error
-	if sizeCache, ok := contentCache.(storage.ContentCacheExistsWithSize); ok {
-		if info, err := os.Stat(filePath); err == nil {
-			exists, existsErr = sizeCache.ContentExistsWithSize(contentHash, info.Size(), struct{ RoutingKey string }{RoutingKey: contentHash})
-			checkedExists = true
-		}
+	// Skip the store when the blob is already complete in the cache,
+	// preferring the size-aware check (a positive answer guarantees the
+	// cached blob is complete).
+	exists := false
+	if info, err := os.Stat(filePath); err == nil {
+		exists = contentCacheExistsWithSize(contentCache, contentHash, info.Size())
 	}
-	if !checkedExists {
+	if !exists {
 		if existsCache, ok := contentCache.(storage.ContentCacheExists); ok {
-			exists, existsErr = existsCache.ContentExists(contentHash, struct{ RoutingKey string }{RoutingKey: contentHash})
-			checkedExists = true
+			if found, err := existsCache.ContentExists(contentHash, struct{ RoutingKey string }{RoutingKey: contentHash}); err == nil && found {
+				exists = true
+			}
 		}
 	}
-	if checkedExists {
-		if existsErr != nil {
-			log.Warn().
-				Err(existsErr).
-				Str("layer_digest", layerDigest).
-				Str("content_hash", contentHash).
-				Msgf("failed to check %s content cache", kind)
-		} else if exists {
-			log.Info().
-				Str("layer_digest", layerDigest).
-				Str("content_hash", contentHash).
-				Msgf("%s already present in content cache", kind)
-			return nil
-		}
+	if exists {
+		log.Debug().Str("layer_digest", layerDigest).Msgf("%s already present in content cache", kind)
+		return nil
 	}
 
 	if localStore, ok := contentCache.(storage.ContentCacheStoreLocalPath); ok && localStore != nil {
@@ -620,10 +606,7 @@ func (ca *ClipArchiver) storeLayerBlobInContentCache(ctx context.Context, conten
 		if actualHash != "" && actualHash != contentHash {
 			return fmt.Errorf("%s content cache hash mismatch: expected %s, got %s", kind, contentHash, actualHash)
 		}
-		log.Info().
-			Str("layer_digest", layerDigest).
-			Str("content_hash", contentHash).
-			Msgf("stored %s in content cache", kind)
+		log.Debug().Str("layer_digest", layerDigest).Msgf("stored %s in content cache", kind)
 		return nil
 	}
 
@@ -683,9 +666,8 @@ func (ca *ClipArchiver) storeLayerBlobInContentCache(ctx context.Context, conten
 		return fmt.Errorf("%s content cache hash mismatch: expected %s, got %s", kind, contentHash, actualHash)
 	}
 
-	log.Info().
+	log.Debug().
 		Str("layer_digest", layerDigest).
-		Str("content_hash", contentHash).
 		Int64("bytes", info.Size()).
 		Dur("duration", time.Since(started)).
 		Msgf("stored %s in content cache", kind)
@@ -826,16 +808,16 @@ func (ca *ClipArchiver) CreateFromOCI(ctx context.Context, opts IndexOCIImageOpt
 		return fmt.Errorf("failed to create remote archive: %w", err)
 	}
 
-	log.Info().Msgf("Created metadata-only clip file: %s", clipOut)
-	log.Info().Msgf("  Files indexed: %d", index.Len())
-	log.Info().Msgf("  Layers: %d", len(layers))
-
-	// Calculate total checkpoint size
 	totalCheckpoints := 0
 	for _, idx := range gzipIdx {
 		totalCheckpoints += len(idx.Checkpoints)
 	}
-	log.Info().Msgf("  Gzip checkpoints: %d", totalCheckpoints)
+	log.Debug().
+		Str("path", clipOut).
+		Int("files", index.Len()).
+		Int("layers", len(layers)).
+		Int("gzip_checkpoints", totalCheckpoints).
+		Msg("created metadata-only clip file")
 
 	return nil
 }
@@ -1061,7 +1043,7 @@ func (ca *ClipArchiver) extractImageMetadata(imgInterface interface{}, imageRef 
 		LayersData:    layersData,
 	}
 
-	log.Info().
+	log.Debug().
 		Str("architecture", metadata.Architecture).
 		Str("os", metadata.Os).
 		Time("created", metadata.Created).
