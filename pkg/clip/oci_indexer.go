@@ -358,13 +358,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 
 			log.Info().Msgf("Processing layer %d/%d: %s", i+1, len(layers), layerDigestStr)
 
-			compressedRC, err := layer.Compressed()
-			if err != nil {
-				return fmt.Errorf("failed to get compressed layer: %w", err)
-			}
-
-			artifact, err := ca.indexLayerToArtifact(gctx, compressedRC, layerDigestStr, opts)
-			compressedRC.Close()
+			artifact, err := ca.indexLayerFromBestSource(gctx, layer, layerDigestStr, opts)
 			if err != nil {
 				return fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
 			}
@@ -574,6 +568,13 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 }
 
 func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, contentCache storage.ContentCache, filePath, decompressedHash, layerDigest string) error {
+	return ca.storeLayerBlobInContentCache(ctx, contentCache, filePath, decompressedHash, layerDigest, "indexed layer")
+}
+
+// storeLayerBlobInContentCache stores a file's bytes in the content cache
+// under the given content hash, skipping the store if a size-aware existence
+// check reports the blob is already complete.
+func (ca *ClipArchiver) storeLayerBlobInContentCache(ctx context.Context, contentCache storage.ContentCache, filePath, contentHash, layerDigest, kind string) error {
 	if contentCache == nil {
 		return nil
 	}
@@ -585,13 +586,13 @@ func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, con
 	var existsErr error
 	if sizeCache, ok := contentCache.(storage.ContentCacheExistsWithSize); ok {
 		if info, err := os.Stat(filePath); err == nil {
-			exists, existsErr = sizeCache.ContentExistsWithSize(decompressedHash, info.Size(), struct{ RoutingKey string }{RoutingKey: decompressedHash})
+			exists, existsErr = sizeCache.ContentExistsWithSize(contentHash, info.Size(), struct{ RoutingKey string }{RoutingKey: contentHash})
 			checkedExists = true
 		}
 	}
 	if !checkedExists {
 		if existsCache, ok := contentCache.(storage.ContentCacheExists); ok {
-			exists, existsErr = existsCache.ContentExists(decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+			exists, existsErr = existsCache.ContentExists(contentHash, struct{ RoutingKey string }{RoutingKey: contentHash})
 			checkedExists = true
 		}
 	}
@@ -600,41 +601,41 @@ func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, con
 			log.Warn().
 				Err(existsErr).
 				Str("layer_digest", layerDigest).
-				Str("decompressed_hash", decompressedHash).
-				Msg("failed to check indexed layer content cache")
+				Str("content_hash", contentHash).
+				Msgf("failed to check %s content cache", kind)
 		} else if exists {
 			log.Info().
 				Str("layer_digest", layerDigest).
-				Str("decompressed_hash", decompressedHash).
-				Msg("indexed layer already present in content cache")
+				Str("content_hash", contentHash).
+				Msgf("%s already present in content cache", kind)
 			return nil
 		}
 	}
 
 	if localStore, ok := contentCache.(storage.ContentCacheStoreLocalPath); ok && localStore != nil {
-		actualHash, err := localStore.StoreContentFromLocalPath(filePath, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+		actualHash, err := localStore.StoreContentFromLocalPath(filePath, contentHash, struct{ RoutingKey string }{RoutingKey: contentHash})
 		if err != nil {
 			return err
 		}
-		if actualHash != "" && actualHash != decompressedHash {
-			return fmt.Errorf("indexed layer content cache hash mismatch: expected %s, got %s", decompressedHash, actualHash)
+		if actualHash != "" && actualHash != contentHash {
+			return fmt.Errorf("%s content cache hash mismatch: expected %s, got %s", kind, contentHash, actualHash)
 		}
 		log.Info().
 			Str("layer_digest", layerDigest).
-			Str("decompressed_hash", decompressedHash).
-			Msg("stored indexed layer in content cache")
+			Str("content_hash", contentHash).
+			Msgf("stored %s in content cache", kind)
 		return nil
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to open indexed layer temp file: %w", err)
+		return fmt.Errorf("failed to open %s temp file: %w", kind, err)
 	}
 	defer file.Close()
 
 	info, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("failed to stat indexed layer temp file: %w", err)
+		return fmt.Errorf("failed to stat %s temp file: %w", kind, err)
 	}
 
 	storeCtx, cancel := context.WithCancel(ctx)
@@ -669,7 +670,7 @@ func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, con
 	}()
 
 	started := time.Now()
-	actualHash, storeErr := contentCache.StoreContent(chunks, decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+	actualHash, storeErr := contentCache.StoreContent(chunks, contentHash, struct{ RoutingKey string }{RoutingKey: contentHash})
 	cancel()
 	readErr := <-readErrCh
 	if storeErr != nil {
@@ -678,16 +679,16 @@ func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, con
 	if readErr != nil {
 		return readErr
 	}
-	if actualHash != "" && actualHash != decompressedHash {
-		return fmt.Errorf("indexed layer content cache hash mismatch: expected %s, got %s", decompressedHash, actualHash)
+	if actualHash != "" && actualHash != contentHash {
+		return fmt.Errorf("%s content cache hash mismatch: expected %s, got %s", kind, contentHash, actualHash)
 	}
 
 	log.Info().
 		Str("layer_digest", layerDigest).
-		Str("decompressed_hash", decompressedHash).
+		Str("content_hash", contentHash).
 		Int64("bytes", info.Size()).
 		Dur("duration", time.Since(started)).
-		Msg("stored indexed layer in content cache")
+		Msgf("stored %s in content cache", kind)
 
 	return nil
 }
