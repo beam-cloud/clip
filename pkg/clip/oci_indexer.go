@@ -2,7 +2,9 @@ package clip
 
 import (
 	"archive/tar"
-	"compress/gzip"
+	// klauspost/compress gunzip is substantially faster than stdlib and is the
+	// dominant cost when indexing layers (decompress + hash of every byte)
+	"github.com/klauspost/compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"

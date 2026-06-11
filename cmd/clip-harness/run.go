@@ -93,6 +93,30 @@ func indexImage(ctx context.Context, label, imageRef, outDir string, layerCache 
 	return result, nil
 }
 
+// uncompressedBytes sums the decompressed sizes of all layers, derived from
+// each layer's final gzip checkpoint (recorded at end-of-stream).
+func (r *indexResult) uncompressedBytes() int64 {
+	info, ok := r.metadata.StorageInfo.(common.OCIStorageInfo)
+	if !ok {
+		return 0
+	}
+	var total int64
+	for _, idx := range info.GzipIdxByLayer {
+		if idx != nil && len(idx.Checkpoints) > 0 {
+			total += idx.Checkpoints[len(idx.Checkpoints)-1].UOff
+		}
+	}
+	return total
+}
+
+func (r *indexResult) layerCount() int {
+	info, ok := r.metadata.StorageInfo.(common.OCIStorageInfo)
+	if !ok {
+		return 0
+	}
+	return len(info.Layers)
+}
+
 // compareRuns asserts two runs produced identical results. The index region
 // must be byte-identical; storage info is compared by deep equality because
 // gob encodes its maps in nondeterministic key order.

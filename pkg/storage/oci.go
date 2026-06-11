@@ -1,7 +1,9 @@
 package storage
 
 import (
-	"compress/gzip"
+	// klauspost/compress gunzip is substantially faster than stdlib for
+	// full-layer decompression on cache misses
+	"github.com/klauspost/compress/gzip"
 	"context"
 	"errors"
 	"fmt"
