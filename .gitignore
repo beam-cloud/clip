@@ -7,4 +7,4 @@ testfs/*
 *.gob
 *.clip
 *.rclip
-*.pprof
+*.pprofbin/clip-harness-stdgzip
