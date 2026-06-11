@@ -1,5 +1,7 @@
 bin/clip
 bin/e2e
+bin/clip-harness
+/clip-harness
 tmp/*
 testfs/*
 *.gob
