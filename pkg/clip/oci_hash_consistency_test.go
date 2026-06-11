@@ -193,16 +193,17 @@ func TestRealLayerHashConsistency(t *testing.T) {
 	// Test using the actual indexing code
 	archiver := &ClipArchiver{}
 	index := archiver.newIndex()
-	
-	gzipIndex, indexedHash, err := archiver.indexLayerOptimized(
+
+	artifact, err := archiver.indexLayerToArtifact(
 		context.Background(),
 		io.NopCloser(bytes.NewReader(compressedData)),
 		"sha256:test123",
-		index,
 		IndexOCIImageOptions{CheckpointMiB: 2},
 	)
 	require.NoError(t, err)
-	require.NotNil(t, gzipIndex)
+	require.NotNil(t, artifact)
+	archiver.applyLayerArtifact(index, artifact)
+	indexedHash := artifact.DecompressedHash
 	t.Logf("Indexed hash: %s", indexedHash)
 
 	// Now decompress and verify

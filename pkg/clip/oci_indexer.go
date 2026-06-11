@@ -25,6 +25,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	log "github.com/rs/zerolog/log"
 	"github.com/tidwall/btree"
+	"golang.org/x/sync/errgroup"
 )
 
 // OCIIndexProgress represents a progress update during OCI image indexing
@@ -39,15 +40,19 @@ type OCIIndexProgress struct {
 
 // IndexOCIImageOptions configures the OCI indexer
 type IndexOCIImageOptions struct {
-	ImageRef        string                            // Source image to index (can be local)
-	StorageImageRef string                            // Optional: image reference to store in metadata (defaults to ImageRef)
-	CheckpointMiB   int64                             // Checkpoint every N MiB (default 2)
-	CredProvider    common.RegistryCredentialProvider // optional credential provider for registry authentication
-	ProgressChan    chan<- OCIIndexProgress           // optional channel for progress updates
-	Platform        *v1.Platform                      // Target platform (defaults to linux/runtime.GOARCH)
-	ContentCache    storage.ContentCache              // optional remote cache for fully decompressed layers
-	ContentCacheDir string                            // optional temp directory for cache upload spooling
+	ImageRef         string                            // Source image to index (can be local)
+	StorageImageRef  string                            // Optional: image reference to store in metadata (defaults to ImageRef)
+	CheckpointMiB    int64                             // Checkpoint every N MiB (default 2)
+	CredProvider     common.RegistryCredentialProvider // optional credential provider for registry authentication
+	ProgressChan     chan<- OCIIndexProgress           // optional channel for progress updates
+	Platform         *v1.Platform                      // Target platform (defaults to linux/runtime.GOARCH)
+	ContentCache     storage.ContentCache              // optional remote cache for fully decompressed layers
+	ContentCacheDir  string                            // optional temp directory for cache upload spooling
+	LayerIndexCache  storage.LayerIndexCache           // optional cache of per-layer index artifacts (skips pull+index on hit)
+	IndexConcurrency int                               // max layers indexed concurrently (default 4)
 }
+
+const defaultIndexConcurrency = 4
 
 const indexedLayerContentCacheChunkSize = 4 * 1024 * 1024
 
@@ -252,8 +257,13 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	gzipIdx = make(map[string]*common.GzipIndex)
 	decompressedHashes = make(map[string]string)
 
-	// Create root node with complete FUSE attributes
-	now := time.Now()
+	// Create the root node with deterministic timestamps derived from the
+	// image config's created time, so indexing the same image digest always
+	// produces byte-identical metadata.
+	rootTime := time.Unix(0, 0)
+	if imageMetadata != nil && !imageMetadata.Created.IsZero() {
+		rootTime = imageMetadata.Created
+	}
 	root := &common.ClipNode{
 		Path:     "/",
 		NodeType: common.DirNode,
@@ -261,12 +271,12 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 			Ino:       1,
 			Size:      0,
 			Blocks:    0,
-			Atime:     uint64(now.Unix()),
-			Atimensec: uint32(now.Nanosecond()),
-			Mtime:     uint64(now.Unix()),
-			Mtimensec: uint32(now.Nanosecond()),
-			Ctime:     uint64(now.Unix()),
-			Ctimensec: uint32(now.Nanosecond()),
+			Atime:     uint64(rootTime.Unix()),
+			Atimensec: uint32(rootTime.Nanosecond()),
+			Mtime:     uint64(rootTime.Unix()),
+			Mtimensec: uint32(rootTime.Nanosecond()),
+			Ctime:     uint64(rootTime.Unix()),
+			Ctimensec: uint32(rootTime.Nanosecond()),
 			Mode:      uint32(syscall.S_IFDIR | 0755),
 			Nlink:     2, // Directories start with link count of 2 (. and ..)
 			Owner: fuse.Owner{
@@ -277,48 +287,116 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	}
 	index.Set(root)
 
-	log.Info().Msgf("Indexing %d layers from %s", len(layers), opts.ImageRef)
-
-	// Process each layer in order (bottom to top)
-	for i, layer := range layers {
+	// Resolve all layer digests up front (cheap; manifest is already fetched)
+	for _, layer := range layers {
 		digest, err := layer.Digest()
 		if err != nil {
 			return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to get layer digest: %w", err)
 		}
+		layerDigests = append(layerDigests, digest.String())
+	}
 
-		layerDigestStr := digest.String()
-		layerDigests = append(layerDigests, layerDigestStr)
+	log.Info().Msgf("Indexing %d layers from %s", len(layers), opts.ImageRef)
 
-		log.Info().Msgf("Processing layer %d/%d: %s", i+1, len(layers), layerDigestStr)
+	// Index layers concurrently. Each layer produces a self-contained,
+	// deterministic artifact; artifacts are merged sequentially in layer
+	// order below, which preserves overlay (whiteout/replace) semantics.
+	artifacts := make([]*LayerArtifact, len(layers))
+	cacheHits := make([]bool, len(layers))
 
-		// Send progress update: starting layer
-		if opts.ProgressChan != nil {
-			opts.ProgressChan <- OCIIndexProgress{
-				LayerIndex:  i + 1,
-				TotalLayers: len(layers),
-				LayerDigest: layerDigestStr,
-				Stage:       "starting",
-				Message:     fmt.Sprintf("Processing layer %d/%d", i+1, len(layers)),
+	concurrency := opts.IndexConcurrency
+	if concurrency <= 0 {
+		concurrency = defaultIndexConcurrency
+	}
+	if concurrency > len(layers) {
+		concurrency = len(layers)
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(concurrency)
+
+	for i := range layers {
+		i := i
+		layer := layers[i]
+		layerDigestStr := layerDigests[i]
+
+		g.Go(func() error {
+			if opts.ProgressChan != nil {
+				opts.ProgressChan <- OCIIndexProgress{
+					LayerIndex:  i + 1,
+					TotalLayers: len(layers),
+					LayerDigest: layerDigestStr,
+					Stage:       "starting",
+					Message:     fmt.Sprintf("Processing layer %d/%d", i+1, len(layers)),
+				}
 			}
+
+			// Fast path: reuse a cached layer index artifact and skip the
+			// registry pull + decompression entirely.
+			cacheKey := LayerArtifactCacheKey(layerDigestStr, opts.CheckpointMiB)
+			if opts.LayerIndexCache != nil {
+				data, err := opts.LayerIndexCache.GetLayerIndex(gctx, cacheKey)
+				if err != nil {
+					log.Warn().Err(err).Str("layer_digest", layerDigestStr).Msg("layer index cache lookup failed")
+				} else if data != nil {
+					artifact, err := DecodeLayerArtifact(data, layerDigestStr, opts.CheckpointMiB)
+					if err != nil {
+						log.Warn().Err(err).Str("layer_digest", layerDigestStr).Msg("discarding invalid cached layer index artifact")
+					} else {
+						artifacts[i] = artifact
+						cacheHits[i] = true
+						log.Info().
+							Str("layer_digest", layerDigestStr).
+							Int("entries", len(artifact.Entries)).
+							Msg("layer index cache hit: skipping layer pull")
+						return nil
+					}
+				}
+			}
+
+			log.Info().Msgf("Processing layer %d/%d: %s", i+1, len(layers), layerDigestStr)
+
+			compressedRC, err := layer.Compressed()
+			if err != nil {
+				return fmt.Errorf("failed to get compressed layer: %w", err)
+			}
+
+			artifact, err := ca.indexLayerToArtifact(gctx, compressedRC, layerDigestStr, opts)
+			compressedRC.Close()
+			if err != nil {
+				return fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
+			}
+			artifacts[i] = artifact
+
+			if opts.LayerIndexCache != nil {
+				data, err := EncodeLayerArtifact(artifact)
+				if err != nil {
+					log.Warn().Err(err).Str("layer_digest", layerDigestStr).Msg("failed to encode layer index artifact")
+				} else if err := opts.LayerIndexCache.PutLayerIndex(gctx, cacheKey, data); err != nil {
+					log.Warn().Err(err).Str("layer_digest", layerDigestStr).Msg("failed to store layer index artifact in cache")
+				}
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, nil, nil, nil, "", "", "", nil, err
+	}
+
+	// Merge artifacts strictly in layer order (bottom to top). This is the
+	// only step that mutates the shared index, so the result is identical to
+	// sequential indexing regardless of the concurrency above.
+	for i, artifact := range artifacts {
+		layerDigestStr := layerDigests[i]
+		ca.applyLayerArtifact(index, artifact)
+
+		gzipIdx[layerDigestStr] = &common.GzipIndex{
+			LayerDigest: layerDigestStr,
+			Checkpoints: artifact.Checkpoints,
 		}
+		decompressedHashes[layerDigestStr] = artifact.DecompressedHash
 
-		// Get compressed layer stream
-		compressedRC, err := layer.Compressed()
-		if err != nil {
-			return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to get compressed layer: %w", err)
-		}
-
-		// Index this layer with optimizations
-		gzipIndex, decompressedHash, err := ca.indexLayerOptimized(ctx, compressedRC, layerDigestStr, index, opts)
-		compressedRC.Close()
-		if err != nil {
-			return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
-		}
-
-		gzipIdx[layerDigestStr] = gzipIndex
-		decompressedHashes[layerDigestStr] = decompressedHash
-
-		// Send progress update: completed layer
 		if opts.ProgressChan != nil {
 			opts.ProgressChan <- OCIIndexProgress{
 				LayerIndex:   i + 1,
@@ -331,31 +409,43 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		}
 	}
 
-	log.Info().Msgf("Successfully indexed image with %d files", index.Len())
+	cachedLayers := 0
+	for _, hit := range cacheHits {
+		if hit {
+			cachedLayers++
+		}
+	}
+	log.Info().
+		Int("layers", len(layers)).
+		Int("layer_index_cache_hits", cachedLayers).
+		Int("files", index.Len()).
+		Msg("Successfully indexed image")
 
 	return index, layerDigests, gzipIdx, decompressedHashes, registryURL, repository, reference, imageMetadata, nil
 }
 
-// indexLayerOptimized processes a single layer using streaming I/O with zero memory overhead.
+// indexLayerToArtifact processes a single layer using streaming I/O with zero memory overhead.
 //
 // Performance characteristics:
 //   - Zero-copy streaming: TeeReader hashes data as it flows to tar.Reader
 //   - Constant memory: O(checkpoint_size) ~2MB, independent of layer size
 //   - Single pass: Reads compressed stream exactly once
 //
-// Returns gzip index and SHA256 hash of complete decompressed stream.
-func (ca *ClipArchiver) indexLayerOptimized(
+// The result is a self-contained, deterministic LayerArtifact (ordered entry
+// operations + gzip checkpoints + decompressed stream hash) that can be cached
+// keyed by the layer digest and replayed against an index with
+// applyLayerArtifact.
+func (ca *ClipArchiver) indexLayerToArtifact(
 	ctx context.Context,
 	compressedRC io.ReadCloser,
 	layerDigest string,
-	index *btree.BTree,
 	opts IndexOCIImageOptions,
-) (*common.GzipIndex, string, error) {
+) (*LayerArtifact, error) {
 	compressedCounter := &countingReader{r: compressedRC}
 
 	gzr, err := gzip.NewReader(compressedCounter)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to create gzip reader: %w", err)
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer gzr.Close()
 
@@ -382,6 +472,8 @@ func (ca *ClipArchiver) indexLayerOptimized(
 	checkpointInterval := opts.CheckpointMiB * 1024 * 1024
 	lastCheckpoint := int64(0)
 
+	entries := make([]LayerEntry, 0, 256)
+
 	// Process tar entries
 	for {
 		hdr, err := tr.Next()
@@ -389,7 +481,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			break
 		}
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to read tar header: %w", err)
+			return nil, fmt.Errorf("failed to read tar header: %w", err)
 		}
 
 		// Record checkpoint periodically (before processing file data)
@@ -407,22 +499,30 @@ func (ca *ClipArchiver) indexLayerOptimized(
 		cleanPath = path.Clean(cleanPath)
 
 		// Handle OCI whiteouts (fast path: check prefix before full processing)
-		if ca.handleWhiteout(index, cleanPath) {
+		if entry, isWhiteout := whiteoutEntry(cleanPath); isWhiteout {
+			entries = append(entries, entry)
 			continue
 		}
 
 		// Process based on type (most common first for branch prediction)
 		switch hdr.Typeflag {
 		case tar.TypeReg, tar.TypeRegA:
-			if err := ca.processRegularFile(index, tr, hdr, cleanPath, layerDigest, compressedCounter, uncompressedCounter, &checkpoints, &lastCheckpoint); err != nil {
-				return nil, "", err
+			entry, err := ca.fileEntry(tr, hdr, cleanPath, layerDigest, compressedCounter, uncompressedCounter, &checkpoints, &lastCheckpoint)
+			if err != nil {
+				return nil, err
 			}
+			entries = append(entries, entry)
 		case tar.TypeDir:
-			ca.processDirectory(index, hdr, cleanPath, layerDigest)
+			entries = append(entries, ca.directoryEntry(hdr, cleanPath, layerDigest))
 		case tar.TypeSymlink:
-			ca.processSymlink(index, hdr, cleanPath, layerDigest)
+			entries = append(entries, ca.symlinkEntry(hdr, cleanPath, layerDigest))
 		case tar.TypeLink:
-			ca.processHardLink(index, hdr, cleanPath)
+			targetPath := path.Clean("/" + strings.TrimPrefix(hdr.Linkname, "./"))
+			entries = append(entries, LayerEntry{
+				Kind:   LayerEntryHardLink,
+				Path:   cleanPath,
+				Target: targetPath,
+			})
 		}
 	}
 
@@ -435,7 +535,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 	// These bytes ARE present in decompressed stream and MUST be hashed to match disk cache.
 	_, err = io.Copy(io.Discard, uncompressedCounter)
 	if err != nil && err != io.EOF {
-		return nil, "", fmt.Errorf("failed to consume trailing tar bytes: %w", err)
+		return nil, fmt.Errorf("failed to consume trailing tar bytes: %w", err)
 	}
 
 	// Finalize hash (includes all bytes: file contents + tar headers + padding)
@@ -443,7 +543,7 @@ func (ca *ClipArchiver) indexLayerOptimized(
 
 	if opts.ContentCache != nil && cacheSpool != nil && cacheSpool.err == nil && cacheSpool.path != "" {
 		if err := cacheSpool.close(); err != nil {
-			return nil, "", fmt.Errorf("failed to close layer content cache temp file: %w", err)
+			return nil, fmt.Errorf("failed to close layer content cache temp file: %w", err)
 		}
 
 		if err := ca.storeIndexedLayerInContentCache(ctx, opts.ContentCache, cacheSpool.path, decompressedHash, layerDigest); err != nil {
@@ -460,11 +560,15 @@ func (ca *ClipArchiver) indexLayerOptimized(
 			Msg("skipping indexed layer content cache store after spool write failure")
 	}
 
-	// Return gzip index and decompressed hash
-	return &common.GzipIndex{
-		LayerDigest: layerDigest,
-		Checkpoints: checkpoints,
-	}, decompressedHash, nil
+	return &LayerArtifact{
+		Version:          LayerArtifactVersion,
+		LayerDigest:      layerDigest,
+		CheckpointMiB:    opts.CheckpointMiB,
+		Entries:          entries,
+		Checkpoints:      checkpoints,
+		DecompressedHash: decompressedHash,
+		UncompressedSize: uncompressedCounter.n,
+	}, nil
 }
 
 func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, contentCache storage.ContentCache, filePath, decompressedHash, layerDigest string) error {
@@ -472,11 +576,27 @@ func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, con
 		return nil
 	}
 
-	if existsCache, ok := contentCache.(storage.ContentCacheExists); ok {
-		exists, err := existsCache.ContentExists(decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
-		if err != nil {
+	// Prefer the size-aware completeness check: a positive answer guarantees
+	// the cached layer is complete, so the store can be skipped safely.
+	checkedExists := false
+	var exists bool
+	var existsErr error
+	if sizeCache, ok := contentCache.(storage.ContentCacheExistsWithSize); ok {
+		if info, err := os.Stat(filePath); err == nil {
+			exists, existsErr = sizeCache.ContentExistsWithSize(decompressedHash, info.Size(), struct{ RoutingKey string }{RoutingKey: decompressedHash})
+			checkedExists = true
+		}
+	}
+	if !checkedExists {
+		if existsCache, ok := contentCache.(storage.ContentCacheExists); ok {
+			exists, existsErr = existsCache.ContentExists(decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+			checkedExists = true
+		}
+	}
+	if checkedExists {
+		if existsErr != nil {
 			log.Warn().
-				Err(err).
+				Err(existsErr).
 				Str("layer_digest", layerDigest).
 				Str("decompressed_hash", decompressedHash).
 				Msg("failed to check indexed layer content cache")
@@ -570,28 +690,26 @@ func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, con
 	return nil
 }
 
-// handleWhiteout processes OCI whiteout files
-func (ca *ClipArchiver) handleWhiteout(index *btree.BTree, fullPath string) bool {
+// whiteoutEntry detects OCI whiteout files and returns the corresponding
+// layer entry operation.
+func whiteoutEntry(fullPath string) (LayerEntry, bool) {
 	dir := path.Dir(fullPath)
 	base := path.Base(fullPath)
 
 	// Opaque whiteout: .wh..wh..opq
 	if base == ".wh..wh..opq" {
-		// Remove all entries under this directory from lower layers
-		ca.deleteRange(index, dir+"/")
 		log.Debug().Msgf("  Opaque whiteout: %s", dir)
-		return true
+		return LayerEntry{Kind: LayerEntryOpaqueWhiteout, Path: dir}, true
 	}
 
 	// Regular whiteout: .wh.<name>
 	if strings.HasPrefix(base, ".wh.") {
 		victim := path.Join(dir, strings.TrimPrefix(base, ".wh."))
-		ca.deleteNode(index, victim)
 		log.Debug().Msgf("  Whiteout: %s", victim)
-		return true
+		return LayerEntry{Kind: LayerEntryWhiteout, Path: victim}, true
 	}
 
-	return false
+	return LayerEntry{}, false
 }
 
 // deleteNode removes a node and all its children from the index
@@ -726,10 +844,9 @@ func (ca *ClipArchiver) addCheckpoint(checkpoints *[]common.GzipCheckpoint, cOff
 	*lastCheckpoint = uOff
 }
 
-// processRegularFile processes a regular file entry from tar.
+// fileEntry processes a regular file entry from tar.
 // Uses io.CopyN for efficient content skipping (streaming, no allocation).
-func (ca *ClipArchiver) processRegularFile(
-	index *btree.BTree,
+func (ca *ClipArchiver) fileEntry(
 	tr *tar.Reader,
 	hdr *tar.Header,
 	cleanPath string,
@@ -738,7 +855,7 @@ func (ca *ClipArchiver) processRegularFile(
 	uncompressedCounter *countingReader,
 	checkpoints *[]common.GzipCheckpoint,
 	lastCheckpoint *int64,
-) error {
+) (LayerEntry, error) {
 	dataStart := uncompressedCounter.n
 
 	// Content-defined checkpoint for large files (>512KB)
@@ -754,10 +871,10 @@ func (ca *ClipArchiver) processRegularFile(
 	if hdr.Size > 0 {
 		n, err := io.CopyN(io.Discard, tr, hdr.Size)
 		if err != nil && err != io.EOF {
-			return fmt.Errorf("failed to skip file content: %w", err)
+			return LayerEntry{}, fmt.Errorf("failed to skip file content: %w", err)
 		}
 		if n != hdr.Size {
-			return fmt.Errorf("incomplete file read: want %d, got %d", hdr.Size, n)
+			return LayerEntry{}, fmt.Errorf("incomplete file read: want %d, got %d", hdr.Size, n)
 		}
 	}
 
@@ -788,13 +905,12 @@ func (ca *ClipArchiver) processRegularFile(
 		},
 	}
 
-	index.Set(node)
 	log.Debug().Str("path", cleanPath).Int64("size", hdr.Size).Int64("uoff", dataStart).Msg("File")
-	return nil
+	return LayerEntry{Kind: LayerEntryNode, Node: node}, nil
 }
 
-// processSymlink processes a symlink entry from tar
-func (ca *ClipArchiver) processSymlink(index *btree.BTree, hdr *tar.Header, cleanPath, layerDigest string) {
+// symlinkEntry processes a symlink entry from tar
+func (ca *ClipArchiver) symlinkEntry(hdr *tar.Header, cleanPath, layerDigest string) LayerEntry {
 	target := hdr.Linkname
 	if target == "" {
 		log.Warn().Msgf("Empty symlink target for %s", cleanPath)
@@ -823,12 +939,12 @@ func (ca *ClipArchiver) processSymlink(index *btree.BTree, hdr *tar.Header, clea
 		},
 	}
 
-	index.Set(node)
 	log.Debug().Str("path", cleanPath).Str("target", target).Msg("Symlink")
+	return LayerEntry{Kind: LayerEntryNode, Node: node}
 }
 
-// processDirectory processes a directory entry from tar
-func (ca *ClipArchiver) processDirectory(index *btree.BTree, hdr *tar.Header, cleanPath, layerDigest string) {
+// directoryEntry processes a directory entry from tar
+func (ca *ClipArchiver) directoryEntry(hdr *tar.Header, cleanPath, layerDigest string) LayerEntry {
 	node := &common.ClipNode{
 		Path:     cleanPath,
 		NodeType: common.DirNode,
@@ -851,24 +967,8 @@ func (ca *ClipArchiver) processDirectory(index *btree.BTree, hdr *tar.Header, cl
 		},
 	}
 
-	index.Set(node)
 	log.Debug().Str("path", cleanPath).Int64("mode", hdr.Mode).Int64("mtime", hdr.ModTime.Unix()).Msg("Dir")
-}
-
-// processHardLink processes a hard link entry from tar
-func (ca *ClipArchiver) processHardLink(index *btree.BTree, hdr *tar.Header, cleanPath string) {
-	targetPath := path.Clean("/" + strings.TrimPrefix(hdr.Linkname, "./"))
-	targetNode := index.Get(&common.ClipNode{Path: targetPath})
-	if targetNode != nil {
-		tn := targetNode.(*common.ClipNode)
-		node := &common.ClipNode{
-			Path:     cleanPath,
-			NodeType: common.FileNode,
-			Attr:     tn.Attr,
-			Remote:   tn.Remote,
-		}
-		index.Set(node)
-	}
+	return LayerEntry{Kind: LayerEntryNode, Node: node}
 }
 
 // extractImageMetadata extracts comprehensive metadata from an OCI image

@@ -273,15 +273,17 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 
 // CreateFromOCIImageOptions configures OCI image indexing
 type CreateFromOCIImageOptions struct {
-	ImageRef        string      // Source image to index (can be local)
-	StorageImageRef string      // Optional: image reference to store in metadata (defaults to ImageRef)
-	OutputPath      string      // Path for the metadata-only .clip archive
-	CheckpointMiB   int64       // Gzip checkpoint interval
-	CredProvider    interface{} // Optional registry credential provider
-	ProgressChan    chan<- OCIIndexProgress
-	Platform        *v1.Platform
-	ContentCache    storage.ContentCache // Optional cache to warm with decompressed layer streams
-	ContentCacheDir string               // Optional temp directory for layer cache upload spooling
+	ImageRef         string      // Source image to index (can be local)
+	StorageImageRef  string      // Optional: image reference to store in metadata (defaults to ImageRef)
+	OutputPath       string      // Path for the metadata-only .clip archive
+	CheckpointMiB    int64       // Gzip checkpoint interval
+	CredProvider     interface{} // Optional registry credential provider
+	ProgressChan     chan<- OCIIndexProgress
+	Platform         *v1.Platform
+	ContentCache     storage.ContentCache    // Optional cache to warm with decompressed layer streams
+	ContentCacheDir  string                  // Optional temp directory for layer cache upload spooling
+	LayerIndexCache  storage.LayerIndexCache // Optional per-layer index artifact cache (skips pull+index on hit)
+	IndexConcurrency int                     // Max layers indexed concurrently (default 4)
 }
 
 // CreateFromOCIImage creates a metadata-only index (.clip) file from an OCI image
@@ -306,14 +308,16 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 
 	archiver := NewClipArchiver()
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
-		ImageRef:        options.ImageRef,
-		StorageImageRef: options.StorageImageRef,
-		CheckpointMiB:   options.CheckpointMiB,
-		CredProvider:    credProvider,
-		ProgressChan:    options.ProgressChan,
-		Platform:        options.Platform,
-		ContentCache:    options.ContentCache,
-		ContentCacheDir: options.ContentCacheDir,
+		ImageRef:         options.ImageRef,
+		StorageImageRef:  options.StorageImageRef,
+		CheckpointMiB:    options.CheckpointMiB,
+		CredProvider:     credProvider,
+		ProgressChan:     options.ProgressChan,
+		Platform:         options.Platform,
+		ContentCache:     options.ContentCache,
+		ContentCacheDir:  options.ContentCacheDir,
+		LayerIndexCache:  options.LayerIndexCache,
+		IndexConcurrency: options.IndexConcurrency,
 	}, options.OutputPath)
 
 	if err != nil {
