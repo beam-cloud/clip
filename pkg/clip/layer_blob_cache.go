@@ -153,14 +153,22 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 	layer v1.Layer,
 	layerDigest string,
 	opts IndexOCIImageOptions,
-	onBytes func(total int64),
+	compressedBytesTotal int64,
+	onBytes func(uncompressedBytes, compressedBytes int64),
 ) (*LayerArtifact, string, error) {
 	blobKey := compressedLayerCacheKey(layerDigest)
 
 	// Source 1: compressed blob from the content cache
 	if opts.ContentCache != nil {
-		compressedSize, err := layer.Size()
-		if err == nil && contentCacheExistsWithSize(opts.ContentCache, blobKey, compressedSize) {
+		compressedSize := compressedBytesTotal
+		if compressedSize <= 0 {
+			var err error
+			compressedSize, err = layer.Size()
+			if err != nil {
+				log.Debug().Err(err).Str("layer_digest", layerDigest).Msg("failed to get compressed layer size")
+			}
+		}
+		if compressedSize > 0 && contentCacheExistsWithSize(opts.ContentCache, blobKey, compressedSize) {
 			reader := newHashingReadCloser(newContentCacheBlobReader(opts.ContentCache, blobKey, compressedSize))
 			artifact, err := ca.indexLayerToArtifact(ctx, reader, layerDigest, opts, onBytes)
 			if err == nil {
