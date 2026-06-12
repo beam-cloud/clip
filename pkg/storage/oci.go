@@ -1186,17 +1186,25 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 	return nil
 }
 
-// readWithCheckpoint reads data from a compressed layer using gzip checkpoints
-// This enables efficient random access without decompressing the entire layer
+// readWithCheckpoint reads an exact range from a compressed layer without first
+// materializing the whole decompressed layer. The current checkpoint metadata is
+// offset-only; non-zero gzip offsets are not safe restart points without the
+// deflate dictionary, so fall back to the start of the stream unless a real
+// restartable checkpoint exists.
 func (s *OCIClipStorage) readWithCheckpoint(layerDigest string, wantUOffset int64, dest []byte) (int, error) {
-	// Get gzip index for this layer
-	gzipIndex, ok := s.storageInfo.GzipIdxByLayer[layerDigest]
-	if !ok || gzipIndex == nil || len(gzipIndex.Checkpoints) == 0 {
-		return 0, fmt.Errorf("no gzip checkpoints available for layer: %s", layerDigest)
+	var cOff, uOff int64
+	if gzipIndex, ok := s.storageInfo.GzipIdxByLayer[layerDigest]; ok && gzipIndex != nil {
+		cOff, uOff = common.NearestCheckpoint(gzipIndex.Checkpoints, wantUOffset)
 	}
-
-	// Find the nearest checkpoint
-	cOff, uOff := common.NearestCheckpoint(gzipIndex.Checkpoints, wantUOffset)
+	if cOff != 0 {
+		log.Debug().
+			Str("layer_digest", layerDigest).
+			Int64("checkpoint_coff", cOff).
+			Int64("checkpoint_uoff", uOff).
+			Msg("gzip checkpoint is offset-only; using stream start for exact partial read")
+		cOff = 0
+		uOff = 0
+	}
 
 	log.Debug().
 		Str("layer_digest", layerDigest).

@@ -2101,6 +2101,33 @@ func TestCheckpointReadShortReadFails(t *testing.T) {
 	require.Contains(t, err.Error(), "unexpected EOF")
 }
 
+func TestCheckpointReadIgnoresOffsetOnlyRestartPoint(t *testing.T) {
+	prefix := bytes.Repeat([]byte("x"), 3*1024*1024)
+	target := []byte("exact partial read")
+	testData := append(append([]byte{}, prefix...), target...)
+	compressedData := createGzipData(t, testData)
+	digest := v1.Hash{Algorithm: "sha256", Hex: "offset_only_checkpoint"}
+
+	storage := &OCIClipStorage{
+		storageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {
+					LayerDigest: digest.String(),
+					Checkpoints: []common.GzipCheckpoint{{COff: 12345, UOff: int64(len(prefix))}},
+				},
+			},
+		},
+		layerCache:     map[string]v1.Layer{digest.String(): &mockLayer{digest: digest, compressedData: compressedData}},
+		useCheckpoints: true,
+	}
+
+	dest := make([]byte, len(target))
+	n, err := storage.readWithCheckpoint(digest.String(), int64(len(prefix)), dest)
+	require.NoError(t, err)
+	require.Equal(t, len(target), n)
+	require.Equal(t, target, dest)
+}
+
 // TestCheckpointFallback tests that checkpoint mode falls back to full decompression when needed
 func TestCheckpointFallback(t *testing.T) {
 	testData := []byte("Test data for checkpoint fallback")
