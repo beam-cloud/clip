@@ -199,6 +199,7 @@ func TestRealLayerHashConsistency(t *testing.T) {
 		io.NopCloser(bytes.NewReader(compressedData)),
 		"sha256:test123",
 		IndexOCIImageOptions{CheckpointMiB: 2},
+		nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, artifact)
