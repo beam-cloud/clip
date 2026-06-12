@@ -40,6 +40,7 @@ type OCIClipStorage struct {
 	layerWarmMu           sync.Mutex
 	layerWarmOnce         map[string]struct{}
 	checkpointLogMu       sync.Mutex
+	checkpointSuccessOnce map[string]struct{}
 	checkpointFailureOnce map[string]struct{}
 	contentCacheReadAhead *ContentCacheReadAhead
 	layerLimitByHash      map[string]int64
@@ -139,6 +140,7 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		readTraceObserver:     opts.ReadTraceObserver,
 		contentCacheWarmOnce:  make(map[string]struct{}),
 		layerWarmOnce:         make(map[string]struct{}),
+		checkpointSuccessOnce: make(map[string]struct{}),
 		checkpointFailureOnce: make(map[string]struct{}),
 		contentCacheReadAhead: NewContentCacheReadAhead(opts.ContentCache, ContentCacheReadAheadOptions{}),
 		layerLimitByHash:      ociLayerLimitsByHash(opts.Metadata, &storageInfo),
@@ -513,6 +515,7 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 					"storage_mode": "oci",
 				},
 			})
+			s.logCheckpointSuccessOnce(remote.LayerDigest, wantUStart, readLen, n, time.Since(checkpointStart))
 			log.Debug().
 				Str("layer_digest", remote.LayerDigest).
 				Int64("offset", wantUStart).
@@ -1278,6 +1281,29 @@ func (s *OCIClipStorage) readWithCheckpoint(ctx context.Context, layerDigest str
 	return n, nil
 }
 
+func (s *OCIClipStorage) logCheckpointSuccessOnce(layerDigest string, offset int64, length int64, bytesRead int, duration time.Duration) {
+	s.checkpointLogMu.Lock()
+	if s.checkpointSuccessOnce == nil {
+		s.checkpointSuccessOnce = make(map[string]struct{})
+	}
+	if _, logged := s.checkpointSuccessOnce[layerDigest]; logged {
+		s.checkpointLogMu.Unlock()
+		return
+	}
+	s.checkpointSuccessOnce[layerDigest] = struct{}{}
+	s.checkpointLogMu.Unlock()
+
+	checkpointCount := s.checkpointCount(layerDigest)
+	log.Info().
+		Str("layer_digest", layerDigest).
+		Int("checkpoint_count", checkpointCount).
+		Int64("offset", offset).
+		Int64("length", length).
+		Int("bytes_read", bytesRead).
+		Dur("duration", duration).
+		Msg("checkpoint-based decompression served exact range")
+}
+
 func (s *OCIClipStorage) logCheckpointFailureOnce(layerDigest string, offset int64, length int64, err error) {
 	if err == nil {
 		return
@@ -1294,20 +1320,23 @@ func (s *OCIClipStorage) logCheckpointFailureOnce(layerDigest string, offset int
 	s.checkpointFailureOnce[layerDigest] = struct{}{}
 	s.checkpointLogMu.Unlock()
 
-	checkpointCount := 0
-	if s.storageInfo != nil {
-		if gzipIndex, ok := s.storageInfo.GzipIdxByLayer[layerDigest]; ok && gzipIndex != nil {
-			checkpointCount = len(gzipIndex.Checkpoints)
-		}
-	}
-
 	log.Warn().
 		Err(err).
 		Str("layer_digest", layerDigest).
-		Int("checkpoint_count", checkpointCount).
+		Int("checkpoint_count", s.checkpointCount(layerDigest)).
 		Int64("offset", offset).
 		Int64("length", length).
 		Msg("checkpoint-based decompression failed; falling back to full layer decompression")
+}
+
+func (s *OCIClipStorage) checkpointCount(layerDigest string) int {
+	if s.storageInfo == nil {
+		return 0
+	}
+	if gzipIndex, ok := s.storageInfo.GzipIdxByLayer[layerDigest]; ok && gzipIndex != nil {
+		return len(gzipIndex.Checkpoints)
+	}
+	return 0
 }
 
 func (s *OCIClipStorage) Metadata() *common.ClipArchiveMetadata {
