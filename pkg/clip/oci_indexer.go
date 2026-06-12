@@ -131,6 +131,21 @@ func (s *indexedLayerContentCacheSpool) closeAndRemove() {
 	}
 }
 
+// detach closes the spool and transfers ownership of the file to the caller;
+// the usual deferred cleanup will no longer remove it. Returns false if the
+// spool failed at any point.
+func (s *indexedLayerContentCacheSpool) detach() (string, bool) {
+	if s == nil || s.err != nil || s.path == "" {
+		return "", false
+	}
+	if err := s.close(); err != nil {
+		return "", false
+	}
+	path := s.path
+	s.path = ""
+	return path, true
+}
+
 // countingReader tracks bytes read from an io.Reader, optionally invoking a
 // callback with the cumulative count after each read.
 type countingReader struct {
@@ -587,23 +602,17 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 	// Finalize hash (includes all bytes: file contents + tar headers + padding)
 	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
 
-	if opts.ContentCache != nil && cacheSpool != nil && cacheSpool.err == nil && cacheSpool.path != "" {
-		if err := cacheSpool.close(); err != nil {
-			return nil, fmt.Errorf("failed to close layer content cache temp file: %w", err)
-		}
-
-		if err := ca.storeIndexedLayerInContentCache(ctx, opts.ContentCache, cacheSpool.path, decompressedHash, layerDigest); err != nil {
+	// Warm the decompressed layer into the content cache in the background so
+	// the build doesn't block on a potentially large upload
+	if opts.ContentCache != nil && cacheSpool != nil {
+		if path, ok := cacheSpool.detach(); ok {
+			ca.storeLayerBlobAsync(opts.ContentCache, path, decompressedHash, layerDigest, "indexed layer")
+		} else if cacheSpool.err != nil {
 			log.Warn().
-				Err(err).
+				Err(cacheSpool.err).
 				Str("layer_digest", layerDigest).
-				Str("decompressed_hash", decompressedHash).
-				Msg("failed to store indexed layer in content cache")
+				Msg("skipping indexed layer content cache store after spool write failure")
 		}
-	} else if cacheSpool != nil && cacheSpool.err != nil {
-		log.Warn().
-			Err(cacheSpool.err).
-			Str("layer_digest", layerDigest).
-			Msg("skipping indexed layer content cache store after spool write failure")
 	}
 
 	return &LayerArtifact{
@@ -619,6 +628,31 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 
 func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, contentCache storage.ContentCache, filePath, decompressedHash, layerDigest string) error {
 	return ca.storeLayerBlobInContentCache(ctx, contentCache, filePath, decompressedHash, layerDigest, "indexed layer")
+}
+
+// layerWarmStoreTimeout bounds background content cache warm uploads
+const layerWarmStoreTimeout = 15 * time.Minute
+
+// storeLayerBlobAsync uploads a spooled blob to the content cache in the
+// background, then removes the spool file. Cache warms are best-effort and
+// can be large (full layers), so builds never block on them. A detached
+// context is used because the originating build may finish (and cancel its
+// context) before the upload completes.
+func (ca *ClipArchiver) storeLayerBlobAsync(contentCache storage.ContentCache, filePath, contentHash, layerDigest, kind string) {
+	go func() {
+		defer os.Remove(filePath)
+
+		ctx, cancel := context.WithTimeout(context.Background(), layerWarmStoreTimeout)
+		defer cancel()
+
+		if err := ca.storeLayerBlobInContentCache(ctx, contentCache, filePath, contentHash, layerDigest, kind); err != nil {
+			log.Warn().
+				Err(err).
+				Str("layer_digest", layerDigest).
+				Str("content_hash", contentHash).
+				Msgf("failed to store %s in content cache", kind)
+		}
+	}()
 }
 
 // storeLayerBlobInContentCache stores a file's bytes in the content cache

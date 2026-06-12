@@ -208,13 +208,12 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 
 	if blobSpool != nil && blobSpool.err == nil && blobSpool.path != "" {
 		// Drain trailing compressed bytes the gzip reader didn't consume so
-		// the spool contains the complete blob.
+		// the spool contains the complete blob, then warm the cache in the
+		// background so the build doesn't block on the upload.
 		if _, err := io.Copy(io.Discard, source); err != nil {
 			log.Warn().Err(err).Str("layer_digest", layerDigest).Msg("failed to drain compressed layer stream for cache warm")
-		} else if err := blobSpool.close(); err != nil {
-			log.Warn().Err(err).Str("layer_digest", layerDigest).Msg("failed to finalize compressed layer spool")
-		} else if err := ca.storeLayerBlobInContentCache(ctx, opts.ContentCache, blobSpool.path, blobKey, layerDigest, "compressed layer"); err != nil {
-			log.Warn().Err(err).Str("layer_digest", layerDigest).Msg("failed to store compressed layer in content cache")
+		} else if path, ok := blobSpool.detach(); ok {
+			ca.storeLayerBlobAsync(opts.ContentCache, path, blobKey, layerDigest, "compressed layer")
 		}
 	}
 

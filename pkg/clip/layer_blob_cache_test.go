@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -166,8 +167,11 @@ func TestCompressedLayerContentCacheReadThrough(t *testing.T) {
 	mu.Unlock()
 	require.Greater(t, getsAfterCold, 0, "cold run must pull layers from registry")
 
+	// Cache warms are async; wait for the compressed blobs to land
 	for _, d := range layerDigests {
-		assert.True(t, cache.has(compressedLayerCacheKey(d)), "compressed blob %s must be warmed into content cache", d)
+		require.Eventually(t, func() bool {
+			return cache.has(compressedLayerCacheKey(d))
+		}, 10*time.Second, 10*time.Millisecond, "compressed blob %s must be warmed into content cache", d)
 	}
 
 	// Run 2: layers must come from the content cache, not the registry
