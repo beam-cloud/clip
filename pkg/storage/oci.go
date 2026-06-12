@@ -145,6 +145,7 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		Str("cache_dir", diskCacheDir).
 		Str("cred_provider", credProvider.Name()).
 		Bool("content_cache_available", opts.ContentCache != nil && opts.ContentCacheAvailable).
+		Bool("use_checkpoints", opts.UseCheckpoints).
 		Msg("initialized OCI storage with disk cache")
 
 	return storage, nil
