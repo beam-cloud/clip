@@ -213,6 +213,35 @@ func (m *barrierCountingLayer) Calls() int {
 	return m.calls
 }
 
+type blockAfterFirstCompressedLayer struct {
+	*mockLayer
+	mu          sync.Mutex
+	calls       int
+	warmStarted chan struct{}
+	warmRelease chan struct{}
+	once        sync.Once
+}
+
+func (m *blockAfterFirstCompressedLayer) Compressed() (io.ReadCloser, error) {
+	m.mu.Lock()
+	m.calls++
+	call := m.calls
+	m.mu.Unlock()
+
+	if call > 1 {
+		m.once.Do(func() { close(m.warmStarted) })
+		<-m.warmRelease
+	}
+
+	return m.mockLayer.Compressed()
+}
+
+func (m *blockAfterFirstCompressedLayer) Calls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
 // Helper to create gzip-compressed test data
 func createGzipData(t *testing.T, data []byte) []byte {
 	var buf bytes.Buffer
@@ -1968,7 +1997,7 @@ func TestCheckpointBasedReading(t *testing.T) {
 	t.Log("? Checkpoint-based reading test passed!")
 }
 
-func TestCheckpointReadMaterializesContentCache(t *testing.T) {
+func TestCheckpointReadSchedulesBackgroundWarm(t *testing.T) {
 	testData := bytes.Repeat([]byte("checkpoint-cache-"), 1024)
 	compressedData := createGzipData(t, testData)
 	digest := v1.Hash{Algorithm: "sha256", Hex: "checkpoint_cache_store"}
@@ -1991,14 +2020,22 @@ func TestCheckpointReadMaterializesContentCache(t *testing.T) {
 		},
 	}
 	cache := newMockCache()
+	layer := &blockAfterFirstCompressedLayer{
+		mockLayer:   &mockLayer{digest: digest, compressedData: compressedData},
+		warmStarted: make(chan struct{}),
+		warmRelease: make(chan struct{}),
+	}
 	storage := &OCIClipStorage{
 		metadata:              metadata,
 		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
-		layerCache:            map[string]v1.Layer{digest.String(): &mockLayer{digest: digest, compressedData: compressedData}},
+		layerCache:            map[string]v1.Layer{digest.String(): layer},
 		diskCacheDir:          t.TempDir(),
 		contentCache:          cache,
 		contentCacheAvailable: true,
 		useCheckpoints:        true,
+		contentCacheReadAhead: NewContentCacheReadAhead(cache, ContentCacheReadAheadOptions{}),
+		contentCacheWarmOnce:  make(map[string]struct{}),
+		layerWarmOnce:         make(map[string]struct{}),
 	}
 
 	node := &common.ClipNode{
@@ -2014,13 +2051,54 @@ func TestCheckpointReadMaterializesContentCache(t *testing.T) {
 	require.Equal(t, len(dest), n)
 	require.Equal(t, testData[64:64+len(dest)], dest)
 
+	select {
+	case <-layer.warmStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background layer warm did not start")
+	}
+
 	cache.mu.Lock()
-	stored := append([]byte(nil), cache.store[decompressedHash]...)
 	setCalls := cache.setCalls
 	cache.mu.Unlock()
-	require.Equal(t, 1, setCalls)
-	require.Equal(t, testData, stored)
+	require.Equal(t, 0, setCalls, "checkpoint read must not synchronously store the full layer")
+	require.NoFileExists(t, storage.getDecompressedCachePath(decompressedHash))
+
+	close(layer.warmRelease)
+	require.Eventually(t, func() bool {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		return cache.setCalls == 1 && bytes.Equal(cache.store[decompressedHash], testData)
+	}, time.Second, 10*time.Millisecond)
 	require.FileExists(t, storage.getDecompressedCachePath(decompressedHash))
+	require.GreaterOrEqual(t, layer.Calls(), 2)
+}
+
+func TestCheckpointReadShortReadFails(t *testing.T) {
+	testData := []byte("short checkpoint data")
+	compressedData := createGzipData(t, testData)
+	digest := v1.Hash{Algorithm: "sha256", Hex: "checkpoint_short_read"}
+
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {
+					LayerDigest: digest.String(),
+					Checkpoints: []common.GzipCheckpoint{{COff: 0, UOff: 0}},
+				},
+			},
+		},
+	}
+	storage := &OCIClipStorage{
+		metadata:    metadata,
+		storageInfo: metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:  map[string]v1.Layer{digest.String(): &mockLayer{digest: digest, compressedData: compressedData}},
+	}
+
+	dest := make([]byte, len(testData)+1)
+	n, err := storage.readWithCheckpoint(digest.String(), 0, dest)
+	require.Error(t, err)
+	require.Equal(t, len(testData), n)
+	require.Contains(t, err.Error(), "unexpected EOF")
 }
 
 // TestCheckpointFallback tests that checkpoint mode falls back to full decompression when needed

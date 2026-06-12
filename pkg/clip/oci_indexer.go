@@ -2,9 +2,6 @@ package clip
 
 import (
 	"archive/tar"
-	// klauspost/compress gunzip is substantially faster than stdlib and is the
-	// dominant cost when indexing layers (decompress + hash of every byte)
-	"github.com/klauspost/compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +23,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/klauspost/compress/gzip"
 	log "github.com/rs/zerolog/log"
 	"github.com/tidwall/btree"
 	"golang.org/x/sync/errgroup"
@@ -510,20 +508,12 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 	}
 	defer gzr.Close()
 
-	var cacheSpool *indexedLayerContentCacheSpool
-	if opts.ContentCache != nil {
-		cacheSpool = newIndexedLayerContentCacheSpool(opts.ContentCacheDir, layerDigest)
-		defer cacheSpool.closeAndRemove()
-	}
-
 	// Streaming hash computation via TeeReader.
-	// When a content cache is configured, the same decompressed byte stream is
-	// also spooled once so the runtime does not decompress this layer again.
+	// The runtime warms decompressed layers after first access; the build path
+	// keeps indexing strictly streaming so large layers do not pay extra disk
+	// writes just to seed an optional warm cache.
 	hasher := sha256.New()
 	hashWriter := io.Writer(hasher)
-	if cacheSpool != nil {
-		hashWriter = io.MultiWriter(hasher, cacheSpool)
-	}
 	hashingReader := io.TeeReader(gzr, hashWriter)
 	uncompressedCounter := &countingReader{r: hashingReader, onRead: onBytes}
 	tr := tar.NewReader(uncompressedCounter)
@@ -601,19 +591,6 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 
 	// Finalize hash (includes all bytes: file contents + tar headers + padding)
 	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
-
-	// Warm the decompressed layer into the content cache in the background so
-	// the build doesn't block on a potentially large upload
-	if opts.ContentCache != nil && cacheSpool != nil {
-		if path, ok := cacheSpool.detach(); ok {
-			ca.storeLayerBlobAsync(opts.ContentCache, path, decompressedHash, layerDigest, "indexed layer")
-		} else if cacheSpool.err != nil {
-			log.Warn().
-				Err(cacheSpool.err).
-				Str("layer_digest", layerDigest).
-				Msg("skipping indexed layer content cache store after spool write failure")
-		}
-	}
 
 	return &LayerArtifact{
 		Version:          LayerArtifactVersion,

@@ -1,9 +1,6 @@
 package storage
 
 import (
-	// klauspost/compress gunzip is substantially faster than stdlib for
-	// full-layer decompression on cache misses
-	"github.com/klauspost/compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +18,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/klauspost/compress/gzip"
 	log "github.com/rs/zerolog/log"
 )
 
@@ -39,11 +37,17 @@ type OCIClipStorage struct {
 	mu                    sync.RWMutex
 	contentCacheWarmMu    sync.Mutex
 	contentCacheWarmOnce  map[string]struct{}
+	layerWarmMu           sync.Mutex
+	layerWarmOnce         map[string]struct{}
 	contentCacheReadAhead *ContentCacheReadAhead
 	layerLimitByHash      map[string]int64
 }
 
 var globalLayerDecompress = newLayerDecompressGroup()
+
+const maxBackgroundLayerWarms = 2
+
+var backgroundLayerWarmSlots = make(chan struct{}, maxBackgroundLayerWarms)
 
 type layerDecompressGroup struct {
 	mu       sync.Mutex
@@ -132,6 +136,7 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		useCheckpoints:        opts.UseCheckpoints,
 		readTraceObserver:     opts.ReadTraceObserver,
 		contentCacheWarmOnce:  make(map[string]struct{}),
+		layerWarmOnce:         make(map[string]struct{}),
 		contentCacheReadAhead: NewContentCacheReadAhead(opts.ContentCache, ContentCacheReadAheadOptions{}),
 		layerLimitByHash:      ociLayerLimitsByHash(opts.Metadata, &storageInfo),
 	}
@@ -511,13 +516,7 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 				Int("bytes_read", n).
 				Msg("checkpoint-based decompression successful")
 			if s.contentCache != nil && s.contentCacheAvailable && decompressedHash != "" {
-				if _, _, cacheErr := s.ensureLayerCached(ctx, remote.LayerDigest); cacheErr != nil {
-					log.Warn().
-						Err(cacheErr).
-						Str("layer_digest", remote.LayerDigest).
-						Str("decompressed_hash", decompressedHash).
-						Msg("failed to materialize decompressed layer after checkpoint read")
-				}
+				readAttrs["layer_warm"] = s.scheduleLayerDecompressWarm(remote.LayerDigest, "checkpoint_read")
 			}
 			return n, nil
 		} else {
@@ -678,7 +677,7 @@ func (s *OCIClipStorage) readFromDiskCache(layerPath string, offset int64, dest 
 
 	// Read requested data
 	n, err := io.ReadFull(f, dest)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+	if err != nil {
 		return n, fmt.Errorf("failed to read from cache: %w", err)
 	}
 
@@ -768,6 +767,99 @@ func (s *OCIClipStorage) markContentCacheWarmAttempt(decompressedHash string) bo
 	}
 	s.contentCacheWarmOnce[decompressedHash] = struct{}{}
 	return true
+}
+
+func (s *OCIClipStorage) scheduleLayerDecompressWarm(layerDigest string, reason string) string {
+	decompressedHash := s.getDecompressedHash(layerDigest)
+	if layerDigest == "" || decompressedHash == "" {
+		return "skipped_invalid_layer"
+	}
+	if !s.markLayerWarmAttempt(decompressedHash) {
+		return "already_scheduled"
+	}
+
+	s.observeRead(context.Background(), common.ReadTraceEvent{
+		Operation:        "clip.layer_warm_queued",
+		Source:           "background",
+		LayerDigest:      layerDigest,
+		DecompressedHash: decompressedHash,
+		Success:          true,
+		Attrs: map[string]string{
+			"reason": reason,
+		},
+	})
+
+	go s.runLayerDecompressWarm(layerDigest, decompressedHash, reason)
+	return "scheduled"
+}
+
+func (s *OCIClipStorage) markLayerWarmAttempt(decompressedHash string) bool {
+	s.layerWarmMu.Lock()
+	defer s.layerWarmMu.Unlock()
+
+	if s.layerWarmOnce == nil {
+		s.layerWarmOnce = make(map[string]struct{})
+	}
+	if _, ok := s.layerWarmOnce[decompressedHash]; ok {
+		return false
+	}
+	s.layerWarmOnce[decompressedHash] = struct{}{}
+	return true
+}
+
+func (s *OCIClipStorage) unmarkLayerWarmAttempt(decompressedHash string) {
+	s.layerWarmMu.Lock()
+	defer s.layerWarmMu.Unlock()
+	delete(s.layerWarmOnce, decompressedHash)
+}
+
+func (s *OCIClipStorage) runLayerDecompressWarm(layerDigest string, decompressedHash string, reason string) {
+	backgroundLayerWarmSlots <- struct{}{}
+	defer func() { <-backgroundLayerWarmSlots }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	startedAt := time.Now()
+	s.observeRead(ctx, common.ReadTraceEvent{
+		Operation:        "clip.layer_warm_started",
+		Source:           "background",
+		LayerDigest:      layerDigest,
+		DecompressedHash: decompressedHash,
+		StartedAt:        startedAt,
+		Success:          true,
+		Attrs: map[string]string{
+			"reason": reason,
+		},
+	})
+
+	_, _, err := s.ensureLayerCached(ctx, layerDigest)
+	if err != nil {
+		s.unmarkLayerWarmAttempt(decompressedHash)
+		log.Warn().
+			Err(err).
+			Str("layer_digest", layerDigest).
+			Str("decompressed_hash", decompressedHash).
+			Msg("background layer warm failed")
+	}
+
+	eventID := "clip.layer_warm_completed"
+	if err != nil {
+		eventID = "clip.layer_warm_failed"
+	}
+	s.observeRead(ctx, common.ReadTraceEvent{
+		Operation:        eventID,
+		Source:           "background",
+		LayerDigest:      layerDigest,
+		DecompressedHash: decompressedHash,
+		StartedAt:        startedAt,
+		Duration:         time.Since(startedAt),
+		Success:          err == nil,
+		Error:            errorString(err),
+		Attrs: map[string]string{
+			"reason": reason,
+		},
+	})
 }
 
 func contentCacheErrorKind(err error) string {
@@ -1159,7 +1251,7 @@ func (s *OCIClipStorage) readWithCheckpoint(layerDigest string, wantUOffset int6
 
 	// Read the requested data
 	n, err := io.ReadFull(gzr, dest)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+	if err != nil {
 		return n, fmt.Errorf("failed to read from gzip stream: %w", err)
 	}
 
