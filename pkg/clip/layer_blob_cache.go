@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/beam-cloud/clip/pkg/storage"
@@ -208,12 +209,17 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 
 	if blobSpool != nil && blobSpool.err == nil && blobSpool.path != "" {
 		// Drain trailing compressed bytes the gzip reader didn't consume so
-		// the spool contains the complete blob, then warm the cache in the
-		// background so the build doesn't block on the upload.
+		// the spool contains the complete blob. Store this synchronously:
+		// these compressed blobs are what the build path uses to hydrate
+		// buildah from the distributed cache on subsequent builds, and build
+		// workers often exit immediately after indexing completes.
 		if _, err := io.Copy(io.Discard, source); err != nil {
 			log.Warn().Err(err).Str("layer_digest", layerDigest).Msg("failed to drain compressed layer stream for cache warm")
 		} else if path, ok := blobSpool.detach(); ok {
-			ca.storeLayerBlobAsync(opts.ContentCache, path, blobKey, layerDigest, "compressed layer")
+			defer os.Remove(path)
+			if err := ca.storeLayerBlobInContentCache(ctx, opts.ContentCache, path, blobKey, layerDigest, "compressed layer"); err != nil {
+				log.Warn().Err(err).Str("layer_digest", layerDigest).Msg("failed to store compressed layer in content cache")
+			}
 		}
 	}
 
