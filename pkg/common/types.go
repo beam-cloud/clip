@@ -121,7 +121,12 @@ func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
 	return entries
 }
 
-// Gzip decompression index (zran-style checkpoints)
+// Gzip decompression index.
+//
+// These checkpoints currently store only compressed and uncompressed offsets.
+// They are useful for locating nearby byte positions, but they are not
+// independently restartable deflate checkpoints because they do not include the
+// inflater bit offset and sliding dictionary needed for true zran-style seek.
 type GzipCheckpoint struct {
 	COff int64 // Compressed offset
 	UOff int64 // Uncompressed offset
@@ -129,7 +134,7 @@ type GzipCheckpoint struct {
 
 type GzipIndex struct {
 	LayerDigest string
-	Checkpoints []GzipCheckpoint // Checkpoint every ~2–4 MiB of uncompressed output
+	Checkpoints []GzipCheckpoint // Offset checkpoints every ~2-4 MiB of uncompressed output
 }
 
 // Zstd frame index (P1 - future)
@@ -158,9 +163,8 @@ func NearestCheckpoint(checkpoints []GzipCheckpoint, wantU int64) (cOff, uOff in
 		return checkpoints[i].UOff > wantU
 	}) - 1
 
-	// If all checkpoints are after wantU, use the first one
 	if i < 0 {
-		i = 0
+		return 0, 0
 	}
 
 	return checkpoints[i].COff, checkpoints[i].UOff

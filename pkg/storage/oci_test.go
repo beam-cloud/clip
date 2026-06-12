@@ -2128,6 +2128,33 @@ func TestCheckpointReadIgnoresOffsetOnlyRestartPoint(t *testing.T) {
 	require.Equal(t, target, dest)
 }
 
+func TestCheckpointReadIgnoresMalformedStreamStartCheckpoint(t *testing.T) {
+	prefix := bytes.Repeat([]byte("x"), 1024)
+	target := []byte("target")
+	testData := append(append([]byte{}, prefix...), target...)
+	compressedData := createGzipData(t, testData)
+	digest := v1.Hash{Algorithm: "sha256", Hex: "malformed_stream_start_checkpoint"}
+
+	storage := &OCIClipStorage{
+		storageInfo: &common.OCIStorageInfo{
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {
+					LayerDigest: digest.String(),
+					Checkpoints: []common.GzipCheckpoint{{COff: 0, UOff: int64(len(prefix))}},
+				},
+			},
+		},
+		layerCache:     map[string]v1.Layer{digest.String(): &mockLayer{digest: digest, compressedData: compressedData}},
+		useCheckpoints: true,
+	}
+
+	dest := make([]byte, len(target))
+	n, err := storage.readWithCheckpoint(context.Background(), digest.String(), int64(len(prefix)), dest)
+	require.NoError(t, err)
+	require.Equal(t, len(target), n)
+	require.Equal(t, target, dest)
+}
+
 // TestCheckpointFallback tests that checkpoint mode falls back to full decompression when needed
 func TestCheckpointFallback(t *testing.T) {
 	testData := []byte("Test data for checkpoint fallback")
@@ -2277,7 +2304,7 @@ func TestNearestCheckpoint(t *testing.T) {
 		expectedUOff int64
 		description  string
 	}{
-		{"Before first checkpoint", 0, 100, 0, "should use first checkpoint"},
+		{"At first checkpoint", 0, 100, 0, "should use first checkpoint"},
 		{"Exactly at checkpoint", 2 * 1024 * 1024, 200, 2 * 1024 * 1024, "should use exact checkpoint"},
 		{"Between checkpoints", 3 * 1024 * 1024, 200, 2 * 1024 * 1024, "should use previous checkpoint"},
 		{"After last checkpoint", 10 * 1024 * 1024, 400, 6 * 1024 * 1024, "should use last checkpoint"},
@@ -2291,6 +2318,17 @@ func TestNearestCheckpoint(t *testing.T) {
 			t.Logf("%s: wantU=%d -> cOff=%d, uOff=%d", tc.description, tc.wantUOffset, cOff, uOff)
 		})
 	}
+}
+
+func TestNearestCheckpointBeforeFirstReturnsStreamStart(t *testing.T) {
+	checkpoints := []common.GzipCheckpoint{
+		{COff: 200, UOff: 2 * 1024 * 1024},
+		{COff: 300, UOff: 4 * 1024 * 1024},
+	}
+
+	cOff, uOff := common.NearestCheckpoint(checkpoints, 1024)
+	assert.Equal(t, int64(0), cOff, "compressed offset should fall back to stream start")
+	assert.Equal(t, int64(0), uOff, "uncompressed offset should fall back to stream start")
 }
 
 // TestCheckpointEmptyList tests NearestCheckpoint with empty checkpoint list

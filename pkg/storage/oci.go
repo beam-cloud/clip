@@ -1196,12 +1196,12 @@ func (s *OCIClipStorage) readWithCheckpoint(ctx context.Context, layerDigest str
 	if gzipIndex, ok := s.storageInfo.GzipIdxByLayer[layerDigest]; ok && gzipIndex != nil {
 		cOff, uOff = common.NearestCheckpoint(gzipIndex.Checkpoints, wantUOffset)
 	}
-	if cOff != 0 {
+	if cOff != 0 || uOff != 0 {
 		log.Debug().
 			Str("layer_digest", layerDigest).
 			Int64("checkpoint_coff", cOff).
 			Int64("checkpoint_uoff", uOff).
-			Msg("gzip checkpoint is offset-only; using stream start for exact partial read")
+			Msg("gzip checkpoint is not restartable; using stream start for exact partial read")
 		cOff = 0
 		uOff = 0
 	}
