@@ -486,7 +486,7 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 	// Cache miss - try checkpoint-based decompression if enabled
 	if s.useCheckpoints {
 		checkpointStart := time.Now()
-		if n, err := s.readWithCheckpoint(remote.LayerDigest, wantUStart, dest[:readLen]); err == nil {
+		if n, err := s.readWithCheckpoint(ctx, remote.LayerDigest, wantUStart, dest[:readLen]); err == nil {
 			readSource = "checkpoint"
 			readAttrs["cache_result"] = "miss"
 			readAttrs["cache_tier"] = "checkpoint"
@@ -1191,7 +1191,7 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 // offset-only; non-zero gzip offsets are not safe restart points without the
 // deflate dictionary, so fall back to the start of the stream unless a real
 // restartable checkpoint exists.
-func (s *OCIClipStorage) readWithCheckpoint(layerDigest string, wantUOffset int64, dest []byte) (int, error) {
+func (s *OCIClipStorage) readWithCheckpoint(ctx context.Context, layerDigest string, wantUOffset int64, dest []byte) (int, error) {
 	var cOff, uOff int64
 	if gzipIndex, ok := s.storageInfo.GzipIdxByLayer[layerDigest]; ok && gzipIndex != nil {
 		cOff, uOff = common.NearestCheckpoint(gzipIndex.Checkpoints, wantUOffset)
@@ -1220,7 +1220,14 @@ func (s *OCIClipStorage) readWithCheckpoint(layerDigest string, wantUOffset int6
 	s.mu.RUnlock()
 
 	if !exists {
-		return 0, fmt.Errorf("layer not found: %s", layerDigest)
+		fetched, err := s.fetchLayerByDigest(ctx, layerDigest)
+		if err != nil {
+			return 0, fmt.Errorf("layer not found: %s: %w", layerDigest, err)
+		}
+		layer = fetched
+		s.mu.Lock()
+		s.layerCache[layerDigest] = layer
+		s.mu.Unlock()
 	}
 
 	// Fetch compressed layer stream

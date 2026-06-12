@@ -2095,7 +2095,7 @@ func TestCheckpointReadShortReadFails(t *testing.T) {
 	}
 
 	dest := make([]byte, len(testData)+1)
-	n, err := storage.readWithCheckpoint(digest.String(), 0, dest)
+	n, err := storage.readWithCheckpoint(context.Background(), digest.String(), 0, dest)
 	require.Error(t, err)
 	require.Equal(t, len(testData), n)
 	require.Contains(t, err.Error(), "unexpected EOF")
@@ -2122,7 +2122,7 @@ func TestCheckpointReadIgnoresOffsetOnlyRestartPoint(t *testing.T) {
 	}
 
 	dest := make([]byte, len(target))
-	n, err := storage.readWithCheckpoint(digest.String(), int64(len(prefix)), dest)
+	n, err := storage.readWithCheckpoint(context.Background(), digest.String(), int64(len(prefix)), dest)
 	require.NoError(t, err)
 	require.Equal(t, len(target), n)
 	require.Equal(t, target, dest)
