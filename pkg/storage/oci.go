@@ -39,6 +39,8 @@ type OCIClipStorage struct {
 	contentCacheWarmOnce  map[string]struct{}
 	layerWarmMu           sync.Mutex
 	layerWarmOnce         map[string]struct{}
+	checkpointLogMu       sync.Mutex
+	checkpointFailureOnce map[string]struct{}
 	contentCacheReadAhead *ContentCacheReadAhead
 	layerLimitByHash      map[string]int64
 }
@@ -137,6 +139,7 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		readTraceObserver:     opts.ReadTraceObserver,
 		contentCacheWarmOnce:  make(map[string]struct{}),
 		layerWarmOnce:         make(map[string]struct{}),
+		checkpointFailureOnce: make(map[string]struct{}),
 		contentCacheReadAhead: NewContentCacheReadAhead(opts.ContentCache, ContentCacheReadAheadOptions{}),
 		layerLimitByHash:      ociLayerLimitsByHash(opts.Metadata, &storageInfo),
 	}
@@ -539,6 +542,7 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 					"storage_mode": "oci",
 				},
 			})
+			s.logCheckpointFailureOnce(remote.LayerDigest, wantUStart, readLen, err)
 			log.Debug().
 				Err(err).
 				Str("layer_digest", remote.LayerDigest).
@@ -1272,6 +1276,38 @@ func (s *OCIClipStorage) readWithCheckpoint(ctx context.Context, layerDigest str
 	}
 
 	return n, nil
+}
+
+func (s *OCIClipStorage) logCheckpointFailureOnce(layerDigest string, offset int64, length int64, err error) {
+	if err == nil {
+		return
+	}
+
+	s.checkpointLogMu.Lock()
+	if s.checkpointFailureOnce == nil {
+		s.checkpointFailureOnce = make(map[string]struct{})
+	}
+	if _, logged := s.checkpointFailureOnce[layerDigest]; logged {
+		s.checkpointLogMu.Unlock()
+		return
+	}
+	s.checkpointFailureOnce[layerDigest] = struct{}{}
+	s.checkpointLogMu.Unlock()
+
+	checkpointCount := 0
+	if s.storageInfo != nil {
+		if gzipIndex, ok := s.storageInfo.GzipIdxByLayer[layerDigest]; ok && gzipIndex != nil {
+			checkpointCount = len(gzipIndex.Checkpoints)
+		}
+	}
+
+	log.Warn().
+		Err(err).
+		Str("layer_digest", layerDigest).
+		Int("checkpoint_count", checkpointCount).
+		Int64("offset", offset).
+		Int64("length", length).
+		Msg("checkpoint-based decompression failed; falling back to full layer decompression")
 }
 
 func (s *OCIClipStorage) Metadata() *common.ClipArchiveMetadata {
