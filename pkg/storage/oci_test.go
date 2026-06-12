@@ -1149,6 +1149,68 @@ func TestOCIStorage_GlobalLayerDecompressionSingleflightAcrossInstances(t *testi
 	require.Equal(t, testData, got)
 }
 
+func TestOCIStorage_GlobalLayerDecompressionDoesNotShareDifferentCacheDirs(t *testing.T) {
+	testData := []byte("same immutable layer in separate disk cache directories")
+	compressedData := createGzipData(t, testData)
+
+	digest := v1.Hash{
+		Algorithm: "sha256",
+		Hex:       "global-singleflight-different-cache-dir",
+	}
+	sum := sha256.Sum256(testData)
+	decompressedHash := hex.EncodeToString(sum[:])
+
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			DecompressedHashByLayer: map[string]string{
+				digest.String(): decompressedHash,
+			},
+		},
+	}
+	storageInfo := metadata.StorageInfo.(*common.OCIStorageInfo)
+	layer := &blockingCountingLayer{
+		mockLayer: &mockLayer{digest: digest, compressedData: compressedData},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+
+	storage1 := &OCIClipStorage{
+		metadata:     metadata,
+		storageInfo:  storageInfo,
+		layerCache:   map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir: t.TempDir(),
+	}
+	storage2 := &OCIClipStorage{
+		metadata:     metadata,
+		storageInfo:  storageInfo,
+		layerCache:   map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir: t.TempDir(),
+	}
+
+	errs := make(chan error, 2)
+	go func() {
+		_, _, err := storage1.ensureLayerCached(context.Background(), digest.String())
+		errs <- err
+	}()
+
+	<-layer.started
+	go func() {
+		_, _, err := storage2.ensureLayerCached(context.Background(), digest.String())
+		errs <- err
+	}()
+
+	close(layer.release)
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+	require.Equal(t, 2, layer.Calls(), "separate cache directories must materialize separate local files")
+
+	for _, dir := range []string{storage1.diskCacheDir, storage2.diskCacheDir} {
+		got, err := os.ReadFile(filepath.Join(dir, decompressedHash))
+		require.NoError(t, err)
+		require.Equal(t, testData, got)
+	}
+}
+
 func TestOCIStorage_ConcurrentDirectDecompressionUsesUniqueTempFiles(t *testing.T) {
 	testData := []byte("shared layer materialization from separate worker processes")
 	compressedData := createGzipData(t, testData)

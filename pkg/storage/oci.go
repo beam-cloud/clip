@@ -586,7 +586,8 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 	}
 
 	waitStart := time.Now()
-	shared, err := globalLayerDecompress.Do(decompressedHash, func() error {
+	decompressKey := layerDecompressKey(decompressedHash, layerPath)
+	shared, err := globalLayerDecompress.Do(decompressKey, func() error {
 		// Double-check disk cache inside the process-wide singleflight. A
 		// separate OCIClipStorage instance may have materialized the same layer
 		// between our fast-path stat and entering this call.
@@ -644,6 +645,10 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 // getDecompressedCachePath returns the cache path for a decompressed hash
 func (s *OCIClipStorage) getDecompressedCachePath(decompressedHash string) string {
 	return filepath.Join(s.diskCacheDir, decompressedHash)
+}
+
+func layerDecompressKey(decompressedHash, layerPath string) string {
+	return decompressedHash + "\x00" + filepath.Clean(layerPath)
 }
 
 // getDecompressedHash retrieves the pre-computed decompressed hash for a layer digest from metadata
@@ -976,6 +981,10 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 				Str("decompressed_hash", decompressedHash).
 				Msg("content cache store failed after layer decompression")
 		}
+	}
+
+	if _, err := os.Stat(diskPath); err != nil {
+		return fmt.Errorf("decompressed layer disappeared after content cache store: %s: %w", diskPath, err)
 	}
 
 	return nil
