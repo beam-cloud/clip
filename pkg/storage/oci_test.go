@@ -164,6 +164,18 @@ func (m *mockLayer) MediaType() (types.MediaType, error) {
 	return types.DockerLayer, nil
 }
 
+type contextBoundLayer struct {
+	*mockLayer
+	ctx context.Context
+}
+
+func (l *contextBoundLayer) Compressed() (io.ReadCloser, error) {
+	if err := l.ctx.Err(); err != nil {
+		return nil, err
+	}
+	return l.mockLayer.Compressed()
+}
+
 type blockingCountingLayer struct {
 	*mockLayer
 	mu      sync.Mutex
@@ -2215,6 +2227,83 @@ func TestCheckpointReadIgnoresMalformedStreamStartCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(target), n)
 	require.Equal(t, target, dest)
+}
+
+func TestCheckpointReadCachesFetchedLayerWithDetachedContext(t *testing.T) {
+	testData := []byte("checkpoint read should not poison layer cache")
+	compressedData := createGzipData(t, testData)
+	digest := v1.Hash{Algorithm: "sha256", Hex: "detached_context_layer"}
+
+	previousFetch := fetchOCILayerByDigest
+	defer func() { fetchOCILayerByDigest = previousFetch }()
+
+	var fetchCtx context.Context
+	fetchOCILayerByDigest = func(ctx context.Context, storage *OCIClipStorage, gotDigest string) (v1.Layer, error) {
+		require.Equal(t, digest.String(), gotDigest)
+		fetchCtx = ctx
+		return &contextBoundLayer{
+			mockLayer: &mockLayer{digest: digest, compressedData: compressedData},
+			ctx:       ctx,
+		}, nil
+	}
+
+	storage := &OCIClipStorage{
+		storageInfo: &common.OCIStorageInfo{
+			RegistryURL: "registry.example.com",
+			Repository:  "team/image",
+			GzipIdxByLayer: map[string]*common.GzipIndex{
+				digest.String(): {
+					LayerDigest: digest.String(),
+					Checkpoints: []common.GzipCheckpoint{{COff: 0, UOff: 0}},
+				},
+			},
+		},
+		layerCache:     map[string]v1.Layer{},
+		useCheckpoints: true,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	dest := make([]byte, len(testData))
+	n, err := storage.readWithCheckpoint(ctx, digest.String(), 0, dest)
+	require.NoError(t, err)
+	require.Equal(t, len(testData), n)
+	require.Equal(t, testData, dest)
+
+	cancel()
+	require.NotNil(t, fetchCtx)
+	require.NoError(t, fetchCtx.Err(), "cached layer must not retain the foreground read cancellation")
+
+	layer := storage.layerCache[digest.String()]
+	require.NotNil(t, layer)
+	compressed, err := layer.Compressed()
+	require.NoError(t, err)
+	require.NoError(t, compressed.Close())
+}
+
+func TestCachedLayerByDigestHonorsAlreadyCanceledContext(t *testing.T) {
+	digest := v1.Hash{Algorithm: "sha256", Hex: "canceled_context_layer"}
+	previousFetch := fetchOCILayerByDigest
+	defer func() { fetchOCILayerByDigest = previousFetch }()
+
+	fetchCalled := false
+	fetchOCILayerByDigest = func(ctx context.Context, storage *OCIClipStorage, gotDigest string) (v1.Layer, error) {
+		fetchCalled = true
+		return &mockLayer{digest: digest, compressedData: createGzipData(t, []byte("data"))}, nil
+	}
+
+	storage := &OCIClipStorage{
+		storageInfo: &common.OCIStorageInfo{
+			RegistryURL: "registry.example.com",
+			Repository:  "team/image",
+		},
+		layerCache: map[string]v1.Layer{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := storage.cachedLayerByDigest(ctx, digest.String())
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, fetchCalled)
 }
 
 // TestCheckpointFallback tests that checkpoint mode falls back to full decompression when needed

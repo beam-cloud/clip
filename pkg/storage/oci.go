@@ -52,6 +52,19 @@ const maxBackgroundLayerWarms = 2
 
 var backgroundLayerWarmSlots = make(chan struct{}, maxBackgroundLayerWarms)
 
+var fetchOCILayerByDigest = func(ctx context.Context, storage *OCIClipStorage, digest string) (v1.Layer, error) {
+	layerRef := fmt.Sprintf("%s/%s@%s", storage.storageInfo.RegistryURL, storage.storageInfo.Repository, digest)
+	ref, err := name.NewDigest(layerRef)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse layer digest reference %q: %w", layerRef, err)
+	}
+	layer, err := remote.Layer(ref, storage.remoteOptions(ctx)...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch layer by digest %s: %w", digest, err)
+	}
+	return layer, nil
+}
+
 type layerDecompressGroup struct {
 	mu       sync.Mutex
 	inflight map[string]*layerDecompressCall
@@ -249,15 +262,34 @@ func (s *OCIClipStorage) remoteOptions(ctx context.Context) []remote.Option {
 }
 
 func (s *OCIClipStorage) fetchLayerByDigest(ctx context.Context, digest string) (v1.Layer, error) {
-	layerRef := fmt.Sprintf("%s/%s@%s", s.storageInfo.RegistryURL, s.storageInfo.Repository, digest)
-	ref, err := name.NewDigest(layerRef)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse layer digest reference %q: %w", layerRef, err)
+	return fetchOCILayerByDigest(ctx, s, digest)
+}
+
+func (s *OCIClipStorage) cachedLayerByDigest(ctx context.Context, digest string) (v1.Layer, error) {
+	s.mu.RLock()
+	layer, exists := s.layerCache[digest]
+	s.mu.RUnlock()
+	if exists {
+		return layer, nil
 	}
-	layer, err := remote.Layer(ref, s.remoteOptions(ctx)...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch layer by digest %s: %w", digest, err)
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
+
+	layer, err := s.fetchLayerByDigest(context.WithoutCancel(ctx), digest)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if cached := s.layerCache[digest]; cached != nil {
+		layer = cached
+	} else {
+		s.layerCache[digest] = layer
+	}
+	s.mu.Unlock()
+
 	return layer, nil
 }
 
@@ -894,20 +926,9 @@ func contentCacheErrorKind(err error) string {
 func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string) error {
 	metrics := common.GetGlobalMetrics()
 
-	// Fetch from OCI registry and decompress
-	s.mu.RLock()
-	layer, exists := s.layerCache[digest]
-	s.mu.RUnlock()
-
-	if !exists {
-		fetched, err := s.fetchLayerByDigest(context.Background(), digest)
-		if err != nil {
-			return fmt.Errorf("layer not found: %s: %w", digest, err)
-		}
-		layer = fetched
-		s.mu.Lock()
-		s.layerCache[digest] = layer
-		s.mu.Unlock()
+	layer, err := s.cachedLayerByDigest(context.Background(), digest)
+	if err != nil {
+		return fmt.Errorf("layer not found: %s: %w", digest, err)
 	}
 
 	inflateStart := time.Now()
@@ -1231,20 +1252,9 @@ func (s *OCIClipStorage) readWithCheckpoint(ctx context.Context, layerDigest str
 		Int64("decompress_bytes", wantUOffset-uOff+int64(len(dest))).
 		Msg("using checkpoint for partial decompression")
 
-	// Get layer from cache
-	s.mu.RLock()
-	layer, exists := s.layerCache[layerDigest]
-	s.mu.RUnlock()
-
-	if !exists {
-		fetched, err := s.fetchLayerByDigest(ctx, layerDigest)
-		if err != nil {
-			return 0, fmt.Errorf("layer not found: %s: %w", layerDigest, err)
-		}
-		layer = fetched
-		s.mu.Lock()
-		s.layerCache[layerDigest] = layer
-		s.mu.Unlock()
+	layer, err := s.cachedLayerByDigest(ctx, layerDigest)
+	if err != nil {
+		return 0, fmt.Errorf("layer not found: %s: %w", layerDigest, err)
 	}
 
 	// Fetch compressed layer stream
