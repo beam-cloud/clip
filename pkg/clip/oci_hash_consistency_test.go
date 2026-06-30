@@ -105,7 +105,7 @@ func computeHashDuringIndexing(compressedData []byte) (string, error) {
 
 	// Create tar reader to consume the stream (simulating the indexing process)
 	tr := tar.NewReader(hashingReader)
-	
+
 	// Read through all tar entries (like the indexer does)
 	for {
 		_, err := tr.Next()
@@ -138,7 +138,7 @@ func computeHashDuringDecompression(compressedData []byte) (string, []byte, erro
 	hasher := sha256.New()
 	buffer := new(bytes.Buffer)
 	multiWriter := io.MultiWriter(buffer, hasher)
-	
+
 	_, err = io.Copy(multiWriter, gzr)
 	if err != nil {
 		return "", nil, err
@@ -157,16 +157,16 @@ func computeContentCacheHash(data []byte) string {
 func TestRealLayerHashConsistency(t *testing.T) {
 	// Create test data
 	testData := []byte("This is test data for real layer testing with multiple iterations")
-	
+
 	// Create a tar archive
 	tarBuffer := new(bytes.Buffer)
 	tw := tar.NewWriter(tarBuffer)
-	
+
 	// Add multiple files to make it realistic
 	for i := 0; i < 5; i++ {
 		content := append(testData, byte(i))
 		filename := "testfile_" + string(rune('0'+i)) + ".txt"
-		
+
 		err := tw.WriteHeader(&tar.Header{
 			Name: filename,
 			Mode: 0644,
@@ -176,7 +176,7 @@ func TestRealLayerHashConsistency(t *testing.T) {
 		_, err = tw.Write(content)
 		require.NoError(t, err)
 	}
-	
+
 	err := tw.Close()
 	require.NoError(t, err)
 
@@ -199,6 +199,7 @@ func TestRealLayerHashConsistency(t *testing.T) {
 		io.NopCloser(bytes.NewReader(compressedData)),
 		"sha256:test123",
 		IndexOCIImageOptions{CheckpointMiB: 2},
+		nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, artifact)
@@ -223,7 +224,7 @@ func TestRealLayerHashConsistency(t *testing.T) {
 func TestHashWithDiskFile(t *testing.T) {
 	// Create test content
 	testContent := []byte("Test content for disk file hashing verification")
-	
+
 	// Create tar
 	tarBuffer := new(bytes.Buffer)
 	tw := tar.NewWriter(tarBuffer)
@@ -259,24 +260,24 @@ func TestHashWithDiskFile(t *testing.T) {
 	gzr, err := gzip.NewReader(bytes.NewReader(compressedData))
 	require.NoError(t, err)
 	defer gzr.Close()
-	
+
 	tmpFile, err := os.Create(diskPath)
 	require.NoError(t, err)
-	
+
 	hasher := sha256.New()
 	multiWriter := io.MultiWriter(tmpFile, hasher)
 	_, err = io.Copy(multiWriter, gzr)
 	tmpFile.Close()
 	require.NoError(t, err)
-	
+
 	diskWriteHash := hex.EncodeToString(hasher.Sum(nil))
 
 	// Read back from disk and compute hash (simulating sha256sum command)
 	diskData, err := os.ReadFile(diskPath)
 	require.NoError(t, err)
-	
+
 	diskReadHash := computeContentCacheHash(diskData)
-	
+
 	t.Logf("File named: %s", indexedHash)
 	t.Logf("SHA256 of file contents: %s", diskReadHash)
 
@@ -284,7 +285,7 @@ func TestHashWithDiskFile(t *testing.T) {
 	assert.Equal(t, indexedHash, diskWriteHash, "Indexed hash must match hash computed while writing to disk")
 	assert.Equal(t, diskWriteHash, diskReadHash, "Hash while writing to disk must match hash when reading from disk")
 	assert.Equal(t, indexedHash, diskReadHash, "CRITICAL: Indexed hash must match hash of data on disk (filename must match content hash)")
-	
+
 	// This is the key assertion that mirrors the user's finding:
 	// The file is named with indexedHash, and sha256sum of that file should equal indexedHash
 	assert.Equal(t, indexedHash, diskReadHash, 

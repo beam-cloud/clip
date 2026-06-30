@@ -2,9 +2,6 @@ package clip
 
 import (
 	"archive/tar"
-	// klauspost/compress gunzip is substantially faster than stdlib and is the
-	// dominant cost when indexing layers (decompress + hash of every byte)
-	"github.com/klauspost/compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +12,7 @@ import (
 	"path"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,19 +23,41 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	// klauspost/compress gunzip is substantially faster than stdlib and is the
+	// dominant cost when indexing layers (decompress + hash of every byte)
+	"github.com/klauspost/compress/gzip"
 	log "github.com/rs/zerolog/log"
 	"github.com/tidwall/btree"
 	"golang.org/x/sync/errgroup"
 )
 
+// Layer sources reported in completed progress events.
+const (
+	LayerSourceIndexCache   = "index-cache"
+	LayerSourceContentCache = "content-cache"
+	LayerSourceRegistry     = "registry"
+)
+
+// layerProgressInterval throttles per-layer byte progress events.
+const layerProgressInterval = 3 * time.Second
+
 // OCIIndexProgress represents a progress update during OCI image indexing
 type OCIIndexProgress struct {
-	LayerIndex   int    // Current layer being processed (1-based)
-	TotalLayers  int    // Total number of layers
-	LayerDigest  string // Digest of current layer
-	Stage        string // "starting" or "completed"
-	FilesIndexed int    // Number of files indexed so far (only for "completed")
-	Message      string // Human-readable message
+	LayerIndex      int    // Current layer being processed (1-based)
+	TotalLayers     int    // Total number of layers
+	LayerDigest     string // Digest of current layer
+	Stage           string // "starting", "progress", or "completed"
+	FilesIndexed    int    // Number of files indexed so far (only for "completed")
+	Message         string // Human-readable message
+	CompletedLayers int    // Number of layers finished so far (only for "completed")
+	Source          string // Where the layer came from (only for "completed"; see LayerSource*)
+	BytesProcessed  int64  // Decompressed bytes processed so far ("progress") or in total ("completed")
+	BytesTotal      int64  // Total decompressed bytes when known ("completed")
+
+	// Compressed byte counters are known from the OCI layer descriptor and are
+	// suitable for percent-complete build progress while the layer streams.
+	CompressedBytesProcessed int64
+	CompressedBytesTotal     int64
 }
 
 // IndexOCIImageOptions configures the OCI indexer
@@ -117,15 +137,20 @@ func (s *indexedLayerContentCacheSpool) closeAndRemove() {
 	}
 }
 
-// countingReader tracks bytes read from an io.Reader
+// countingReader tracks bytes read from an io.Reader, optionally invoking a
+// callback with the cumulative count after each read.
 type countingReader struct {
-	r io.Reader
-	n int64
+	r      io.Reader
+	n      int64
+	onRead func(total int64)
 }
 
 func (cr *countingReader) Read(p []byte) (int, error) {
 	k, err := cr.r.Read(p)
 	cr.n += int64(k)
+	if cr.onRead != nil && k > 0 {
+		cr.onRead(cr.n)
+	}
 	return k, err
 }
 
@@ -318,19 +343,47 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrency)
 
+	var completedLayers atomic.Int64
+
 	for i := range layers {
 		i := i
 		layer := layers[i]
 		layerDigestStr := layerDigests[i]
 
 		g.Go(func() error {
+			compressedBytesTotal, err := layer.Size()
+			if err != nil {
+				log.Debug().Err(err).Str("layer_digest", layerDigestStr).Msg("failed to get compressed layer size")
+			}
+
 			if opts.ProgressChan != nil {
 				opts.ProgressChan <- OCIIndexProgress{
-					LayerIndex:  i + 1,
-					TotalLayers: len(layers),
-					LayerDigest: layerDigestStr,
-					Stage:       "starting",
-					Message:     fmt.Sprintf("Processing layer %d/%d", i+1, len(layers)),
+					LayerIndex:           i + 1,
+					TotalLayers:          len(layers),
+					LayerDigest:          layerDigestStr,
+					Stage:                "starting",
+					CompressedBytesTotal: compressedBytesTotal,
+					Message:              fmt.Sprintf("Processing layer %d/%d", i+1, len(layers)),
+				}
+			}
+
+			reportCompleted := func(artifact *LayerArtifact, source string) {
+				completed := int(completedLayers.Add(1))
+				if opts.ProgressChan == nil {
+					return
+				}
+				opts.ProgressChan <- OCIIndexProgress{
+					LayerIndex:               i + 1,
+					TotalLayers:              len(layers),
+					LayerDigest:              layerDigestStr,
+					Stage:                    "completed",
+					CompletedLayers:          completed,
+					Source:                   source,
+					BytesProcessed:           artifact.UncompressedSize,
+					BytesTotal:               artifact.UncompressedSize,
+					CompressedBytesProcessed: compressedBytesTotal,
+					CompressedBytesTotal:     compressedBytesTotal,
+					Message:                  fmt.Sprintf("Completed layer %d/%d", completed, len(layers)),
 				}
 			}
 
@@ -352,6 +405,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 							Str("layer_digest", layerDigestStr).
 							Int("entries", len(artifact.Entries)).
 							Msg("layer index cache hit: skipping layer pull")
+						reportCompleted(artifact, LayerSourceIndexCache)
 						return nil
 					}
 				}
@@ -359,7 +413,25 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 
 			log.Debug().Msgf("Processing layer %d/%d: %s", i+1, len(layers), layerDigestStr)
 
-			artifact, err := ca.indexLayerFromBestSource(gctx, layer, layerDigestStr, opts)
+			lastProgress := time.Now()
+			onBytes := func(uncompressedBytes, compressedBytes int64) {
+				if opts.ProgressChan == nil || time.Since(lastProgress) < layerProgressInterval {
+					return
+				}
+				lastProgress = time.Now()
+				opts.ProgressChan <- OCIIndexProgress{
+					LayerIndex:               i + 1,
+					TotalLayers:              len(layers),
+					LayerDigest:              layerDigestStr,
+					Stage:                    "progress",
+					BytesProcessed:           uncompressedBytes,
+					CompressedBytesProcessed: compressedBytes,
+					CompressedBytesTotal:     compressedBytesTotal,
+					Message:                  fmt.Sprintf("Indexing layer %d/%d", i+1, len(layers)),
+				}
+			}
+
+			artifact, source, err := ca.indexLayerFromBestSource(gctx, layer, layerDigestStr, opts, compressedBytesTotal, onBytes)
 			if err != nil {
 				return fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
 			}
@@ -373,6 +445,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 					log.Warn().Err(err).Str("layer_digest", layerDigestStr).Msg("failed to store layer index artifact in cache")
 				}
 			}
+			reportCompleted(artifact, source)
 			return nil
 		})
 	}
@@ -393,17 +466,6 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 			Checkpoints: artifact.Checkpoints,
 		}
 		decompressedHashes[layerDigestStr] = artifact.DecompressedHash
-
-		if opts.ProgressChan != nil {
-			opts.ProgressChan <- OCIIndexProgress{
-				LayerIndex:   i + 1,
-				TotalLayers:  len(layers),
-				LayerDigest:  layerDigestStr,
-				Stage:        "completed",
-				FilesIndexed: index.Len(),
-				Message:      fmt.Sprintf("Completed layer %d/%d (%d files total)", i+1, len(layers), index.Len()),
-			}
-		}
 	}
 
 	cachedLayers := 0
@@ -437,6 +499,7 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 	compressedRC io.ReadCloser,
 	layerDigest string,
 	opts IndexOCIImageOptions,
+	onBytes func(uncompressedBytes, compressedBytes int64),
 ) (*LayerArtifact, error) {
 	compressedCounter := &countingReader{r: compressedRC}
 
@@ -461,7 +524,11 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 		hashWriter = io.MultiWriter(hasher, cacheSpool)
 	}
 	hashingReader := io.TeeReader(gzr, hashWriter)
-	uncompressedCounter := &countingReader{r: hashingReader}
+	uncompressedCounter := &countingReader{r: hashingReader, onRead: func(total int64) {
+		if onBytes != nil {
+			onBytes(total, compressedCounter.n)
+		}
+	}}
 	tr := tar.NewReader(uncompressedCounter)
 
 	// Pre-allocate checkpoint slice (estimate: 1 per 2MB, typical layer is 50-200MB)

@@ -152,15 +152,24 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 	layer v1.Layer,
 	layerDigest string,
 	opts IndexOCIImageOptions,
-) (*LayerArtifact, error) {
+	compressedBytesTotal int64,
+	onBytes func(uncompressedBytes, compressedBytes int64),
+) (*LayerArtifact, string, error) {
 	blobKey := compressedLayerCacheKey(layerDigest)
 
 	// Source 1: compressed blob from the content cache
 	if opts.ContentCache != nil {
-		compressedSize, err := layer.Size()
-		if err == nil && contentCacheExistsWithSize(opts.ContentCache, blobKey, compressedSize) {
+		compressedSize := compressedBytesTotal
+		if compressedSize <= 0 {
+			var err error
+			compressedSize, err = layer.Size()
+			if err != nil {
+				log.Debug().Err(err).Str("layer_digest", layerDigest).Msg("failed to get compressed layer size")
+			}
+		}
+		if compressedSize > 0 && contentCacheExistsWithSize(opts.ContentCache, blobKey, compressedSize) {
 			reader := newHashingReadCloser(newContentCacheBlobReader(opts.ContentCache, blobKey, compressedSize))
-			artifact, err := ca.indexLayerToArtifact(ctx, reader, layerDigest, opts)
+			artifact, err := ca.indexLayerToArtifact(ctx, reader, layerDigest, opts, onBytes)
 			if err == nil {
 				// Consume any trailing bytes the gzip reader didn't request,
 				// then verify the full blob hash against the layer digest.
@@ -169,7 +178,7 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 						Str("layer_digest", layerDigest).
 						Int64("compressed_bytes", compressedSize).
 						Msg("compressed layer cache hit: indexed without registry pull")
-					return artifact, nil
+					return artifact, LayerSourceContentCache, nil
 				}
 				log.Warn().
 					Str("layer_digest", layerDigest).
@@ -186,7 +195,7 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 	// Source 2: registry pull (+ warm the compressed blob into the cache)
 	compressedRC, err := layer.Compressed()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get compressed layer: %w", err)
+		return nil, "", fmt.Errorf("failed to get compressed layer: %w", err)
 	}
 	defer compressedRC.Close()
 
@@ -200,9 +209,9 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 		}
 	}
 
-	artifact, err := ca.indexLayerToArtifact(ctx, io.NopCloser(source), layerDigest, opts)
+	artifact, err := ca.indexLayerToArtifact(ctx, io.NopCloser(source), layerDigest, opts, onBytes)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	if blobSpool != nil && blobSpool.err == nil && blobSpool.path != "" {
@@ -217,5 +226,5 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 		}
 	}
 
-	return artifact, nil
+	return artifact, LayerSourceRegistry, nil
 }

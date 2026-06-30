@@ -62,6 +62,7 @@ func indexLayerHelper(t *testing.T, archiver *ClipArchiver, compressed []byte, d
 		io.NopCloser(bytes.NewReader(compressed)),
 		digest,
 		IndexOCIImageOptions{CheckpointMiB: 2},
+		nil,
 	)
 	require.NoError(t, err)
 	return artifact
