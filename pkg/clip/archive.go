@@ -78,6 +78,7 @@ func (ig *InodeGenerator) Next() uint64 {
 func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) error {
 	// Create root directory
 	now := time.Now()
+	rootTime, rootTimensec := fuseAttrTime(now)
 	root := &common.ClipNode{
 		Path:     "/",
 		NodeType: common.DirNode,
@@ -85,12 +86,12 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 			Ino:       1,
 			Size:      0,
 			Blocks:    0,
-			Atime:     uint64(now.Unix()),
-			Atimensec: uint32(now.Nanosecond()),
-			Mtime:     uint64(now.Unix()),
-			Mtimensec: uint32(now.Nanosecond()),
-			Ctime:     uint64(now.Unix()),
-			Ctimensec: uint32(now.Nanosecond()),
+			Atime:     rootTime,
+			Atimensec: rootTimensec,
+			Mtime:     rootTime,
+			Mtimensec: rootTimensec,
+			Ctime:     rootTime,
+			Ctimensec: rootTimensec,
 			Mode:      uint32(syscall.S_IFDIR | 0755),
 			Nlink:     2, // Directories start with link count of 2 (. and ..)
 			Owner: fuse.Owner{
@@ -173,16 +174,19 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 				inodeMap[path] = inode
 			}
 
+			atime, atimensec := fuseAttrTimespec(stat.Atim.Sec, stat.Atim.Nsec)
+			mtime, mtimensec := fuseAttrTimespec(stat.Mtim.Sec, stat.Mtim.Nsec)
+			ctime, ctimensec := fuseAttrTimespec(stat.Ctim.Sec, stat.Ctim.Nsec)
 			attr := fuse.Attr{
 				Ino:       inode,
 				Size:      uint64(stat.Size),
 				Blocks:    uint64(stat.Blocks),
-				Atime:     uint64(stat.Atim.Sec),
-				Atimensec: uint32(stat.Atim.Nsec),
-				Mtime:     uint64(stat.Mtim.Sec),
-				Mtimensec: uint32(stat.Mtim.Nsec),
-				Ctime:     uint64(stat.Ctim.Sec),
-				Ctimensec: uint32(stat.Ctim.Nsec),
+				Atime:     atime,
+				Atimensec: atimensec,
+				Mtime:     mtime,
+				Mtimensec: mtimensec,
+				Ctime:     ctime,
+				Ctimensec: ctimensec,
 				Mode:      mode,
 				Nlink:     uint32(stat.Nlink),
 				Owner: fuse.Owner{

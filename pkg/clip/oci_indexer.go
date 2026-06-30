@@ -304,6 +304,7 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	if imageMetadata != nil && !imageMetadata.Created.IsZero() {
 		rootTime = imageMetadata.Created
 	}
+	rootTimeSec, rootTimeNsec := fuseAttrTime(rootTime)
 	root := &common.ClipNode{
 		Path:     "/",
 		NodeType: common.DirNode,
@@ -311,12 +312,12 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 			Ino:       1,
 			Size:      0,
 			Blocks:    0,
-			Atime:     uint64(rootTime.Unix()),
-			Atimensec: uint32(rootTime.Nanosecond()),
-			Mtime:     uint64(rootTime.Unix()),
-			Mtimensec: uint32(rootTime.Nanosecond()),
-			Ctime:     uint64(rootTime.Unix()),
-			Ctimensec: uint32(rootTime.Nanosecond()),
+			Atime:     rootTimeSec,
+			Atimensec: rootTimeNsec,
+			Mtime:     rootTimeSec,
+			Mtimensec: rootTimeNsec,
+			Ctime:     rootTimeSec,
+			Ctimensec: rootTimeNsec,
 			Mode:      uint32(syscall.S_IFDIR | 0755),
 			Nlink:     2, // Directories start with link count of 2 (. and ..)
 			Owner: fuse.Owner{
@@ -945,6 +946,9 @@ func (ca *ClipArchiver) fileEntry(
 		}
 	}
 
+	atime, atimensec := fuseAttrTime(hdr.AccessTime)
+	mtime, mtimensec := fuseAttrTime(hdr.ModTime)
+	ctime, ctimensec := fuseAttrTime(hdr.ChangeTime)
 	node := &common.ClipNode{
 		Path:     cleanPath,
 		NodeType: common.FileNode,
@@ -952,12 +956,12 @@ func (ca *ClipArchiver) fileEntry(
 			Ino:       ca.generateInode(layerDigest, cleanPath),
 			Size:      uint64(hdr.Size),
 			Blocks:    (uint64(hdr.Size) + 511) / 512,
-			Atime:     uint64(hdr.AccessTime.Unix()),
-			Atimensec: uint32(hdr.AccessTime.Nanosecond()),
-			Mtime:     uint64(hdr.ModTime.Unix()),
-			Mtimensec: uint32(hdr.ModTime.Nanosecond()),
-			Ctime:     uint64(hdr.ChangeTime.Unix()),
-			Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+			Atime:     atime,
+			Atimensec: atimensec,
+			Mtime:     mtime,
+			Mtimensec: mtimensec,
+			Ctime:     ctime,
+			Ctimensec: ctimensec,
 			Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeReg),
 			Nlink:     1,
 			Owner: fuse.Owner{
@@ -983,6 +987,9 @@ func (ca *ClipArchiver) symlinkEntry(hdr *tar.Header, cleanPath, layerDigest str
 		log.Warn().Msgf("Empty symlink target for %s", cleanPath)
 	}
 
+	atime, atimensec := fuseAttrTime(hdr.AccessTime)
+	mtime, mtimensec := fuseAttrTime(hdr.ModTime)
+	ctime, ctimensec := fuseAttrTime(hdr.ChangeTime)
 	node := &common.ClipNode{
 		Path:     cleanPath,
 		NodeType: common.SymLinkNode,
@@ -991,12 +998,12 @@ func (ca *ClipArchiver) symlinkEntry(hdr *tar.Header, cleanPath, layerDigest str
 			Ino:       ca.generateInode(layerDigest, cleanPath),
 			Size:      uint64(len(target)),
 			Blocks:    0,
-			Atime:     uint64(hdr.AccessTime.Unix()),
-			Atimensec: uint32(hdr.AccessTime.Nanosecond()),
-			Mtime:     uint64(hdr.ModTime.Unix()),
-			Mtimensec: uint32(hdr.ModTime.Nanosecond()),
-			Ctime:     uint64(hdr.ChangeTime.Unix()),
-			Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+			Atime:     atime,
+			Atimensec: atimensec,
+			Mtime:     mtime,
+			Mtimensec: mtimensec,
+			Ctime:     ctime,
+			Ctimensec: ctimensec,
 			Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeSymlink),
 			Nlink:     1,
 			Owner: fuse.Owner{
@@ -1012,6 +1019,9 @@ func (ca *ClipArchiver) symlinkEntry(hdr *tar.Header, cleanPath, layerDigest str
 
 // directoryEntry processes a directory entry from tar
 func (ca *ClipArchiver) directoryEntry(hdr *tar.Header, cleanPath, layerDigest string) LayerEntry {
+	atime, atimensec := fuseAttrTime(hdr.AccessTime)
+	mtime, mtimensec := fuseAttrTime(hdr.ModTime)
+	ctime, ctimensec := fuseAttrTime(hdr.ChangeTime)
 	node := &common.ClipNode{
 		Path:     cleanPath,
 		NodeType: common.DirNode,
@@ -1019,12 +1029,12 @@ func (ca *ClipArchiver) directoryEntry(hdr *tar.Header, cleanPath, layerDigest s
 			Ino:       ca.generateInode(layerDigest, cleanPath),
 			Size:      0,
 			Blocks:    0,
-			Atime:     uint64(hdr.AccessTime.Unix()),
-			Atimensec: uint32(hdr.AccessTime.Nanosecond()),
-			Mtime:     uint64(hdr.ModTime.Unix()),
-			Mtimensec: uint32(hdr.ModTime.Nanosecond()),
-			Ctime:     uint64(hdr.ChangeTime.Unix()),
-			Ctimensec: uint32(hdr.ChangeTime.Nanosecond()),
+			Atime:     atime,
+			Atimensec: atimensec,
+			Mtime:     mtime,
+			Mtimensec: mtimensec,
+			Ctime:     ctime,
+			Ctimensec: ctimensec,
 			Mode:      ca.tarModeToFuse(hdr.Mode, tar.TypeDir),
 			Nlink:     2,
 			Owner: fuse.Owner{

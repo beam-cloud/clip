@@ -127,6 +127,29 @@ func TestLayerArtifactRoundTripDeterminism(t *testing.T) {
 	assert.Equal(t, common.SymLinkNode, nodes["/link"].NodeType)
 }
 
+func TestLayerArtifactSanitizesUnsetTarTimes(t *testing.T) {
+	archiver := NewClipArchiver()
+
+	layer := buildLayer(t, []tarEntry{
+		{name: "dir/", typeflag: tar.TypeDir},
+		{name: "dir/a.txt", typeflag: tar.TypeReg, content: "hello"},
+		{name: "link", typeflag: tar.TypeSymlink, linkname: "dir/a.txt"},
+	})
+
+	artifact := indexLayerHelper(t, archiver, layer, "sha256:layer1")
+	index := archiver.newIndex()
+	archiver.applyLayerArtifact(index, artifact)
+	nodes := indexPaths(index)
+
+	for _, path := range []string{"/dir", "/dir/a.txt", "/link"} {
+		node := nodes[path]
+		require.NotNil(t, node)
+		assert.Equal(t, uint64(0), node.Attr.Atime)
+		assert.Equal(t, uint64(0), node.Attr.Mtime)
+		assert.Equal(t, uint64(0), node.Attr.Ctime)
+	}
+}
+
 func TestLayerArtifactDecodeValidation(t *testing.T) {
 	archiver := NewClipArchiver()
 	layer := buildLayer(t, []tarEntry{{name: "f.txt", typeflag: tar.TypeReg, content: "x"}})

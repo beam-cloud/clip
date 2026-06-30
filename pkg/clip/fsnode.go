@@ -125,18 +125,7 @@ func (n *FSNode) OnAdd(ctx context.Context) {
 func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	log.Debug().Str("path", n.clipNode.Path).Msg("Getattr called")
 
-	node := n.clipNode
-
-	// Fill in the AttrOut struct
-	out.Ino = node.Attr.Ino
-	out.Size = node.Attr.Size
-	out.Blocks = node.Attr.Blocks
-	out.Atime = node.Attr.Atime
-	out.Mtime = node.Attr.Mtime
-	out.Ctime = node.Attr.Ctime
-	out.Mode = node.Attr.Mode
-	out.Nlink = node.Attr.Nlink
-	out.Owner = node.Attr.Owner
+	out.Attr = sanitizeFuseAttrTimes(n.clipNode.Attr)
 
 	return fs.OK
 }
@@ -153,7 +142,7 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	n.filesystem.cacheMutex.RUnlock()
 	if found {
 		log.Debug().Str("path", childPath).Msg("Lookup cache hit")
-		out.Attr = entry.attr
+		out.Attr = sanitizeFuseAttrTimes(entry.attr)
 		return entry.inode, fs.OK
 	}
 
@@ -164,15 +153,15 @@ func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return nil, syscall.ENOENT
 	}
 
-	// Fill out the child node's attributes
-	out.Attr = child.Attr
+	attr := sanitizeFuseAttrTimes(child.Attr)
+	out.Attr = attr
 
 	// Create a new Inode for the child
-	childInode := n.NewInode(ctx, &FSNode{filesystem: n.filesystem, clipNode: child, attr: child.Attr}, fs.StableAttr{Mode: child.Attr.Mode, Ino: child.Attr.Ino})
+	childInode := n.NewInode(ctx, &FSNode{filesystem: n.filesystem, clipNode: child, attr: attr}, fs.StableAttr{Mode: attr.Mode, Ino: attr.Ino})
 
 	// Cache the result
 	n.filesystem.cacheMutex.Lock()
-	n.filesystem.lookupCache[childPath] = &lookupCacheEntry{inode: childInode, attr: child.Attr}
+	n.filesystem.lookupCache[childPath] = &lookupCacheEntry{inode: childInode, attr: attr}
 	n.filesystem.cacheMutex.Unlock()
 
 	return childInode, fs.OK
