@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +48,33 @@ func newMockCache() *mockCache {
 		store:                    make(map[string][]byte),
 		clientLocalPageFileViews: make(map[string][]ClientLocalPageFileView),
 	}
+}
+
+type streamingMockCache struct {
+	mockCache
+	streamCalls int
+}
+
+func (m *streamingMockCache) GetContentStream(hash string, _ struct{ RoutingKey string }) (<-chan []byte, int64, error) {
+	m.mu.Lock()
+	m.streamCalls++
+	data, ok := m.store[hash]
+	data = append([]byte(nil), data...)
+	m.mu.Unlock()
+	if !ok {
+		return nil, 0, ErrContentCacheMiss
+	}
+
+	chunks := make(chan []byte, 2)
+	go func() {
+		defer close(chunks)
+		mid := len(data) / 2
+		if mid > 0 {
+			chunks <- data[:mid]
+		}
+		chunks <- data[mid:]
+	}()
+	return chunks, int64(len(data)), nil
 }
 
 func (m *mockCache) GetContent(hash string, offset int64, length int64, opts struct{ RoutingKey string }) ([]byte, error) {
@@ -1177,6 +1205,147 @@ func TestOCIStorage_ConcurrentDirectDecompressionUsesUniqueTempFiles(t *testing.
 	require.Equal(t, testData, got)
 }
 
+func TestOCIStorage_FullContentCacheStreamAvoidsRegistry(t *testing.T) {
+	testData := []byte("verified decompressed layer from shared cache")
+	digest := v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("a", 64)}
+	sum := sha256.Sum256(testData)
+	decompressedHash := hex.EncodeToString(sum[:])
+
+	cache := &streamingMockCache{mockCache: mockCache{store: map[string][]byte{
+		decompressedHash: testData,
+	}}}
+	metadata := &common.ClipArchiveMetadata{StorageInfo: &common.OCIStorageInfo{
+		DecompressedHashByLayer: map[string]string{digest.String(): decompressedHash},
+	}}
+	storage := &OCIClipStorage{
+		metadata:              metadata,
+		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:            map[string]v1.Layer{digest.String(): &mockLayer{digest: digest, fetchError: errors.New("registry should not be read")}},
+		diskCacheDir:          t.TempDir(),
+		contentCache:          cache,
+		contentCacheAvailable: true,
+	}
+
+	_, layerPath, err := storage.ensureLayerCached(context.Background(), digest.String())
+	require.NoError(t, err)
+	got, err := os.ReadFile(layerPath)
+	require.NoError(t, err)
+	require.Equal(t, testData, got)
+	require.Equal(t, 1, cache.streamCalls)
+}
+
+func TestOCIStorage_InvalidContentCacheStreamFallsBackToRegistry(t *testing.T) {
+	testData := []byte("registry layer after corrupt shared cache stream")
+	compressedData := createGzipData(t, testData)
+	digest := v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("b", 64)}
+	sum := sha256.Sum256(testData)
+	decompressedHash := hex.EncodeToString(sum[:])
+
+	cache := &streamingMockCache{mockCache: mockCache{store: map[string][]byte{
+		decompressedHash: []byte("corrupt"),
+	}}}
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	close(release)
+	layer := &barrierCountingLayer{
+		mockLayer: &mockLayer{digest: digest, compressedData: compressedData},
+		started:   started,
+		release:   release,
+	}
+	metadata := &common.ClipArchiveMetadata{StorageInfo: &common.OCIStorageInfo{
+		DecompressedHashByLayer: map[string]string{digest.String(): decompressedHash},
+	}}
+	storage := &OCIClipStorage{
+		metadata:              metadata,
+		storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:            map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir:          t.TempDir(),
+		contentCache:          cache,
+		contentCacheAvailable: true,
+	}
+
+	_, layerPath, err := storage.ensureLayerCached(context.Background(), digest.String())
+	require.NoError(t, err)
+	got, err := os.ReadFile(layerPath)
+	require.NoError(t, err)
+	require.Equal(t, testData, got)
+	require.Equal(t, 1, cache.streamCalls)
+	require.Equal(t, 1, layer.Calls())
+}
+
+func TestOCIStorage_PrepareLayersUsesBoundedConcurrency(t *testing.T) {
+	const (
+		layerCount  = 6
+		concurrency = 3
+	)
+
+	started := make(chan struct{}, layerCount)
+	release := make(chan struct{})
+	layers := make([]string, 0, layerCount)
+	layerCache := make(map[string]v1.Layer, layerCount)
+	hashes := make(map[string]string, layerCount)
+	var expectedBytes int64
+	for i := 0; i < layerCount; i++ {
+		data := []byte(fmt.Sprintf("prepared layer %d", i))
+		digest := v1.Hash{Algorithm: "sha256", Hex: fmt.Sprintf("%064x", i+1)}
+		sum := sha256.Sum256(data)
+		hash := hex.EncodeToString(sum[:])
+		layers = append(layers, digest.String())
+		hashes[digest.String()] = hash
+		layerCache[digest.String()] = &barrierCountingLayer{
+			mockLayer: &mockLayer{digest: digest, compressedData: createGzipData(t, data)},
+			started:   started,
+			release:   release,
+		}
+		expectedBytes += int64(len(data))
+	}
+
+	storageInfo := &common.OCIStorageInfo{Layers: layers, DecompressedHashByLayer: hashes}
+	storage := &OCIClipStorage{
+		metadata:     &common.ClipArchiveMetadata{StorageInfo: storageInfo},
+		storageInfo:  storageInfo,
+		layerCache:   layerCache,
+		diskCacheDir: t.TempDir(),
+	}
+
+	var progressMu sync.Mutex
+	var progress []PrepareProgress
+	done := make(chan error, 1)
+	go func() {
+		done <- storage.Prepare(context.Background(), PrepareOptions{
+			Concurrency: concurrency,
+			Progress: func(update PrepareProgress) {
+				progressMu.Lock()
+				progress = append(progress, update)
+				progressMu.Unlock()
+			},
+		})
+	}()
+
+	for i := 0; i < concurrency; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("prepare did not fill its concurrency window")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("prepare exceeded its concurrency limit")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	require.NoError(t, <-done)
+
+	progressMu.Lock()
+	require.NotEmpty(t, progress)
+	final := progress[len(progress)-1]
+	progressMu.Unlock()
+	require.Equal(t, layerCount, final.Completed)
+	require.Equal(t, layerCount, final.Total)
+	require.Equal(t, expectedBytes, final.Bytes)
+}
+
 // Test streaming functionality
 func TestStreamFileInChunks_SmallFile(t *testing.T) {
 	// Create a small test file (less than chunk size)
@@ -1502,7 +1671,7 @@ func (c *blockingStoreCache) StoreContent(chunks chan []byte, hash string, opts 
 	return c.mockCache.StoreContent(chunks, hash, opts)
 }
 
-func TestDecompressAndCacheLayerWaitsForContentCacheStore(t *testing.T) {
+func TestDecompressAndCacheLayerDoesNotWaitForContentCacheStore(t *testing.T) {
 	testData := []byte("durable decompressed layer")
 	compressedData := createGzipData(t, testData)
 	digest := v1.Hash{Algorithm: "sha256", Hex: "syncstore123"}
@@ -1548,16 +1717,17 @@ func TestDecompressAndCacheLayerWaitsForContentCacheStore(t *testing.T) {
 
 	select {
 	case err := <-done:
-		t.Fatalf("decompressAndCacheLayer returned before content cache store completed: %v", err)
-	default:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("decompressAndCacheLayer waited for content cache store")
 	}
 
 	close(cache.release)
-	require.NoError(t, <-done)
-
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	require.Equal(t, testData, cache.store[decompressedHash])
+	require.Eventually(t, func() bool {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		return bytes.Equal(testData, cache.store[decompressedHash])
+	}, time.Second, 10*time.Millisecond)
 }
 
 // TestLayerCacheEliminatesRepeatedInflates verifies that accessing the same layer

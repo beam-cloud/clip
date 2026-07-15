@@ -59,6 +59,7 @@ type ExtractOptions struct {
 }
 
 type MountOptions struct {
+	Context               context.Context
 	ArchivePath           string
 	MountPoint            string
 	CachePath             string
@@ -69,6 +70,8 @@ type MountOptions struct {
 	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
 	RegistryCredProvider  interface{} // Registry authentication (for OCI archives)
 	ReadTraceObserver     common.ReadTraceObserver
+	PrepareConcurrency    int
+	PrepareProgress       func(storage.PrepareProgress)
 }
 
 type StoreS3Options struct {
@@ -151,6 +154,19 @@ func ExtractArchive(options ExtractOptions) error {
 	return nil
 }
 
+// PrepareArchiveContent materializes archive content without mounting it. This
+// lets callers keep short-lived mount coordination locks out of long download
+// and decompression work.
+func PrepareArchiveContent(options MountOptions) error {
+	archiveStorage, err := openArchiveStorage(options)
+	if err != nil {
+		return err
+	}
+	defer archiveStorage.Cleanup()
+
+	return prepareArchiveContent(options, archiveStorage)
+}
+
 // Mount a clip archive to a directory
 func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Server, error) {
 	log.Info().Msgf("mounting archive %s to %s", options.ArchivePath, options.MountPoint)
@@ -162,39 +178,17 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		}
 	}
 
-	ca := NewClipArchiver()
-	metadata, err := ca.ExtractMetadata(options.ArchivePath)
+	archiveStorage, err := openArchiveStorage(options)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("invalid archive: %v", err)
+		return nil, nil, nil, err
 	}
 
-	// Handle StorageInfo type conversion
-	var s3Info *common.S3StorageInfo
-	if options.StorageInfo != nil {
-		if si, ok := options.StorageInfo.(*common.S3StorageInfo); ok {
-			s3Info = si
-		} else if si, ok := options.StorageInfo.(common.S3StorageInfo); ok {
-			s3Info = &si
-		}
+	if err := prepareArchiveContent(options, archiveStorage); err != nil {
+		_ = archiveStorage.Cleanup()
+		return nil, nil, nil, err
 	}
 
-	storage, err := storage.NewClipStorage(storage.ClipStorageOpts{
-		ArchivePath:           options.ArchivePath,
-		CachePath:             options.CachePath,
-		Metadata:              metadata,
-		Credentials:           options.Credentials,
-		StorageInfo:           s3Info,
-		ContentCache:          options.ContentCache,
-		UseCheckpoints:        options.UseCheckpoints,
-		ContentCacheAvailable: options.ContentCacheAvailable,
-		RegistryCredProvider:  options.RegistryCredProvider,
-		ReadTraceObserver:     options.ReadTraceObserver,
-	})
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("could not load storage: %v", err)
-	}
-
-	clipfs, err := NewFileSystem(storage, ClipFileSystemOpts{
+	clipfs, err := NewFileSystem(archiveStorage, ClipFileSystemOpts{
 		ContentCache:          options.ContentCache,
 		ContentCacheAvailable: options.ContentCacheAvailable,
 		ReadTraceObserver:     options.ReadTraceObserver,
@@ -234,7 +228,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 			}
 
 			server.Wait()
-			storage.Cleanup()
+			archiveStorage.Cleanup()
 
 			close(serverError)
 		}()
@@ -243,6 +237,59 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 	}
 
 	return startServer, serverError, server, nil
+}
+
+func openArchiveStorage(options MountOptions) (storage.ClipStorageInterface, error) {
+	metadata, err := NewClipArchiver().ExtractMetadata(options.ArchivePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid archive: %v", err)
+	}
+
+	var s3Info *common.S3StorageInfo
+	if si, ok := options.StorageInfo.(*common.S3StorageInfo); ok {
+		s3Info = si
+	} else if si, ok := options.StorageInfo.(common.S3StorageInfo); ok {
+		s3Info = &si
+	}
+
+	archiveStorage, err := storage.NewClipStorage(storage.ClipStorageOpts{
+		ArchivePath:           options.ArchivePath,
+		CachePath:             options.CachePath,
+		Metadata:              metadata,
+		Credentials:           options.Credentials,
+		StorageInfo:           s3Info,
+		ContentCache:          options.ContentCache,
+		UseCheckpoints:        options.UseCheckpoints,
+		ContentCacheAvailable: options.ContentCacheAvailable,
+		RegistryCredProvider:  options.RegistryCredProvider,
+		ReadTraceObserver:     options.ReadTraceObserver,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not load storage: %v", err)
+	}
+	return archiveStorage, nil
+}
+
+func prepareArchiveContent(options MountOptions, archiveStorage storage.ClipStorageInterface) error {
+	if options.PrepareConcurrency <= 0 {
+		return nil
+	}
+	preparer, ok := archiveStorage.(storage.ContentPreparer)
+	if !ok {
+		return nil
+	}
+
+	ctx := options.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := preparer.Prepare(ctx, storage.PrepareOptions{
+		Concurrency: options.PrepareConcurrency,
+		Progress:    options.PrepareProgress,
+	}); err != nil {
+		return fmt.Errorf("could not prepare archive content: %v", err)
+	}
+	return nil
 }
 
 // Store CLIP in remote storage

@@ -23,6 +23,13 @@ type ContentCacheReadInto interface {
 	ReadContentInto(hash string, offset int64, dest []byte, opts struct{ RoutingKey string }) (int64, error)
 }
 
+// ContentCacheStream exposes a complete cached object without forcing callers
+// to allocate it in memory. The reported size is used to detect interrupted or
+// incomplete streams before the object is published locally.
+type ContentCacheStream interface {
+	GetContentStream(hash string, opts struct{ RoutingKey string }) (<-chan []byte, int64, error)
+}
+
 type ContentCacheExists interface {
 	ContentExists(hash string, opts struct{ RoutingKey string }) (bool, error)
 }
@@ -64,6 +71,21 @@ type ContextClipStorageInterface interface {
 
 type ClientLocalFileViewer interface {
 	ClientLocalFileView(ctx context.Context, node *common.ClipNode, offset int64, length int64) (ClientLocalFileView, bool, error)
+}
+
+type PrepareProgress struct {
+	Completed int
+	Total     int
+	Bytes     int64
+}
+
+type PrepareOptions struct {
+	Concurrency int
+	Progress    func(PrepareProgress)
+}
+
+type ContentPreparer interface {
+	Prepare(ctx context.Context, opts PrepareOptions) error
 }
 
 type ClipStorageCredentials struct {

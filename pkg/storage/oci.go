@@ -3,10 +3,12 @@ package storage
 import (
 	// klauspost/compress gunzip is substantially faster than stdlib for
 	// full-layer decompression on cache misses
-	"github.com/klauspost/compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/klauspost/compress/gzip"
 	"io"
 	"net/http"
 	"os"
@@ -17,11 +19,13 @@ import (
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/gofrs/flock"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	log "github.com/rs/zerolog/log"
+	"golang.org/x/sync/errgroup"
 )
 
 // OCIClipStorage implements lazy, range-based reading from OCI registries with disk + remote caching
@@ -44,6 +48,10 @@ type OCIClipStorage struct {
 }
 
 var globalLayerDecompress = newLayerDecompressGroup()
+
+const maxBackgroundContentCacheWarms = 2
+
+var backgroundContentCacheWarmSlots = make(chan struct{}, maxBackgroundContentCacheWarms)
 
 type layerDecompressGroup struct {
 	mu       sync.Mutex
@@ -143,6 +151,58 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		Msg("initialized OCI storage with disk cache")
 
 	return storage, nil
+}
+
+func (s *OCIClipStorage) Prepare(ctx context.Context, opts PrepareOptions) error {
+	layers := append([]string(nil), s.storageInfo.Layers...)
+	if len(layers) == 0 {
+		return nil
+	}
+
+	concurrency := opts.Concurrency
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if concurrency > len(layers) {
+		concurrency = len(layers)
+	}
+
+	var progressMu sync.Mutex
+	completed := 0
+	var preparedBytes int64
+	report := func(size int64) {
+		if opts.Progress == nil {
+			return
+		}
+		progressMu.Lock()
+		completed++
+		preparedBytes += size
+		opts.Progress(PrepareProgress{Completed: completed, Total: len(layers), Bytes: preparedBytes})
+		progressMu.Unlock()
+	}
+	if opts.Progress != nil {
+		opts.Progress(PrepareProgress{Total: len(layers)})
+	}
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(concurrency)
+	for _, layerDigest := range layers {
+		layerDigest := layerDigest
+		group.Go(func() error {
+			_, layerPath, err := s.ensureLayerCached(groupCtx, layerDigest)
+			if err != nil {
+				return fmt.Errorf("prepare layer %s: %w", layerDigest, err)
+			}
+			info, err := os.Stat(layerPath)
+			if err != nil {
+				return fmt.Errorf("stat prepared layer %s: %w", layerDigest, err)
+			}
+			report(info.Size())
+			return nil
+		})
+	}
+
+	return group.Wait()
 }
 
 // initLayers fetches layer descriptors from the registry
@@ -589,16 +649,36 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 			return nil
 		}
 
+		fileLock := flock.New(layerPath + ".lock")
+		locked, err := fileLock.TryLockContext(ctx, 100*time.Millisecond)
+		if err != nil {
+			return fmt.Errorf("wait for layer cache lock: %w", err)
+		}
+		if !locked {
+			return fmt.Errorf("failed to acquire layer cache lock: %s", layerPath)
+		}
+		defer fileLock.Unlock()
+
+		// Another worker process may have completed the layer while this process
+		// was waiting on the shared disk lock.
+		if _, err := os.Stat(layerPath); err == nil {
+			s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
+			return nil
+		}
+
 		log.Info().
 			Str("layer_digest", digest).
 			Str("decompressed_hash", decompressedHash).
-			Msg("oci cache miss - downloading and decompressing layer from registry")
+			Msg("oci layer cache miss - materializing layer")
 
 		decompressStart := time.Now()
-		err := s.decompressAndCacheLayer(digest, layerPath)
+		source, err := s.decompressAndCacheLayerContext(ctx, digest, layerPath)
+		if source == "" {
+			source = "oci_registry"
+		}
 		s.observeRead(ctx, common.ReadTraceEvent{
 			Operation:        "clip.layer_decompress",
-			Source:           "oci_registry",
+			Source:           source,
 			LayerDigest:      digest,
 			DecompressedHash: decompressedHash,
 			StartedAt:        decompressStart,
@@ -729,6 +809,9 @@ func (s *OCIClipStorage) warmDecompressedLayerInContentCache(decompressedHash st
 	if s.contentCache == nil || !s.contentCacheAvailable || decompressedHash == "" || diskPath == "" {
 		return
 	}
+	backgroundContentCacheWarmSlots <- struct{}{}
+	defer func() { <-backgroundContentCacheWarmSlots }()
+
 	if err := s.storeDecompressedInRemoteCache(decompressedHash, diskPath); err != nil {
 		log.Warn().
 			Err(err).
@@ -783,21 +866,47 @@ func contentCacheErrorKind(err error) string {
 	}
 }
 
-// decompressAndCacheLayer decompresses a layer from OCI registry and caches it
-// This is called when both disk cache and ContentCache miss
-// The entire layer is cached so subsequent reads (on this or other nodes) can do range reads
+// decompressAndCacheLayer is retained for focused tests and callers that do
+// not have a request context. Runtime materialization uses the context-aware
+// path below.
 func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string) error {
-	metrics := common.GetGlobalMetrics()
+	_, err := s.decompressAndCacheLayerContext(context.Background(), digest, diskPath)
+	return err
+}
 
-	// Fetch from OCI registry and decompress
+func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, digest string, diskPath string) (string, error) {
+	decompressedHash := s.getDecompressedHash(digest)
+	if decompressedHash == "" {
+		return "", fmt.Errorf("no decompressed hash in metadata for layer: %s", digest)
+	}
+
+	if s.contentCacheAvailable && s.contentCache != nil {
+		if cacheStream, ok := s.contentCache.(ContentCacheStream); ok {
+			written, err := restoreLayerFromContentCache(ctx, cacheStream, decompressedHash, diskPath)
+			if err == nil {
+				log.Info().
+					Str("layer", digest).
+					Str("decompressed_hash", decompressedHash).
+					Int64("bytes", written).
+					Msg("layer restored from content cache")
+				return "content_cache", nil
+			}
+			log.Debug().
+				Err(err).
+				Str("layer", digest).
+				Str("decompressed_hash", decompressedHash).
+				Msg("full layer content cache restore missed; falling back to registry")
+		}
+	}
+
+	metrics := common.GetGlobalMetrics()
 	s.mu.RLock()
 	layer, exists := s.layerCache[digest]
 	s.mu.RUnlock()
-
 	if !exists {
-		fetched, err := s.fetchLayerByDigest(context.Background(), digest)
+		fetched, err := s.fetchLayerByDigest(ctx, digest)
 		if err != nil {
-			return fmt.Errorf("layer not found: %s: %w", digest, err)
+			return "oci_registry", fmt.Errorf("layer not found: %s: %w", digest, err)
 		}
 		layer = fetched
 		s.mu.Lock()
@@ -806,79 +915,129 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 	}
 
 	inflateStart := time.Now()
-
-	// Fetch compressed layer from OCI registry
 	compressedRC, err := layer.Compressed()
 	if err != nil {
-		return fmt.Errorf("failed to get compressed layer: %w", err)
+		return "oci_registry", fmt.Errorf("failed to get compressed layer: %w", err)
 	}
 	defer compressedRC.Close()
 
-	// Create a unique same-directory temp file. Multiple worker processes can
-	// share the same disk cache directory, so a deterministic "<hash>.tmp" name
-	// can race even though each process has its own singleflight.
-	tempFile, err := os.CreateTemp(filepath.Dir(diskPath), filepath.Base(diskPath)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp cache file: %w", err)
-	}
-	tempPath := tempFile.Name()
-	defer os.Remove(tempPath) // Clean up on error or if another process wins.
-
-	// Decompress directly to disk (streaming)
 	gzr, err := gzip.NewReader(compressedRC)
 	if err != nil {
-		tempFile.Close()
-		return fmt.Errorf("failed to create gzip reader: %w", err)
+		return "oci_registry", fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer gzr.Close()
 
-	written, err := io.Copy(tempFile, gzr)
-	tempFile.Close()
-
+	written, err := writeVerifiedLayer(diskPath, decompressedHash, func(w io.Writer) (int64, error) {
+		return io.Copy(w, gzr)
+	})
 	if err != nil {
-		return fmt.Errorf("failed to decompress layer to disk: %w", err)
-	}
-
-	decompressedHash := s.getDecompressedHash(digest)
-	if _, err := os.Stat(diskPath); err == nil {
-		s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, diskPath)
-		return nil
-	}
-
-	// Atomic rename. If another worker materialized the same immutable layer
-	// between our final stat and rename, treat that as success.
-	if err := os.Rename(tempPath, diskPath); err != nil {
-		if _, statErr := os.Stat(diskPath); statErr == nil {
-			s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, diskPath)
-			return nil
-		}
-		return fmt.Errorf("failed to rename temp file: %w", err)
+		return "oci_registry", fmt.Errorf("failed to decompress layer to disk: %w", err)
 	}
 
 	duration := time.Since(inflateStart)
 	metrics.RecordInflateCPU(duration)
-
 	log.Info().
 		Str("layer", digest).
 		Int64("bytes", written).
 		Dur("duration", duration).
 		Msg("layer decompressed and cached")
 
-	// Publish to the shared content cache before returning. This keeps the
-	// "layer cached" state durable across worker replacement; otherwise a short
-	// workload can finish, the worker can be deleted, and the background store
-	// can be lost before the next worker tries to reuse the layer.
-	if s.contentCache != nil && s.contentCacheAvailable {
-		if err := s.storeDecompressedInRemoteCache(decompressedHash, diskPath); err != nil {
-			log.Warn().
-				Err(err).
-				Str("layer", digest).
-				Str("decompressed_hash", decompressedHash).
-				Msg("content cache store failed after layer decompression")
-		}
+	// Shared cache publication is best-effort and must not extend the image
+	// preparation critical path. Recent-stub reconciliation remains the durable
+	// fallback if this worker exits before the warm completes.
+	s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, diskPath)
+	return "oci_registry", nil
+}
+
+func restoreLayerFromContentCache(ctx context.Context, cacheStream ContentCacheStream, decompressedHash, diskPath string) (int64, error) {
+	chunks, expectedSize, err := cacheStream.GetContentStream(decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
+	if err != nil {
+		return 0, err
+	}
+	if expectedSize <= 0 {
+		go drainContentChunks(chunks)
+		return 0, fmt.Errorf("%w: invalid stream size %d", ErrContentCacheMiss, expectedSize)
 	}
 
-	return nil
+	return writeVerifiedLayer(diskPath, decompressedHash, func(w io.Writer) (int64, error) {
+		var written int64
+		for {
+			select {
+			case <-ctx.Done():
+				go drainContentChunks(chunks)
+				return written, ctx.Err()
+			case chunk, ok := <-chunks:
+				if !ok {
+					if written != expectedSize {
+						return written, fmt.Errorf("%w: expected %d bytes, received %d", ErrContentCacheMiss, expectedSize, written)
+					}
+					return written, nil
+				}
+				if int64(len(chunk)) > expectedSize-written {
+					go drainContentChunks(chunks)
+					return written, fmt.Errorf("%w: stream exceeded expected size %d", ErrContentCacheMiss, expectedSize)
+				}
+				n, err := w.Write(chunk)
+				written += int64(n)
+				if err != nil {
+					go drainContentChunks(chunks)
+					return written, err
+				}
+				if n != len(chunk) {
+					go drainContentChunks(chunks)
+					return written, io.ErrShortWrite
+				}
+			}
+		}
+	})
+}
+
+func drainContentChunks(chunks <-chan []byte) {
+	for range chunks {
+	}
+}
+
+func writeVerifiedLayer(diskPath, expectedHash string, write func(io.Writer) (int64, error)) (int64, error) {
+	tempFile, err := os.CreateTemp(filepath.Dir(diskPath), filepath.Base(diskPath)+".*.tmp")
+	if err != nil {
+		return 0, fmt.Errorf("failed to create temp cache file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = tempFile.Close()
+		}
+		_ = os.Remove(tempPath)
+	}()
+
+	hasher := sha256.New()
+	written, err := write(io.MultiWriter(tempFile, hasher))
+	if err != nil {
+		return written, err
+	}
+	if err := tempFile.Sync(); err != nil {
+		return written, fmt.Errorf("sync temp cache file: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return written, fmt.Errorf("close temp cache file: %w", err)
+	}
+	closed = true
+
+	actualHash := hex.EncodeToString(hasher.Sum(nil))
+	expectedHash = strings.TrimPrefix(expectedHash, "sha256:")
+	if !strings.EqualFold(actualHash, expectedHash) {
+		return written, fmt.Errorf("decompressed layer hash mismatch: expected %s, got %s", expectedHash, actualHash)
+	}
+
+	if err := os.Rename(tempPath, diskPath); err != nil {
+		return written, fmt.Errorf("publish verified layer: %w", err)
+	}
+	if dir, err := os.Open(filepath.Dir(diskPath)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return written, nil
 }
 
 // writeToDiskCache writes data to disk cache
