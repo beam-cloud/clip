@@ -143,10 +143,11 @@ func (h *hashingReadCloser) sum() string {
 // indexLayerFromBestSource indexes a layer using the cheapest available
 // source of its compressed bytes:
 //
-//  1. The content cache, keyed by the layer digest (the same content-addressed
-//     mechanism used for layer caching at runtime). Hit -> no registry pull.
-//  2. The registry. The compressed bytes are then warmed into the content
-//     cache so other workers skip the registry pull next time.
+//  1. A supplied local OCI layout, when present.
+//  2. The content cache, keyed by the layer digest.
+//  3. The registry.
+//
+// Bytes read from a local layout or registry are warmed into the content cache.
 func (ca *ClipArchiver) indexLayerFromBestSource(
 	ctx context.Context,
 	layer v1.Layer,
@@ -158,7 +159,7 @@ func (ca *ClipArchiver) indexLayerFromBestSource(
 	blobKey := compressedLayerCacheKey(layerDigest)
 
 	// Source 1: compressed blob from the content cache
-	if opts.ContentCache != nil {
+	if opts.ContentCache != nil && opts.LocalLayoutPath == "" {
 		compressedSize := compressedBytesTotal
 		if compressedSize <= 0 {
 			var err error

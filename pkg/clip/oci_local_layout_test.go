@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/beam-cloud/clip/pkg/common"
@@ -27,6 +28,10 @@ func TestIndexOCIImageFromLocalLayout(t *testing.T) {
 		return io.NopCloser(bytes.NewReader(compressed)), nil
 	})
 	require.NoError(t, err)
+	layerDigest, err := layer.Digest()
+	require.NoError(t, err)
+	cache := newFakeBlobContentCache()
+	require.Equal(t, strings.TrimPrefix(layerDigest.String(), "sha256:"), cache.put(compressed))
 
 	img, err := mutate.AppendLayers(empty.Image, layer)
 	require.NoError(t, err)
@@ -52,6 +57,8 @@ func TestIndexOCIImageFromLocalLayout(t *testing.T) {
 			CheckpointMiB:   2,
 			Platform:        &v1.Platform{OS: "linux", Architecture: "amd64"},
 			ProgressChan:    progress,
+			ContentCache:    cache,
+			ContentCacheDir: t.TempDir(),
 		},
 	)
 	require.NoError(t, err)
