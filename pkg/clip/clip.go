@@ -320,8 +320,9 @@ func StoreS3(storeS3Opts StoreS3Options) error {
 
 // CreateFromOCIImageOptions configures OCI image indexing
 type CreateFromOCIImageOptions struct {
-	ImageRef         string      // Source image to index (can be local)
+	ImageRef         string      // Registry image reference used for fetching and metadata
 	StorageImageRef  string      // Optional: image reference to store in metadata (defaults to ImageRef)
+	LocalLayoutPath  string      // Optional OCI image-layout directory to read instead of the registry
 	OutputPath       string      // Path for the metadata-only .clip archive
 	CheckpointMiB    int64       // Gzip checkpoint interval
 	CredProvider     interface{} // Optional registry credential provider
@@ -357,6 +358,7 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 	err := archiver.CreateFromOCI(ctx, IndexOCIImageOptions{
 		ImageRef:         options.ImageRef,
 		StorageImageRef:  options.StorageImageRef,
+		LocalLayoutPath:  options.LocalLayoutPath,
 		CheckpointMiB:    options.CheckpointMiB,
 		CredProvider:     credProvider,
 		ProgressChan:     options.ProgressChan,

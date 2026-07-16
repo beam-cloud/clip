@@ -21,6 +21,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	ocilayout "github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/klauspost/compress/gzip"
@@ -33,6 +34,7 @@ import (
 const (
 	LayerSourceIndexCache   = "index-cache"   // per-layer index artifact cache hit (no bytes read)
 	LayerSourceContentCache = "content-cache" // compressed blob read from the content cache
+	LayerSourceLocalLayout  = "local-layout"  // compressed blob read from a local OCI layout
 	LayerSourceRegistry     = "registry"      // compressed blob pulled from the registry
 )
 
@@ -60,8 +62,9 @@ type OCIIndexProgress struct {
 
 // IndexOCIImageOptions configures the OCI indexer
 type IndexOCIImageOptions struct {
-	ImageRef         string                            // Source image to index (can be local)
+	ImageRef         string                            // Registry image reference used for fetching and metadata
 	StorageImageRef  string                            // Optional: image reference to store in metadata (defaults to ImageRef)
+	LocalLayoutPath  string                            // Optional OCI image-layout directory to read instead of the registry
 	CheckpointMiB    int64                             // Checkpoint every N MiB (default 2)
 	CredProvider     common.RegistryCredentialProvider // optional credential provider for registry authentication
 	ProgressChan     chan<- OCIIndexProgress           // optional channel for progress updates
@@ -75,6 +78,86 @@ type IndexOCIImageOptions struct {
 const defaultIndexConcurrency = 4
 
 const indexedLayerContentCacheChunkSize = 4 * 1024 * 1024
+
+func imageFromIndex(index v1.ImageIndex, platform v1.Platform) (v1.Image, error) {
+	manifest, err := index.IndexManifest()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, descriptor := range manifest.Manifests {
+		if descriptor.Platform != nil && !descriptor.Platform.Satisfies(platform) {
+			continue
+		}
+
+		switch {
+		case descriptor.MediaType.IsImage():
+			return index.Image(descriptor.Digest)
+		case descriptor.MediaType.IsIndex():
+			child, err := index.ImageIndex(descriptor.Digest)
+			if err != nil {
+				return nil, err
+			}
+			return imageFromIndex(child, platform)
+		}
+	}
+
+	return nil, fmt.Errorf("OCI layout contains no image for %s/%s", platform.OS, platform.Architecture)
+}
+
+func loadOCIImage(ctx context.Context, opts IndexOCIImageOptions, platform v1.Platform) (v1.Image, error) {
+	if opts.LocalLayoutPath != "" {
+		layoutPath, err := ocilayout.FromPath(opts.LocalLayoutPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open OCI image layout: %w", err)
+		}
+		index, err := layoutPath.ImageIndex()
+		if err != nil {
+			return nil, fmt.Errorf("failed to open OCI image index: %w", err)
+		}
+		img, err := imageFromIndex(index, platform)
+		if err != nil {
+			return nil, fmt.Errorf("failed to select image from OCI layout: %w", err)
+		}
+		return img, nil
+	}
+
+	ref, err := name.ParseReference(opts.ImageRef)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse image reference: %w", err)
+	}
+
+	credProvider := opts.CredProvider
+	if credProvider == nil {
+		credProvider = common.DefaultProvider()
+	}
+
+	remoteOpts := []remote.Option{remote.WithContext(ctx), remote.WithPlatform(platform)}
+	log.Debug().
+		Str("registry", ref.Context().RegistryStr()).
+		Str("os", platform.OS).
+		Str("arch", platform.Architecture).
+		Msg("Fetching OCI image")
+	authConfig, err := credProvider.GetCredentials(ctx, ref.Context().RegistryStr(), ref.Context().RepositoryStr())
+	if err != nil && err != common.ErrNoCredentials {
+		log.Warn().
+			Err(err).
+			Str("registry", ref.Context().RegistryStr()).
+			Str("provider", credProvider.Name()).
+			Msg("Failed to get credentials from provider, falling back to keychain")
+	}
+	if authConfig != nil {
+		remoteOpts = append(remoteOpts, remote.WithAuth(authn.FromConfig(*authConfig)))
+	} else {
+		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	}
+
+	img, err := remote.Image(ref, remoteOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch image: %w", err)
+	}
+	return img, nil
+}
 
 type indexedLayerContentCacheSpool struct {
 	file *os.File
@@ -183,12 +266,6 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		opts.CheckpointMiB = 2 // default
 	}
 
-	// Parse image reference for fetching
-	ref, err := name.ParseReference(opts.ImageRef)
-	if err != nil {
-		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to parse image reference: %w", err)
-	}
-
 	// Determine which image reference to store in metadata
 	// If StorageImageRef is provided, use it; otherwise use ImageRef
 	storageRef := opts.ImageRef
@@ -207,53 +284,6 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	repository = storageRefParsed.Context().RepositoryStr()
 	reference = storageRefParsed.Identifier()
 
-	// Log the indexing strategy
-	if storageRef != opts.ImageRef {
-		log.Debug().Msgf("Indexing from local: %s, will store reference to: %s", opts.ImageRef, storageRef)
-	}
-
-	// Determine which credential provider to use
-	credProvider := opts.CredProvider
-	if credProvider == nil {
-		credProvider = common.DefaultProvider()
-	}
-
-	// Build remote options with authentication
-	remoteOpts := []remote.Option{remote.WithContext(ctx)}
-
-	// IMPORTANT: Get credentials for the SOURCE registry (where we're fetching from),
-	// not the storage reference (which is just stored in metadata)
-	fetchRegistryURL := ref.Context().RegistryStr()
-	fetchRepository := ref.Context().RepositoryStr()
-
-	// Try to get credentials from provider
-	authConfig, err := credProvider.GetCredentials(ctx, fetchRegistryURL, fetchRepository)
-	if err != nil && err != common.ErrNoCredentials {
-		log.Warn().
-			Err(err).
-			Str("registry", fetchRegistryURL).
-			Str("provider", credProvider.Name()).
-			Msg("Failed to get credentials from provider, falling back to keychain")
-	}
-
-	if authConfig != nil {
-		// Use provided credentials
-		log.Debug().
-			Str("registry", fetchRegistryURL).
-			Str("provider", credProvider.Name()).
-			Msg("Using credentials from provider")
-		// Convert AuthConfig to proper authenticator (handles all auth types: username/password, tokens, etc.)
-		auth := authn.FromConfig(*authConfig)
-		remoteOpts = append(remoteOpts, remote.WithAuth(auth))
-	} else {
-		// Fall back to default keychain for anonymous or keychain-based auth
-		log.Debug().
-			Str("registry", fetchRegistryURL).
-			Msg("No credentials from provider, using default keychain")
-		remoteOpts = append(remoteOpts, remote.WithAuthFromKeychain(authn.DefaultKeychain))
-	}
-
-	// Add platform option (default to host architecture)
 	platform := opts.Platform
 	if platform == nil {
 		platform = &v1.Platform{
@@ -261,16 +291,10 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 			Architecture: runtime.GOARCH,
 		}
 	}
-	remoteOpts = append(remoteOpts, remote.WithPlatform(*platform))
-	log.Debug().
-		Str("os", platform.OS).
-		Str("arch", platform.Architecture).
-		Msg("Using platform for image fetch")
 
-	// Fetch image
-	img, err := remote.Image(ref, remoteOpts...)
+	img, err := loadOCIImage(ctx, opts, *platform)
 	if err != nil {
-		return nil, nil, nil, nil, "", "", "", nil, fmt.Errorf("failed to fetch image: %w", err)
+		return nil, nil, nil, nil, "", "", "", nil, err
 	}
 	imageDigest, err := img.Digest()
 	if err != nil {
@@ -337,7 +361,11 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		layerDigests = append(layerDigests, digest.String())
 	}
 
-	log.Info().Msgf("Indexing %d layers from %s", len(layers), opts.ImageRef)
+	imageSource := opts.ImageRef
+	if opts.LocalLayoutPath != "" {
+		imageSource = opts.LocalLayoutPath
+	}
+	log.Info().Msgf("Indexing %d layers from %s", len(layers), imageSource)
 
 	// Index layers concurrently. Each layer produces a self-contained,
 	// deterministic artifact; artifacts are merged sequentially in layer
@@ -451,6 +479,9 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 			artifact, source, err := ca.indexLayerFromBestSource(gctx, layer, layerDigestStr, opts, compressedBytesTotal, onBytes)
 			if err != nil {
 				return fmt.Errorf("failed to index layer %s: %w", layerDigestStr, err)
+			}
+			if source == LayerSourceRegistry && opts.LocalLayoutPath != "" {
+				source = LayerSourceLocalLayout
 			}
 			artifacts[i] = artifact
 
