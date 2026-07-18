@@ -96,6 +96,19 @@ func immutableFilesystemOptions() *fs.Options {
 	}
 }
 
+func immutableMountOptions() *fuse.MountOptions {
+	return &fuse.MountOptions{
+		MaxBackground:        512,
+		DisableXAttrs:        true,
+		EnableSymlinkCaching: true,
+		SyncRead:             false,
+		RememberInodes:       true,
+		DisableReadDirPlus:   true,
+		MaxWrite:             1024 * 1024,
+		MaxReadAhead:         1024 * 1024,
+	}
+}
+
 // Create Archive
 func CreateArchive(options CreateOptions) error {
 	log.Info().Msgf("creating archive from %s to %s", options.InputPath, options.OutputPath)
@@ -210,15 +223,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 	}
 
 	root, _ := clipfs.Root()
-	server, err := fuse.NewServer(fs.NewNodeFS(root, immutableFilesystemOptions()), options.MountPoint, &fuse.MountOptions{
-		MaxBackground:        512,
-		DisableXAttrs:        true,
-		EnableSymlinkCaching: true,
-		SyncRead:             false,
-		RememberInodes:       true,
-		MaxWrite:             1024 * 1024,
-		MaxReadAhead:         1024 * 1024,
-	})
+	server, err := fuse.NewServer(fs.NewNodeFS(root, immutableFilesystemOptions()), options.MountPoint, immutableMountOptions())
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("could not create server: %v", err)
 	}
