@@ -61,6 +61,7 @@ type ExtractOptions struct {
 type MountOptions struct {
 	Context               context.Context
 	ArchivePath           string
+	Metadata              *common.ClipArchiveMetadata
 	MountPoint            string
 	CachePath             string
 	ContentCache          storage.ContentCache
@@ -245,9 +246,13 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 }
 
 func openArchiveStorage(options MountOptions) (storage.ClipStorageInterface, error) {
-	metadata, err := NewClipArchiver().ExtractMetadata(options.ArchivePath)
-	if err != nil {
-		return nil, fmt.Errorf("invalid archive: %v", err)
+	metadata := options.Metadata
+	if metadata == nil {
+		var err error
+		metadata, err = NewClipArchiver().ExtractMetadata(options.ArchivePath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid archive: %v", err)
+		}
 	}
 
 	var s3Info *common.S3StorageInfo

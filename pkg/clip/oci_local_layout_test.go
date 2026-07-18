@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,4 +98,16 @@ func TestIndexOCIImageFromLocalLayout(t *testing.T) {
 	require.Equal(t, "registry.example.com", info.RegistryURL)
 	require.Equal(t, "beam/image", info.Repository)
 	require.Equal(t, digest.String(), info.Reference)
+
+	// Reuse immutable metadata during preparation and mount instead of decoding
+	// the full index again.
+	require.NoError(t, os.Truncate(outputPath, 0))
+	archiveStorage, err := openArchiveStorage(MountOptions{
+		ArchivePath: outputPath,
+		CachePath:   t.TempDir(),
+		Metadata:    archive,
+	})
+	require.NoError(t, err)
+	require.Same(t, archive, archiveStorage.Metadata())
+	require.NoError(t, archiveStorage.Cleanup())
 }
