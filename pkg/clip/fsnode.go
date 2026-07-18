@@ -18,9 +18,11 @@ import (
 
 type FSNode struct {
 	fs.Inode
-	filesystem *ClipFileSystem
-	clipNode   *common.ClipNode
-	attr       fuse.Attr
+	filesystem     *ClipFileSystem
+	clipNode       *common.ClipNode
+	attr           fuse.Attr
+	dirEntriesOnce sync.Once
+	dirEntries     []fuse.DirEntry
 }
 
 const clipFileHandleFDCacheSize = 2048
@@ -482,8 +484,10 @@ func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 func (n *FSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	log.Debug().Str("path", n.clipNode.Path).Msg("Readdir called")
 
-	dirEntries := n.filesystem.storage.Metadata().ListDirectory(n.clipNode.Path)
-	return fs.NewListDirStream(dirEntries), fs.OK
+	n.dirEntriesOnce.Do(func() {
+		n.dirEntries = n.filesystem.storage.Metadata().ListDirectory(n.clipNode.Path)
+	})
+	return fs.NewListDirStream(n.dirEntries), fs.OK
 }
 
 func (n *FSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {

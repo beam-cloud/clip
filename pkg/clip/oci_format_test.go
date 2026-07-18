@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -454,7 +455,7 @@ func TestOCIImageMetadataExtraction(t *testing.T) {
 	t.Logf("Image: %s (digest: %s)", imgMeta.Name, imgMeta.Digest[:20]+"...")
 	
 	// Verify platform information
-	assert.Equal(t, "amd64", imgMeta.Architecture, "alpine should be amd64")
+	assert.Equal(t, runtime.GOARCH, imgMeta.Architecture, "alpine should match the requested platform")
 	assert.Equal(t, "linux", imgMeta.Os, "alpine should be linux")
 	t.Logf("Platform: %s/%s", imgMeta.Os, imgMeta.Architecture)
 	

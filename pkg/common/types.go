@@ -91,29 +91,21 @@ func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
 		node := a.(*ClipNode)
 		nodePath := node.Path
 
-		// Check if this node path starts with 'path' (meaning it is a child --> continue)
+		// Matching paths are contiguous in the index. Stop as soon as the
+		// traversal leaves this directory instead of scanning the rest of the
+		// archive.
 		if len(nodePath) < pathLen || nodePath[:pathLen] != path {
+			return false
+		}
+
+		relativePath := nodePath[pathLen:]
+		if relativePath == "" || strings.IndexByte(relativePath, '/') >= 0 {
 			return true
 		}
-
-		// Check if there are any "/" left after removing the prefix
-		for i := pathLen; i < len(nodePath); i++ {
-			if nodePath[i] == '/' {
-				if i == pathLen || nodePath[i-1] != '/' {
-					// This node is not an immediate child, continue on
-					return true
-				}
-			}
-		}
-
-		// Node is an immediate child, so we append it to entries
-		relativePath := nodePath[pathLen:]
-		if relativePath != "" {
-			entries = append(entries, fuse.DirEntry{
-				Mode: node.Attr.Mode,
-				Name: relativePath,
-			})
-		}
+		entries = append(entries, fuse.DirEntry{
+			Mode: node.Attr.Mode,
+			Name: relativePath,
+		})
 
 		return true
 	})
