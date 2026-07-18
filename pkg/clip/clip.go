@@ -84,6 +84,17 @@ type StoreS3Options struct {
 	ProgressChan chan<- int
 }
 
+const immutableMetadataCacheTimeout = 24 * time.Hour
+
+func immutableFilesystemOptions() *fs.Options {
+	timeout := immutableMetadataCacheTimeout
+	return &fs.Options{
+		AttrTimeout:     &timeout,
+		EntryTimeout:    &timeout,
+		NegativeTimeout: &timeout,
+	}
+}
+
 // Create Archive
 func CreateArchive(options CreateOptions) error {
 	log.Info().Msgf("creating archive from %s to %s", options.InputPath, options.OutputPath)
@@ -198,13 +209,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 	}
 
 	root, _ := clipfs.Root()
-	attrTimeout := time.Second * 60
-	entryTimeout := time.Second * 60
-	fsOptions := &fs.Options{
-		AttrTimeout:  &attrTimeout,
-		EntryTimeout: &entryTimeout,
-	}
-	server, err := fuse.NewServer(fs.NewNodeFS(root, fsOptions), options.MountPoint, &fuse.MountOptions{
+	server, err := fuse.NewServer(fs.NewNodeFS(root, immutableFilesystemOptions()), options.MountPoint, &fuse.MountOptions{
 		MaxBackground:        512,
 		DisableXAttrs:        true,
 		EnableSymlinkCaching: true,
