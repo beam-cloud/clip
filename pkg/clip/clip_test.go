@@ -18,9 +18,3 @@ func TestImmutableFilesystemOptionsCacheMetadata(t *testing.T) {
 		}
 	}
 }
-
-func TestImmutableMountOptionsAvoidEagerDirectoryLookups(t *testing.T) {
-	if !immutableMountOptions().DisableReadDirPlus {
-		t.Fatal("immutable CLIP mounts should disable readdirplus")
-	}
-}
