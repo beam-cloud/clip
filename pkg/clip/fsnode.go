@@ -41,8 +41,11 @@ func newClipFileHandle(node *FSNode) *clipFileHandle {
 }
 
 func (fh *clipFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
-		ctx = common.WithReadTraceCallerPID(ctx, caller.Pid)
+	if fh.node.readTracingEnabled() {
+		caller, ok := fuse.FromContext(ctx)
+		if ok && caller != nil {
+			ctx = common.WithReadTraceCallerPID(ctx, caller.Pid)
+		}
 	}
 	if res, ok, errno := fh.readClientLocalFileView(ctx, dest, off); ok || errno != fs.OK {
 		if ok && errno == fs.OK {
@@ -97,10 +100,16 @@ func (fh *clipFileHandle) readClientLocalFileView(ctx context.Context, dest []by
 		return fuse.ReadResultData(dest[:0]), true, fs.OK
 	}
 
-	started := time.Now()
+	traceRead := fh.node.readTracingEnabled()
+	var started time.Time
+	if traceRead {
+		started = time.Now()
+	}
 	view, ok, err := viewer.ClientLocalFileView(ctx, fh.node.clipNode, off, readLen)
 	if err != nil {
-		fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, 0, started, err))
+		if traceRead {
+			fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, 0, started, err))
+		}
 		return nil, false, fs.OK
 	}
 	if !ok || view.Path == "" || view.Length <= 0 {
@@ -112,11 +121,15 @@ func (fh *clipFileHandle) readClientLocalFileView(ctx context.Context, dest []by
 
 	file, err := fh.openViewFile(view.Path)
 	if err != nil {
-		fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, 0, started, err))
+		if traceRead {
+			fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, 0, started, err))
+		}
 		return nil, false, fs.OK
 	}
 
-	fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, int64(view.Length), started, nil))
+	if traceRead {
+		fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, int64(view.Length), started, nil))
+	}
 	return fuse.ReadResultFd(file.Fd(), view.Offset, view.Length), true, fs.OK
 }
 
@@ -191,8 +204,11 @@ func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int
 
 func (n *FSNode) readData(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	log.Debug().Str("path", n.clipNode.Path).Int64("offset", off).Msg("Read called")
-	if caller, ok := fuse.FromContext(ctx); ok && caller != nil {
-		ctx = common.WithReadTraceCallerPID(ctx, caller.Pid)
+	if n.readTracingEnabled() {
+		caller, ok := fuse.FromContext(ctx)
+		if ok && caller != nil {
+			ctx = common.WithReadTraceCallerPID(ctx, caller.Pid)
+		}
 	}
 
 	readLen := n.clampedReadLength(off, int64(len(dest)))
@@ -400,6 +416,10 @@ func (n *FSNode) observeRead(ctx context.Context, event common.ReadTraceEvent) {
 		event.CallerPID = common.ReadTraceCallerPID(ctx)
 	}
 	n.filesystem.readTraceObserver(event)
+}
+
+func (n *FSNode) readTracingEnabled() bool {
+	return n != nil && n.filesystem != nil && n.filesystem.readTraceObserver != nil
 }
 
 func (n *FSNode) readLegacyArchiveObserved(ctx context.Context, dest []byte, off int64, readLen int64) (int, error) {

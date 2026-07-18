@@ -389,6 +389,7 @@ func TestOCIStorage_ClientLocalFileViewUsesDiskCache(t *testing.T) {
 		diskCacheDir:          cacheDir,
 		contentCache:          cache,
 		contentCacheAvailable: true,
+		readTraceObserver:     func(common.ReadTraceEvent) {},
 	}
 	node := &common.ClipNode{
 		Remote: &common.RemoteRef{
@@ -419,6 +420,37 @@ func TestOCIStorage_ClientLocalFileViewUsesDiskCache(t *testing.T) {
 	cache.mu.Lock()
 	assert.Equal(t, testData, cache.store[decompressedHash])
 	cache.mu.Unlock()
+}
+
+func TestOCIStorage_ClientLocalFileViewSkipsTraceAttrsWithoutObserver(t *testing.T) {
+	testData := []byte("0123456789")
+	digest := v1.Hash{Algorithm: "sha256", Hex: "abc123"}
+	sum := sha256.Sum256(testData)
+	decompressedHash := hex.EncodeToString(sum[:])
+	cacheDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, decompressedHash), testData, 0644))
+
+	metadata := &common.ClipArchiveMetadata{
+		StorageInfo: &common.OCIStorageInfo{
+			DecompressedHashByLayer: map[string]string{digest.String(): decompressedHash},
+		},
+	}
+	storage := &OCIClipStorage{
+		metadata:     metadata,
+		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
+		diskCacheDir: cacheDir,
+	}
+	node := &common.ClipNode{
+		Remote: &common.RemoteRef{
+			LayerDigest: digest.String(),
+			ULength:     int64(len(testData)),
+		},
+	}
+
+	region, ok, err := storage.ClientLocalFileView(context.Background(), node, 0, int64(len(testData)))
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Nil(t, region.Attrs)
 }
 
 func TestOCIStorage_ClientLocalFileViewWarmsContentCacheOncePerLayer(t *testing.T) {
@@ -565,6 +597,7 @@ func TestOCIStorage_ClientLocalFileViewUsesContentCachePage(t *testing.T) {
 		diskCacheDir:          t.TempDir(),
 		contentCache:          cache,
 		contentCacheAvailable: true,
+		readTraceObserver:     func(common.ReadTraceEvent) {},
 	}
 	node := &common.ClipNode{
 		Remote: &common.RemoteRef{

@@ -385,6 +385,16 @@ func (s *OCIClipStorage) ClientLocalFileView(ctx context.Context, node *common.C
 	layerPath := s.getDecompressedCachePath(decompressedHash)
 	if _, err := os.Stat(layerPath); err == nil {
 		warmDecision := s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
+		var attrs map[string]string
+		if s.readTraceObserver != nil {
+			attrs = map[string]string{
+				"cache_result":            "hit",
+				"cache_tier":              "local_decompressed_layer",
+				"content_cache_available": fmt.Sprintf("%t", s.contentCacheAvailable),
+				"content_cache_warm":      warmDecision,
+				"storage_mode":            "oci",
+			}
+		}
 		return ClientLocalFileView{
 			Path:             layerPath,
 			Offset:           wantUStart,
@@ -392,13 +402,7 @@ func (s *OCIClipStorage) ClientLocalFileView(ctx context.Context, node *common.C
 			Source:           "disk_cache_fd",
 			LayerDigest:      remote.LayerDigest,
 			DecompressedHash: decompressedHash,
-			Attrs: map[string]string{
-				"cache_result":            "hit",
-				"cache_tier":              "local_decompressed_layer",
-				"content_cache_available": fmt.Sprintf("%t", s.contentCacheAvailable),
-				"content_cache_warm":      warmDecision,
-				"storage_mode":            "oci",
-			},
+			Attrs:            attrs,
 		}, true, nil
 	} else if !os.IsNotExist(err) {
 		return ClientLocalFileView{}, false, err
@@ -418,6 +422,15 @@ func (s *OCIClipStorage) ClientLocalFileView(ctx context.Context, node *common.C
 		return ClientLocalFileView{}, false, nil
 	}
 
+	var attrs map[string]string
+	if s.readTraceObserver != nil {
+		attrs = map[string]string{
+			"cache_result":            "hit",
+			"cache_tier":              "embedded_page_file",
+			"content_cache_available": fmt.Sprintf("%t", s.contentCacheAvailable),
+			"storage_mode":            "oci",
+		}
+	}
 	return ClientLocalFileView{
 		Path:             view.Path,
 		Offset:           view.Offset,
@@ -425,12 +438,7 @@ func (s *OCIClipStorage) ClientLocalFileView(ctx context.Context, node *common.C
 		Source:           "client_local_page_file_fd",
 		LayerDigest:      remote.LayerDigest,
 		DecompressedHash: decompressedHash,
-		Attrs: map[string]string{
-			"cache_result":            "hit",
-			"cache_tier":              "embedded_page_file",
-			"content_cache_available": fmt.Sprintf("%t", s.contentCacheAvailable),
-			"storage_mode":            "oci",
-		},
+		Attrs:            attrs,
 	}, true, nil
 }
 
