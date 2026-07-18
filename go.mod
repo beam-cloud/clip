@@ -12,7 +12,7 @@ require (
 	github.com/gofrs/flock v0.8.1
 	github.com/google/go-containerregistry v0.19.1
 	github.com/google/uuid v1.6.0
-	github.com/hanwen/go-fuse/v2 v2.10.1
+	github.com/hanwen/go-fuse/v2 v2.5.1
 	github.com/karrick/godirwalk v1.17.0
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.10.0
