@@ -148,23 +148,37 @@ func (n *FSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 func (n *FSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	log.Debug().Str("path", n.clipNode.Path).Str("name", name).Msg("Lookup called")
 
-	if childInode := n.GetChild(name); childInode != nil {
-		if childNode, ok := childInode.Operations().(*FSNode); ok {
-			out.Attr = childNode.attr
-			return childInode, fs.OK
-		}
+	// Create the full path of the child node
+	childPath := path.Join(n.clipNode.Path, name)
+
+	// Check the cache
+	n.filesystem.cacheMutex.RLock()
+	entry, found := n.filesystem.lookupCache[childPath]
+	n.filesystem.cacheMutex.RUnlock()
+	if found {
+		log.Debug().Str("path", childPath).Msg("Lookup cache hit")
+		out.Attr = sanitizeFuseAttrTimes(entry.attr)
+		return entry.inode, fs.OK
 	}
 
-	childPath := path.Join(n.clipNode.Path, name)
+	// Lookup the child node
 	child := n.filesystem.storage.Metadata().Get(childPath)
 	if child == nil {
+		// No child with the requested name exists
 		return nil, syscall.ENOENT
 	}
 
 	attr := sanitizeFuseAttrTimes(child.Attr)
 	out.Attr = attr
 
+	// Create a new Inode for the child
 	childInode := n.NewInode(ctx, &FSNode{filesystem: n.filesystem, clipNode: child, attr: attr}, fs.StableAttr{Mode: attr.Mode, Ino: attr.Ino})
+
+	// Cache the result
+	n.filesystem.cacheMutex.Lock()
+	n.filesystem.lookupCache[childPath] = &lookupCacheEntry{inode: childInode, attr: attr}
+	n.filesystem.cacheMutex.Unlock()
+
 	return childInode, fs.OK
 }
 

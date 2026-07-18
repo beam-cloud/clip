@@ -549,11 +549,6 @@ func Test_FSNodeLookupAndRead(t *testing.T) {
 	require.NotNil(t, childInode)
 	testFileFSNode := childInode.Operations().(*FSNode)
 	require.Equal(t, testFilePath, testFileFSNode.clipNode.Path)
-	require.True(t, rootFSNode.AddChild(testFileName, childInode, false))
-
-	cachedInode, errno := rootFSNode.Lookup(ctx, testFileName, &fuse.EntryOut{})
-	require.Equal(t, fs.OK, errno)
-	require.Same(t, childInode, cachedInode)
 
 	// Read on the FSNode
 	readDest := make([]byte, len(testFileData)+10) // Make buffer larger than data

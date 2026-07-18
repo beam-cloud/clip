@@ -7,6 +7,7 @@ import (
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/rs/zerolog/log"
 )
 
@@ -20,13 +21,20 @@ type ClipFileSystemOpts struct {
 type ClipFileSystem struct {
 	storage               storage.ClipStorageInterface
 	root                  *FSNode
+	lookupCache           map[string]*lookupCacheEntry
 	contentCache          storage.ContentCache
 	contentCacheReadAhead *storage.ContentCacheReadAhead
 	contentCacheAvailable bool
 	readTraceObserver     common.ReadTraceObserver
+	cacheMutex            sync.RWMutex
 	cachingStatus         map[string]bool
 	cacheEventChan        chan cacheEvent
 	cachingStatusMu       sync.Mutex
+}
+
+type lookupCacheEntry struct {
+	inode *fs.Inode
+	attr  fuse.Attr
 }
 
 type cacheEvent struct {
@@ -36,6 +44,7 @@ type cacheEvent struct {
 func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*ClipFileSystem, error) {
 	cfs := &ClipFileSystem{
 		storage:               s,
+		lookupCache:           make(map[string]*lookupCacheEntry),
 		contentCache:          opts.ContentCache,
 		contentCacheReadAhead: storage.NewContentCacheReadAhead(opts.ContentCache, storage.ContentCacheReadAheadOptions{}),
 		cacheEventChan:        make(chan cacheEvent, 10000),
