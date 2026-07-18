@@ -179,7 +179,7 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 	if n.clipNode == nil || n.clipNode.NodeType != common.FileNode {
 		return nil, 0, fs.OK
 	}
-	return newClipFileHandle(n), fuse.FOPEN_KEEP_CACHE, fs.OK
+	return newClipFileHandle(n), fuse.FOPEN_KEEP_CACHE | fuse.FOPEN_NOFLUSH, fs.OK
 }
 
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {

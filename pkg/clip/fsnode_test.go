@@ -272,6 +272,15 @@ func TestLegacyClientLocalFileViewReadWarmsContentCache(t *testing.T) {
 	require.Equal(t, testData, cache.store[contentHash])
 }
 
+func TestImmutableFileOpenSkipsFlush(t *testing.T) {
+	node := &FSNode{clipNode: &common.ClipNode{NodeType: common.FileNode}}
+
+	handle, flags, errno := node.Open(context.Background(), 0)
+	require.Equal(t, fs.OK, errno)
+	require.NotNil(t, handle)
+	require.Equal(t, uint32(fuse.FOPEN_KEEP_CACHE|fuse.FOPEN_NOFLUSH), flags)
+}
+
 func TestLegacyLocalArchiveReadWarmsContentCache(t *testing.T) {
 	testData := []byte("legacy direct archive data")
 	_, fileNode, cache, contentHash := newLegacyLocalCacheTestFS(t, testData)
