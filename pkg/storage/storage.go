@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/beam-cloud/clip/pkg/common"
 )
@@ -141,9 +142,26 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 		// If StorageInfo is passed in, we can use that to override the configuration
 		// stored in the metadata. This way you can use a different bucket for the
 		// archive than the one used when the archive was created.
-		storageInfo := metadata.StorageInfo.(common.S3StorageInfo)
+		var storageInfo common.S3StorageInfo
+		switch info := metadata.StorageInfo.(type) {
+		case common.S3StorageInfo:
+			storageInfo = info
+		case *common.S3StorageInfo:
+			if info != nil {
+				storageInfo = *info
+			}
+		case nil:
+		default:
+			return nil, fmt.Errorf("invalid S3 storage info type %T", metadata.StorageInfo)
+		}
 		if opts.StorageInfo != nil {
 			storageInfo = *opts.StorageInfo
+		}
+
+		var accessKey, secretKey string
+		if opts.Credentials.S3 != nil {
+			accessKey = opts.Credentials.S3.AccessKey
+			secretKey = opts.Credentials.S3.SecretKey
 		}
 
 		storage, err = NewS3ClipStorage(metadata, S3ClipStorageOpts{
@@ -153,8 +171,8 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 			Endpoint:       storageInfo.Endpoint,
 			ForcePathStyle: storageInfo.ForcePathStyle,
 			CachePath:      opts.CachePath,
-			AccessKey:      opts.Credentials.S3.AccessKey,
-			SecretKey:      opts.Credentials.S3.SecretKey,
+			AccessKey:      accessKey,
+			SecretKey:      secretKey,
 		})
 	case common.StorageModeOCI:
 		// Convert interface{} to RegistryCredentialProvider if provided
