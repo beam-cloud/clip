@@ -48,12 +48,6 @@ type OCIClipStorage struct {
 	checkpointFailureOnce map[string]struct{}
 	contentCacheReadAhead *ContentCacheReadAhead
 	layerLimitByHash      map[string]int64
-	localLayerFiles       sync.Map
-}
-
-type localLayerFile struct {
-	decompressedHash string
-	path             string
 }
 
 var globalLayerDecompress = newLayerDecompressGroup()
@@ -383,11 +377,14 @@ func (s *OCIClipStorage) ClientLocalFileView(ctx context.Context, node *common.C
 		return ClientLocalFileView{}, false, nil
 	}
 
-	localLayer, warmDecision, ok, err := s.cachedLocalLayerFile(remote.LayerDigest)
-	if err != nil {
-		return ClientLocalFileView{}, false, err
+	decompressedHash := s.getDecompressedHash(remote.LayerDigest)
+	if decompressedHash == "" {
+		return ClientLocalFileView{}, false, nil
 	}
-	if ok {
+
+	layerPath := s.getDecompressedCachePath(decompressedHash)
+	if _, err := os.Stat(layerPath); err == nil {
+		warmDecision := s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
 		var attrs map[string]string
 		if s.readTraceObserver != nil {
 			attrs = map[string]string{
@@ -399,19 +396,16 @@ func (s *OCIClipStorage) ClientLocalFileView(ctx context.Context, node *common.C
 			}
 		}
 		return ClientLocalFileView{
-			Path:             localLayer.path,
+			Path:             layerPath,
 			Offset:           wantUStart,
 			Length:           int(readLen),
 			Source:           "disk_cache_fd",
 			LayerDigest:      remote.LayerDigest,
-			DecompressedHash: localLayer.decompressedHash,
+			DecompressedHash: decompressedHash,
 			Attrs:            attrs,
 		}, true, nil
-	}
-
-	decompressedHash := s.getDecompressedHash(remote.LayerDigest)
-	if decompressedHash == "" {
-		return ClientLocalFileView{}, false, nil
+	} else if !os.IsNotExist(err) {
+		return ClientLocalFileView{}, false, err
 	}
 
 	pageCache, ok := s.contentCache.(ContentCacheClientLocalPageFileViews)
@@ -446,39 +440,6 @@ func (s *OCIClipStorage) ClientLocalFileView(ctx context.Context, node *common.C
 		DecompressedHash: decompressedHash,
 		Attrs:            attrs,
 	}, true, nil
-}
-
-func (s *OCIClipStorage) cachedLocalLayerFile(layerDigest string) (localLayerFile, string, bool, error) {
-	if cached, ok := s.localLayerFiles.Load(layerDigest); ok {
-		return cached.(localLayerFile), s.repeatedContentCacheWarmDecision(), true, nil
-	}
-
-	decompressedHash := s.getDecompressedHash(layerDigest)
-	if decompressedHash == "" {
-		return localLayerFile{}, "", false, nil
-	}
-	layerPath := s.getDecompressedCachePath(decompressedHash)
-	if _, err := os.Stat(layerPath); err != nil {
-		if os.IsNotExist(err) {
-			return localLayerFile{}, "", false, nil
-		}
-		return localLayerFile{}, "", false, err
-	}
-
-	warmDecision := s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
-	localLayer := localLayerFile{decompressedHash: decompressedHash, path: layerPath}
-	actual, _ := s.localLayerFiles.LoadOrStore(layerDigest, localLayer)
-	return actual.(localLayerFile), warmDecision, true, nil
-}
-
-func (s *OCIClipStorage) repeatedContentCacheWarmDecision() string {
-	if s.contentCache == nil {
-		return "disabled_no_cache"
-	}
-	if !s.contentCacheAvailable {
-		return "disabled_unavailable"
-	}
-	return "already_attempted"
 }
 
 func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipNode, dest []byte, offset int64) (n int, err error) {
