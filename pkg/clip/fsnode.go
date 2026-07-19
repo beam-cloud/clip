@@ -187,6 +187,11 @@ func (n *FSNode) Opendir(ctx context.Context) syscall.Errno {
 	return 0
 }
 
+func (n *FSNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	log.Debug().Str("path", n.clipNode.Path).Msg("OpendirHandle called")
+	return fs.NewListDirStream(n.directoryEntries()), fuse.FOPEN_CACHE_DIR, fs.OK
+}
+
 func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	log.Debug().Str("path", n.clipNode.Path).Uint32("flags", flags).Msg("Open called")
 	if n.clipNode == nil || n.clipNode.NodeType != common.FileNode {
@@ -504,10 +509,14 @@ func (n *FSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 func (n *FSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	log.Debug().Str("path", n.clipNode.Path).Msg("Readdir called")
 
+	return fs.NewListDirStream(n.directoryEntries()), fs.OK
+}
+
+func (n *FSNode) directoryEntries() []fuse.DirEntry {
 	n.dirEntriesOnce.Do(func() {
 		n.dirEntries = n.filesystem.storage.Metadata().ListDirectory(n.clipNode.Path)
 	})
-	return fs.NewListDirStream(n.dirEntries), fs.OK
+	return n.dirEntries
 }
 
 func (n *FSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {

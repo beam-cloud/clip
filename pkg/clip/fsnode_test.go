@@ -281,6 +281,22 @@ func TestImmutableFileOpenSkipsFlush(t *testing.T) {
 	require.Equal(t, uint32(fuse.FOPEN_KEEP_CACHE|fuse.FOPEN_NOFLUSH), flags)
 }
 
+func TestImmutableDirectoryOpenCachesEntries(t *testing.T) {
+	index := btree.New(func(a, b interface{}) bool {
+		return a.(*common.ClipNode).Path < b.(*common.ClipNode).Path
+	})
+	metadata := &common.ClipArchiveMetadata{Index: index}
+	metadata.Insert(&common.ClipNode{Path: "/", NodeType: common.DirNode})
+	metadata.Insert(&common.ClipNode{Path: "/child", NodeType: common.FileNode})
+	filesystem, err := NewFileSystem(&mockRemoteClipStorage{metadata: metadata}, ClipFileSystemOpts{})
+	require.NoError(t, err)
+
+	handle, flags, errno := filesystem.root.OpendirHandle(context.Background(), 0)
+	require.Equal(t, fs.OK, errno)
+	require.NotNil(t, handle)
+	require.Equal(t, uint32(fuse.FOPEN_CACHE_DIR), flags)
+}
+
 func TestLegacyLocalArchiveReadWarmsContentCache(t *testing.T) {
 	testData := []byte("legacy direct archive data")
 	_, fileNode, cache, contentHash := newLegacyLocalCacheTestFS(t, testData)
