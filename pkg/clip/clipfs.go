@@ -2,7 +2,9 @@ package clip
 
 import (
 	"fmt"
+	"os"
 	"sync"
+	"syscall"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/beam-cloud/clip/pkg/storage"
@@ -30,6 +32,8 @@ type ClipFileSystem struct {
 	cachingStatus         map[string]bool
 	cacheEventChan        chan cacheEvent
 	cachingStatusMu       sync.Mutex
+	viewFilesMu           sync.Mutex
+	viewFiles             map[string]*os.File
 }
 
 type lookupCacheEntry struct {
@@ -49,6 +53,7 @@ func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*Cl
 		contentCacheReadAhead: storage.NewContentCacheReadAhead(opts.ContentCache, storage.ContentCacheReadAheadOptions{}),
 		cacheEventChan:        make(chan cacheEvent, 10000),
 		cachingStatus:         make(map[string]bool),
+		viewFiles:             make(map[string]*os.File),
 		contentCacheAvailable: opts.ContentCacheAvailable,
 		readTraceObserver:     opts.ReadTraceObserver,
 	}
@@ -68,6 +73,39 @@ func NewFileSystem(s storage.ClipStorageInterface, opts ClipFileSystemOpts) (*Cl
 	go cfs.processCacheEvents()
 
 	return cfs, nil
+}
+
+func (cfs *ClipFileSystem) openViewFile(path string) (*os.File, error) {
+	cfs.viewFilesMu.Lock()
+	defer cfs.viewFilesMu.Unlock()
+
+	if file := cfs.viewFiles[path]; file != nil {
+		return file, nil
+	}
+	if len(cfs.viewFiles) >= clipFileViewFDCacheSize {
+		return nil, syscall.EMFILE
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	cfs.viewFiles[path] = file
+	return file, nil
+}
+
+func (cfs *ClipFileSystem) closeViewFiles() error {
+	cfs.viewFilesMu.Lock()
+	defer cfs.viewFilesMu.Unlock()
+
+	var firstErr error
+	for path, file := range cfs.viewFiles {
+		if err := file.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		delete(cfs.viewFiles, path)
+	}
+	return firstErr
 }
 
 func (cfs *ClipFileSystem) Root() (fs.InodeEmbedder, error) {

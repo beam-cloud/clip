@@ -453,6 +453,39 @@ func TestOCIStorage_ClientLocalFileViewSkipsTraceAttrsWithoutObserver(t *testing
 	require.Nil(t, region.Attrs)
 }
 
+func TestOCIStorage_ClientLocalFileViewCachesImmutableLayerPresence(t *testing.T) {
+	testData := []byte("0123456789")
+	digest := v1.Hash{Algorithm: "sha256", Hex: "abc123"}
+	sum := sha256.Sum256(testData)
+	decompressedHash := hex.EncodeToString(sum[:])
+	cacheDir := t.TempDir()
+	layerPath := filepath.Join(cacheDir, decompressedHash)
+	require.NoError(t, os.WriteFile(layerPath, testData, 0644))
+
+	metadata := &common.ClipArchiveMetadata{StorageInfo: &common.OCIStorageInfo{
+		DecompressedHashByLayer: map[string]string{digest.String(): decompressedHash},
+	}}
+	storage := &OCIClipStorage{
+		metadata:     metadata,
+		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
+		diskCacheDir: cacheDir,
+	}
+	node := &common.ClipNode{Remote: &common.RemoteRef{
+		LayerDigest: digest.String(),
+		ULength:     int64(len(testData)),
+	}}
+
+	first, ok, err := storage.ClientLocalFileView(context.Background(), node, 0, int64(len(testData)))
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, os.Remove(layerPath))
+
+	second, ok, err := storage.ClientLocalFileView(context.Background(), node, 0, int64(len(testData)))
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, first, second)
+}
+
 func TestOCIStorage_ClientLocalFileViewWarmsContentCacheOncePerLayer(t *testing.T) {
 	testData := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
 	digest := v1.Hash{Algorithm: "sha256", Hex: "abc123"}

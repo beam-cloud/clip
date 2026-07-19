@@ -230,12 +230,15 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 			go server.Serve()
 
 			if err := server.WaitMount(); err != nil {
+				_ = clipfs.closeViewFiles()
+				_ = archiveStorage.Cleanup()
 				serverError <- err
 				return
 			}
 
 			server.Wait()
-			archiveStorage.Cleanup()
+			_ = clipfs.closeViewFiles()
+			_ = archiveStorage.Cleanup()
 
 			close(serverError)
 		}()
