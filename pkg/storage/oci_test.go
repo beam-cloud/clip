@@ -410,6 +410,9 @@ func TestOCIStorage_ClientLocalFileViewUsesDiskCache(t *testing.T) {
 	assert.Equal(t, decompressedHash, region.DecompressedHash)
 	assert.Equal(t, "hit", region.Attrs["cache_result"])
 	assert.Equal(t, "local_decompressed_layer", region.Attrs["cache_tier"])
+	cached, found := storage.localLayerFiles.Load(digest.String())
+	require.True(t, found)
+	assert.Equal(t, filepath.Join(cacheDir, decompressedHash), cached.(localLayerFile).path)
 
 	require.Eventually(t, func() bool {
 		cache.mu.Lock()
