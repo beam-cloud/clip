@@ -97,6 +97,7 @@ type ClipStorageOpts struct {
 	ArchivePath           string
 	CachePath             string
 	Metadata              *common.ClipArchiveMetadata
+	StorageModeOverride   common.StorageMode
 	StorageInfo           *common.S3StorageInfo
 	Credentials           ClipStorageCredentials
 	ContentCache          ContentCache // For OCI storage remote caching
@@ -108,29 +109,32 @@ type ClipStorageOpts struct {
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	var storage ClipStorageInterface = nil
-	var storageType common.StorageMode
+	storageType := opts.StorageModeOverride
 	var err error = nil
 
 	header := opts.Metadata.Header
 	metadata := opts.Metadata
 
-	// Determine storage type from header or metadata
-	if header.StorageInfoLength > 0 {
-		// Check the actual storage info type
-		if metadata.StorageInfo != nil {
-			switch metadata.StorageInfo.Type() {
-			case string(common.StorageModeOCI):
-				storageType = common.StorageModeOCI
-			case string(common.StorageModeS3):
+	// Determine storage type from header or metadata unless the caller has
+	// materialized remote content into a verified local archive.
+	if storageType == "" {
+		if header.StorageInfoLength > 0 {
+			// Check the actual storage info type
+			if metadata.StorageInfo != nil {
+				switch metadata.StorageInfo.Type() {
+				case string(common.StorageModeOCI):
+					storageType = common.StorageModeOCI
+				case string(common.StorageModeS3):
+					storageType = common.StorageModeS3
+				default:
+					storageType = common.StorageModeS3 // default to S3 for backward compatibility
+				}
+			} else {
 				storageType = common.StorageModeS3
-			default:
-				storageType = common.StorageModeS3 // default to S3 for backward compatibility
 			}
 		} else {
-			storageType = common.StorageModeS3
+			storageType = common.StorageModeLocal
 		}
-	} else {
-		storageType = common.StorageModeLocal
 	}
 
 	switch storageType {

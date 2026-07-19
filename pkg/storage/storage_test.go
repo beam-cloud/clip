@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/beam-cloud/clip/pkg/common"
@@ -34,6 +35,30 @@ func TestNewClipStorageS3CredentialsAreOptional(t *testing.T) {
 	storage, err := NewClipStorage(ClipStorageOpts{Metadata: metadata})
 	require.NoError(t, err)
 	require.NotNil(t, storage)
+	require.NoError(t, storage.Cleanup())
+}
+
+func TestNewClipStorageLocalModeOverridesRemoteMetadata(t *testing.T) {
+	archive, err := os.CreateTemp(t.TempDir(), "archive-*.clip")
+	require.NoError(t, err)
+	require.NoError(t, archive.Close())
+
+	metadata := &common.ClipArchiveMetadata{
+		Header: common.ClipArchiveHeader{StorageInfoLength: 1},
+		StorageInfo: common.S3StorageInfo{
+			Bucket: "remote-bucket",
+			Region: "us-east-1",
+			Key:    "image.clip",
+		},
+	}
+
+	storage, err := NewClipStorage(ClipStorageOpts{
+		ArchivePath:         archive.Name(),
+		Metadata:            metadata,
+		StorageModeOverride: common.StorageModeLocal,
+	})
+	require.NoError(t, err)
+	require.IsType(t, &LocalClipStorage{}, storage)
 	require.NoError(t, storage.Cleanup())
 }
 

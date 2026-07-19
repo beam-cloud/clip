@@ -66,6 +66,7 @@ type MountOptions struct {
 	CachePath             string
 	ContentCache          storage.ContentCache
 	ContentCacheAvailable bool
+	StorageModeOverride   common.StorageMode
 	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
 	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
@@ -266,6 +267,7 @@ func openArchiveStorage(options MountOptions) (storage.ClipStorageInterface, err
 		ArchivePath:           options.ArchivePath,
 		CachePath:             options.CachePath,
 		Metadata:              metadata,
+		StorageModeOverride:   options.StorageModeOverride,
 		Credentials:           options.Credentials,
 		StorageInfo:           s3Info,
 		ContentCache:          options.ContentCache,
