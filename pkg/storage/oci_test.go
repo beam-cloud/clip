@@ -713,6 +713,27 @@ func TestOCIStorage_ContentCacheReadAheadCoalescesAdjacentReads(t *testing.T) {
 	require.Equal(t, []int64{16, 16}, cache.getLengths)
 }
 
+func TestNewOCIClipStorageUsesConfiguredContentCacheReadAhead(t *testing.T) {
+	cache := newMockCache()
+	storage, err := NewOCIClipStorage(OCIClipStorageOpts{
+		Metadata: &common.ClipArchiveMetadata{
+			StorageInfo: &common.OCIStorageInfo{},
+		},
+		ContentCache: cache,
+		DiskCacheDir: t.TempDir(),
+		ContentCacheReadAhead: ContentCacheReadAheadOptions{
+			WindowBytes: 4 * 1024 * 1024,
+			MaxWindows:  8,
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, storage.Cleanup()) })
+
+	require.NotNil(t, storage.contentCacheReadAhead)
+	assert.Equal(t, int64(4*1024*1024), storage.contentCacheReadAhead.windowBytes)
+	assert.Equal(t, 8, storage.contentCacheReadAhead.maxWindows)
+}
+
 func TestOCIStorage_CacheMiss(t *testing.T) {
 	// Create test data
 	testData := []byte("Hello, World! This is test data for OCI storage.")

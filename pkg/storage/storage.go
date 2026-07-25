@@ -102,6 +102,7 @@ type ClipStorageOpts struct {
 	Credentials           ClipStorageCredentials
 	ContentCache          ContentCache // For OCI storage remote caching
 	ContentCacheAvailable bool
+	ContentCacheReadAhead ContentCacheReadAheadOptions
 	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
 	RegistryCredProvider  interface{} // Registry authentication (for OCI storage)
 	ReadTraceObserver     common.ReadTraceObserver
@@ -192,6 +193,7 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 			CredProvider:          credProvider,
 			ContentCache:          opts.ContentCache,
 			ContentCacheAvailable: opts.ContentCacheAvailable,
+			ContentCacheReadAhead: opts.ContentCacheReadAhead,
 			DiskCacheDir:          opts.CachePath,
 			UseCheckpoints:        opts.UseCheckpoints,
 			ReadTraceObserver:     opts.ReadTraceObserver,

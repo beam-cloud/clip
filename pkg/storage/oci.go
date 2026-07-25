@@ -120,8 +120,9 @@ type OCIClipStorageOpts struct {
 	CredProvider          common.RegistryCredentialProvider // optional credential provider for registry authentication
 	ContentCache          ContentCache                      // optional remote content cache (blobcache)
 	ContentCacheAvailable bool                              // is there an available content cache for range reads?
-	DiskCacheDir          string                            // optional local disk cache directory
-	UseCheckpoints        bool                              // Enable checkpoint-based partial decompression (default: false)
+	ContentCacheReadAhead ContentCacheReadAheadOptions
+	DiskCacheDir          string // optional local disk cache directory
+	UseCheckpoints        bool   // Enable checkpoint-based partial decompression (default: false)
 	ReadTraceObserver     common.ReadTraceObserver
 }
 
@@ -169,7 +170,7 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		layerWarmOnce:         make(map[string]struct{}),
 		checkpointSuccessOnce: make(map[string]struct{}),
 		checkpointFailureOnce: make(map[string]struct{}),
-		contentCacheReadAhead: NewContentCacheReadAhead(opts.ContentCache, ContentCacheReadAheadOptions{}),
+		contentCacheReadAhead: NewContentCacheReadAhead(opts.ContentCache, opts.ContentCacheReadAhead),
 		layerLimitByHash:      ociLayerLimitsByHash(opts.Metadata, &storageInfo),
 	}
 

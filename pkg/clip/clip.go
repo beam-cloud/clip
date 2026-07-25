@@ -66,6 +66,7 @@ type MountOptions struct {
 	CachePath             string
 	ContentCache          storage.ContentCache
 	ContentCacheAvailable bool
+	ContentCacheReadAhead storage.ContentCacheReadAheadOptions
 	StorageModeOverride   common.StorageMode
 	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
@@ -274,6 +275,7 @@ func openArchiveStorage(options MountOptions) (storage.ClipStorageInterface, err
 		Credentials:           options.Credentials,
 		StorageInfo:           s3Info,
 		ContentCache:          options.ContentCache,
+		ContentCacheReadAhead: options.ContentCacheReadAhead,
 		UseCheckpoints:        options.UseCheckpoints,
 		ContentCacheAvailable: options.ContentCacheAvailable,
 		RegistryCredProvider:  options.RegistryCredProvider,
