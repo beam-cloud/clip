@@ -634,7 +634,7 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 	}
 
 	// Cache miss - try checkpoint-based decompression if enabled
-	if s.useCheckpoints {
+	if s.useCheckpoints && s.hasRestartableCheckpointMetadata(remote.LayerDigest) {
 		checkpointStart := time.Now()
 		if n, err := s.readWithCheckpoint(ctx, remote.LayerDigest, wantUStart, dest[:readLen]); err == nil {
 			readSource = "checkpoint"
@@ -1092,6 +1092,37 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return "content_cache", ctxErr
 			}
+
+			compressedSize := s.compressedLayerSize(digest)
+			if compressedSize > 0 {
+				if existsCache, ok := s.contentCache.(ContentCacheExistsWithSize); ok {
+					compressedHash, validDigest := sha256DigestHex(digest)
+					exists := false
+					if validDigest {
+						exists, err = existsCache.ContentExistsWithSize(compressedHash, compressedSize, struct{ RoutingKey string }{RoutingKey: compressedHash})
+					}
+					if err == nil && exists {
+						written, err = restoreLayerFromCompressedContentCache(ctx, cacheStream, compressedHash, compressedSize, decompressedHash, diskPath)
+						if err == nil {
+							log.Info().
+								Str("layer", digest).
+								Str("decompressed_hash", decompressedHash).
+								Int64("compressed_bytes", compressedSize).
+								Int64("bytes", written).
+								Msg("layer decompressed from compressed content cache")
+							return "compressed_content_cache", nil
+						}
+						log.Warn().
+							Err(err).
+							Str("layer", digest).
+							Str("compressed_hash", compressedHash).
+							Msg("compressed layer content cache restore failed; falling back to registry")
+						if ctxErr := ctx.Err(); ctxErr != nil {
+							return "compressed_content_cache", ctxErr
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -1146,6 +1177,135 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 	return "oci_registry", nil
 }
 
+func (s *OCIClipStorage) compressedLayerSize(digest string) int64 {
+	if s == nil || s.storageInfo == nil || s.storageInfo.ImageMetadata == nil {
+		return 0
+	}
+	for _, layer := range s.storageInfo.ImageMetadata.LayersData {
+		if layer.Digest == digest {
+			return layer.Size
+		}
+	}
+	return 0
+}
+
+func sha256DigestHex(digest string) (string, bool) {
+	const prefix = "sha256:"
+	if !strings.HasPrefix(digest, prefix) {
+		return "", false
+	}
+	hexDigest := strings.TrimPrefix(digest, prefix)
+	if len(hexDigest) != sha256.Size*2 {
+		return "", false
+	}
+	if _, err := hex.DecodeString(hexDigest); err != nil {
+		return "", false
+	}
+	return strings.ToLower(hexDigest), true
+}
+
+type contentCacheChunkReader struct {
+	ctx      context.Context
+	chunks   <-chan []byte
+	current  []byte
+	expected int64
+	read     int64
+	done     bool
+}
+
+func (r *contentCacheChunkReader) Read(dest []byte) (int, error) {
+	if len(dest) == 0 {
+		return 0, nil
+	}
+	for len(r.current) == 0 {
+		if r.done {
+			if r.read != r.expected {
+				return 0, fmt.Errorf("%w: expected %d compressed bytes, received %d", ErrContentCacheMiss, r.expected, r.read)
+			}
+			return 0, io.EOF
+		}
+		select {
+		case <-r.ctx.Done():
+			return 0, r.ctx.Err()
+		case chunk, ok := <-r.chunks:
+			if !ok {
+				r.done = true
+				continue
+			}
+			if int64(len(chunk)) > r.expected-r.read {
+				return 0, fmt.Errorf("%w: compressed stream exceeded expected size %d", ErrContentCacheMiss, r.expected)
+			}
+			r.current = chunk
+		}
+	}
+
+	n := copy(dest, r.current)
+	r.current = r.current[n:]
+	r.read += int64(n)
+	return n, nil
+}
+
+func (r *contentCacheChunkReader) Close() error {
+	if !r.done {
+		r.done = true
+		go drainContentChunks(r.chunks)
+	}
+	return nil
+}
+
+func restoreLayerFromCompressedContentCache(
+	ctx context.Context,
+	cacheStream ContentCacheStream,
+	compressedHash string,
+	compressedSize int64,
+	decompressedHash string,
+	diskPath string,
+) (int64, error) {
+	chunks, streamSize, err := cacheStream.GetContentStream(compressedHash, struct{ RoutingKey string }{RoutingKey: compressedHash})
+	if err != nil {
+		return 0, err
+	}
+	if chunks == nil {
+		return 0, fmt.Errorf("%w: compressed content cache returned a nil stream", ErrContentCacheMiss)
+	}
+	if streamSize != compressedSize {
+		go drainContentChunks(chunks)
+		return 0, fmt.Errorf("%w: compressed stream size %d, expected %d", ErrContentCacheMiss, streamSize, compressedSize)
+	}
+
+	reader := &contentCacheChunkReader{ctx: ctx, chunks: chunks, expected: compressedSize}
+	defer reader.Close()
+	compressedHasher := sha256.New()
+	compressedReader := io.TeeReader(reader, compressedHasher)
+	gzr, err := gzip.NewReader(compressedReader)
+	if err != nil {
+		return 0, fmt.Errorf("open cached compressed layer: %w", err)
+	}
+	defer gzr.Close()
+
+	written, err := writeVerifiedLayer(diskPath, decompressedHash, func(w io.Writer) (int64, error) {
+		written, err := io.Copy(w, &contextReader{ctx: ctx, reader: gzr})
+		if err != nil {
+			return written, err
+		}
+		if err := gzr.Close(); err != nil {
+			return written, err
+		}
+		if _, err := io.Copy(io.Discard, &contextReader{ctx: ctx, reader: compressedReader}); err != nil {
+			return written, err
+		}
+		actualCompressedHash := hex.EncodeToString(compressedHasher.Sum(nil))
+		if !strings.EqualFold(actualCompressedHash, compressedHash) {
+			return written, fmt.Errorf("compressed layer hash mismatch: expected %s, got %s", compressedHash, actualCompressedHash)
+		}
+		return written, nil
+	})
+	if err != nil {
+		return written, err
+	}
+	return written, nil
+}
+
 type contextReader struct {
 	ctx    context.Context
 	reader io.Reader
@@ -1169,6 +1329,9 @@ func restoreLayerFromContentCache(ctx context.Context, cacheStream ContentCacheS
 	chunks, expectedSize, err := cacheStream.GetContentStream(decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
 	if err != nil {
 		return 0, err
+	}
+	if chunks == nil {
+		return 0, fmt.Errorf("%w: decompressed content cache returned a nil stream", ErrContentCacheMiss)
 	}
 	if expectedSize <= 0 {
 		go drainContentChunks(chunks)
@@ -1467,6 +1630,16 @@ func (s *OCIClipStorage) storeDecompressedInRemoteCache(decompressedHash string,
 		return err
 	}
 	return nil
+}
+
+// hasRestartableCheckpointMetadata reports whether a layer can be decoded
+// independently from a non-zero compressed offset. Current GzipCheckpoint
+// metadata contains offsets only; without the deflate bit position and sliding
+// dictionary, using it would restart every FUSE read from byte zero. Until the
+// archive format carries that state, misses must join the verified full-layer
+// materializer instead.
+func (s *OCIClipStorage) hasRestartableCheckpointMetadata(layerDigest string) bool {
+	return false
 }
 
 // readWithCheckpoint reads an exact range from a compressed layer without first
