@@ -1127,7 +1127,13 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 	}
 
 	metrics := common.GetGlobalMetrics()
-	layer, err := s.cachedLayerByDigest(ctx, digest)
+	var layer v1.Layer
+	var err error
+	if transport := s.parallelBlobTransport(digest); transport != nil {
+		layer, err = s.fetchLayerByDigestWithTransport(ctx, digest, transport)
+	} else {
+		layer, err = s.cachedLayerByDigest(ctx, digest)
+	}
 	if err != nil {
 		return "oci_registry", fmt.Errorf("layer not found: %s: %w", digest, err)
 	}
