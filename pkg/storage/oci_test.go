@@ -1364,6 +1364,37 @@ func TestOCIStorage_GlobalLayerDecompressionWaiterHonorsCancellation(t *testing.
 	require.Equal(t, 1, layer.Calls())
 }
 
+func TestLayerDecompressGroupCanceledOwnerHandsOffToLiveWaiter(t *testing.T) {
+	group := newLayerDecompressGroup()
+	ownerCtx, cancelOwner := context.WithCancel(context.Background())
+	ownerStarted := make(chan struct{})
+	ownerDone := make(chan error, 1)
+	go func() {
+		_, err := group.Do(ownerCtx, "layer", func() error {
+			close(ownerStarted)
+			<-ownerCtx.Done()
+			return ownerCtx.Err()
+		})
+		ownerDone <- err
+	}()
+	<-ownerStarted
+
+	waiterWork := false
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancelOwner()
+	}()
+
+	shared, err := group.Do(context.Background(), "layer", func() error {
+		waiterWork = true
+		return nil
+	})
+	require.True(t, shared)
+	require.NoError(t, err)
+	require.True(t, waiterWork)
+	require.ErrorIs(t, <-ownerDone, context.Canceled)
+}
+
 func TestOCIStorage_GlobalLayerDecompressionOwnerHonorsCancellation(t *testing.T) {
 	testData := bytes.Repeat([]byte("cancel-owner-copy"), 4096)
 	digest := v1.Hash{Algorithm: "sha256", Hex: "global-singleflight-canceled-owner"}

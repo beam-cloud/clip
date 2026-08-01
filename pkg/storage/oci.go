@@ -94,33 +94,42 @@ func newLayerDecompressGroup() *layerDecompressGroup {
 }
 
 func (g *layerDecompressGroup) Do(ctx context.Context, key string, fn func() error) (shared bool, err error) {
-	g.mu.Lock()
-	if call := g.inflight[key]; call != nil {
-		g.mu.Unlock()
-		select {
-		case <-call.done:
-			return true, call.err
-		case <-ctx.Done():
-			return true, ctx.Err()
+	for {
+		g.mu.Lock()
+		if call := g.inflight[key]; call != nil {
+			g.mu.Unlock()
+			shared = true
+			select {
+			case <-call.done:
+				// The owner is allowed to stop expensive I/O when its container
+				// is abandoned. A live waiter must not inherit that caller's
+				// cancellation; loop so one waiter becomes the new owner.
+				if ctx.Err() == nil && (errors.Is(call.err, context.Canceled) || errors.Is(call.err, context.DeadlineExceeded)) {
+					continue
+				}
+				return shared, call.err
+			case <-ctx.Done():
+				return shared, ctx.Err()
+			}
 		}
-	}
-	if err := ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
+			g.mu.Unlock()
+			return shared, err
+		}
+
+		call := &layerDecompressCall{done: make(chan struct{})}
+		g.inflight[key] = call
 		g.mu.Unlock()
-		return false, err
+
+		call.err = fn()
+
+		g.mu.Lock()
+		delete(g.inflight, key)
+		close(call.done)
+		g.mu.Unlock()
+
+		return shared, call.err
 	}
-
-	call := &layerDecompressCall{done: make(chan struct{})}
-	g.inflight[key] = call
-	g.mu.Unlock()
-
-	call.err = fn()
-
-	g.mu.Lock()
-	delete(g.inflight, key)
-	close(call.done)
-	g.mu.Unlock()
-
-	return false, call.err
 }
 
 type OCIClipStorageOpts struct {
