@@ -229,6 +229,40 @@ func (m *blockingCountingLayer) Calls() int {
 	return m.calls
 }
 
+type blockingCompressedStreamLayer struct {
+	*mockLayer
+	content []byte
+	started chan struct{}
+	release chan struct{}
+	stopped chan struct{}
+}
+
+func (m *blockingCompressedStreamLayer) Compressed() (io.ReadCloser, error) {
+	reader, writer := io.Pipe()
+	go func() {
+		defer close(m.stopped)
+
+		gzw := gzip.NewWriter(writer)
+		if _, err := gzw.Write(m.content); err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		if err := gzw.Flush(); err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+
+		close(m.started)
+		<-m.release
+		if err := gzw.Close(); err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		_ = writer.Close()
+	}()
+	return reader, nil
+}
+
 type barrierCountingLayer struct {
 	*mockLayer
 	mu      sync.Mutex
@@ -1220,6 +1254,143 @@ func TestOCIStorage_GlobalLayerDecompressionSingleflightAcrossInstances(t *testi
 	got, err := os.ReadFile(filepath.Join(diskCacheDir, decompressedHash))
 	require.NoError(t, err)
 	require.Equal(t, testData, got)
+}
+
+func TestOCIStorage_GlobalLayerDecompressionWaiterHonorsCancellation(t *testing.T) {
+	testData := []byte("canceled waiter must not inherit the owner's lifetime")
+	compressedData := createGzipData(t, testData)
+	digest := v1.Hash{Algorithm: "sha256", Hex: "global-singleflight-canceled-waiter"}
+	sum := sha256.Sum256(testData)
+	decompressedHash := hex.EncodeToString(sum[:])
+	diskCacheDir := t.TempDir()
+
+	metadata := &common.ClipArchiveMetadata{StorageInfo: &common.OCIStorageInfo{
+		DecompressedHashByLayer: map[string]string{digest.String(): decompressedHash},
+	}}
+	storageInfo := metadata.StorageInfo.(*common.OCIStorageInfo)
+	layer := &blockingCountingLayer{
+		mockLayer: &mockLayer{digest: digest, compressedData: compressedData},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseOwner := func() { releaseOnce.Do(func() { close(layer.release) }) }
+	defer releaseOwner()
+
+	storage1 := &OCIClipStorage{
+		metadata:     metadata,
+		storageInfo:  storageInfo,
+		layerCache:   map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir: diskCacheDir,
+	}
+	storage2 := &OCIClipStorage{
+		metadata:     metadata,
+		storageInfo:  storageInfo,
+		layerCache:   map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir: diskCacheDir,
+	}
+
+	ownerDone := make(chan error, 1)
+	go func() {
+		_, _, err := storage1.ensureLayerCached(context.Background(), digest.String())
+		ownerDone <- err
+	}()
+	select {
+	case <-layer.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not begin layer decompression")
+	}
+
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, _, err := storage2.ensureLayerCached(waiterCtx, digest.String())
+		waiterDone <- err
+	}()
+	cancelWaiter()
+
+	select {
+	case err := <-waiterDone:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled waiter remained blocked on the owner's decompression")
+	}
+	select {
+	case err := <-ownerDone:
+		t.Fatalf("owner unexpectedly completed before release: %v", err)
+	default:
+	}
+
+	releaseOwner()
+	select {
+	case err := <-ownerDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not complete after release")
+	}
+	require.Equal(t, 1, layer.Calls())
+}
+
+func TestOCIStorage_GlobalLayerDecompressionOwnerHonorsCancellation(t *testing.T) {
+	testData := bytes.Repeat([]byte("cancel-owner-copy"), 4096)
+	digest := v1.Hash{Algorithm: "sha256", Hex: "global-singleflight-canceled-owner"}
+	sum := sha256.Sum256(testData)
+	decompressedHash := hex.EncodeToString(sum[:])
+	diskCacheDir := t.TempDir()
+	layerPath := filepath.Join(diskCacheDir, decompressedHash)
+
+	metadata := &common.ClipArchiveMetadata{StorageInfo: &common.OCIStorageInfo{
+		DecompressedHashByLayer: map[string]string{digest.String(): decompressedHash},
+	}}
+	layer := &blockingCompressedStreamLayer{
+		mockLayer: &mockLayer{digest: digest},
+		content:   testData,
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		stopped:   make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseStream := func() { releaseOnce.Do(func() { close(layer.release) }) }
+	defer releaseStream()
+
+	storage := &OCIClipStorage{
+		metadata:     metadata,
+		storageInfo:  metadata.StorageInfo.(*common.OCIStorageInfo),
+		layerCache:   map[string]v1.Layer{digest.String(): layer},
+		diskCacheDir: diskCacheDir,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := storage.ensureLayerCached(ctx, digest.String())
+		done <- err
+	}()
+	select {
+	case <-layer.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not begin streaming the compressed layer")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled owner remained blocked in layer decompression")
+	}
+
+	releaseStream()
+	select {
+	case <-layer.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("compressed layer producer did not stop")
+	}
+	_, err := os.Stat(layerPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	tempFiles, err := filepath.Glob(layerPath + ".*.tmp")
+	require.NoError(t, err)
+	require.Empty(t, tempFiles)
 }
 
 func TestOCIStorage_GlobalLayerDecompressionDoesNotShareDifferentCacheDirs(t *testing.T) {

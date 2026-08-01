@@ -87,12 +87,20 @@ func newLayerDecompressGroup() *layerDecompressGroup {
 	return &layerDecompressGroup{inflight: make(map[string]*layerDecompressCall)}
 }
 
-func (g *layerDecompressGroup) Do(key string, fn func() error) (shared bool, err error) {
+func (g *layerDecompressGroup) Do(ctx context.Context, key string, fn func() error) (shared bool, err error) {
 	g.mu.Lock()
 	if call := g.inflight[key]; call != nil {
 		g.mu.Unlock()
-		<-call.done
-		return true, call.err
+		select {
+		case <-call.done:
+			return true, call.err
+		case <-ctx.Done():
+			return true, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		g.mu.Unlock()
+		return false, err
 	}
 
 	call := &layerDecompressCall{done: make(chan struct{})}
@@ -687,7 +695,7 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 
 	waitStart := time.Now()
 	decompressKey := layerDecompressKey(decompressedHash, layerPath)
-	shared, err := globalLayerDecompress.Do(decompressKey, func() error {
+	shared, err := globalLayerDecompress.Do(ctx, decompressKey, func() error {
 		// Double-check disk cache inside the process-wide singleflight. A
 		// separate OCIClipStorage instance may have materialized the same layer
 		// between our fast-path stat and entering this call.
@@ -1020,6 +1028,10 @@ func (s *OCIClipStorage) decompressAndCacheLayer(digest string, diskPath string)
 }
 
 func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, digest string, diskPath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	decompressedHash := s.getDecompressedHash(digest)
 	if decompressedHash == "" {
 		return "", fmt.Errorf("no decompressed hash in metadata for layer: %s", digest)
@@ -1041,6 +1053,9 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 				Str("layer", digest).
 				Str("decompressed_hash", decompressedHash).
 				Msg("full layer content cache restore missed; falling back to registry")
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "content_cache", ctxErr
+			}
 		}
 	}
 
@@ -1056,17 +1071,27 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 		return "oci_registry", fmt.Errorf("failed to get compressed layer: %w", err)
 	}
 	defer compressedRC.Close()
+	stopCloseOnCancel := context.AfterFunc(ctx, func() {
+		_ = compressedRC.Close()
+	})
+	defer stopCloseOnCancel()
 
 	gzr, err := gzip.NewReader(compressedRC)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "oci_registry", ctxErr
+		}
 		return "oci_registry", fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer gzr.Close()
 
 	written, err := writeVerifiedLayer(diskPath, decompressedHash, func(w io.Writer) (int64, error) {
-		return io.Copy(w, gzr)
+		return io.Copy(w, &contextReader{ctx: ctx, reader: gzr})
 	})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "oci_registry", ctxErr
+		}
 		return "oci_registry", fmt.Errorf("failed to decompress layer to disk: %w", err)
 	}
 
@@ -1083,6 +1108,25 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 	// fallback if this worker exits before the warm completes.
 	s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, diskPath)
 	return "oci_registry", nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	n, err := r.reader.Read(p)
+	if err == nil {
+		if ctxErr := r.ctx.Err(); ctxErr != nil {
+			return n, ctxErr
+		}
+	}
+	return n, err
 }
 
 func restoreLayerFromContentCache(ctx context.Context, cacheStream ContentCacheStream, decompressedHash, diskPath string) (int64, error) {
