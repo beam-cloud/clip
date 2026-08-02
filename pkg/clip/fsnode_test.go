@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -270,6 +271,21 @@ func TestLegacyClientLocalFileViewReadWarmsContentCache(t *testing.T) {
 	defer cache.mu.Unlock()
 	require.False(t, cache.getCalled, "fd fast path should not require a content-cache read")
 	require.Equal(t, testData, cache.store[contentHash])
+}
+
+func TestClientLocalFileViewsShareBackingFile(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "layer")
+	require.NoError(t, os.WriteFile(archivePath, []byte("data"), 0644))
+
+	filesystem := &ClipFileSystem{viewFiles: make(map[string]*os.File)}
+	first, err := filesystem.openViewFile(archivePath)
+	require.NoError(t, err)
+	second, err := filesystem.openViewFile(archivePath)
+	require.NoError(t, err)
+	require.Same(t, first, second)
+	require.Len(t, filesystem.viewFiles, 1)
+	require.NoError(t, filesystem.closeViewFiles())
+	require.Empty(t, filesystem.viewFiles)
 }
 
 func TestImmutableFileOpenSkipsFlush(t *testing.T) {

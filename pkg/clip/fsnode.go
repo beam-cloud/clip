@@ -2,7 +2,6 @@ package clip
 
 import (
 	"context"
-	"os"
 	"path"
 	"strconv"
 	"sync"
@@ -25,19 +24,14 @@ type FSNode struct {
 	dirEntries     []fuse.DirEntry
 }
 
-const clipFileHandleFDCacheSize = 2048
+const clipFileViewFDCacheSize = 2048
 
 type clipFileHandle struct {
-	node  *FSNode
-	mu    sync.Mutex
-	files map[string]*os.File
+	node *FSNode
 }
 
 func newClipFileHandle(node *FSNode) *clipFileHandle {
-	return &clipFileHandle{
-		node:  node,
-		files: make(map[string]*os.File),
-	}
+	return &clipFileHandle{node: node}
 }
 
 func (fh *clipFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -57,33 +51,7 @@ func (fh *clipFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 }
 
 func (fh *clipFileHandle) Release(ctx context.Context) syscall.Errno {
-	fh.mu.Lock()
-	defer fh.mu.Unlock()
-	var firstErr syscall.Errno
-	for path, file := range fh.files {
-		if err := file.Close(); err != nil && firstErr == fs.OK {
-			firstErr = fs.ToErrno(err)
-		}
-		delete(fh.files, path)
-	}
-	return firstErr
-}
-
-func (fh *clipFileHandle) openViewFile(path string) (*os.File, error) {
-	fh.mu.Lock()
-	defer fh.mu.Unlock()
-	if file := fh.files[path]; file != nil {
-		return file, nil
-	}
-	if len(fh.files) >= clipFileHandleFDCacheSize {
-		return nil, syscall.EMFILE
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	fh.files[path] = file
-	return file, nil
+	return fs.OK
 }
 
 func (fh *clipFileHandle) readClientLocalFileView(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, bool, syscall.Errno) {
@@ -119,7 +87,7 @@ func (fh *clipFileHandle) readClientLocalFileView(ctx context.Context, dest []by
 		return nil, false, fs.OK
 	}
 
-	file, err := fh.openViewFile(view.Path)
+	file, err := fh.node.filesystem.openViewFile(view.Path)
 	if err != nil {
 		if traceRead {
 			fh.node.observeRead(ctx, fh.node.clientLocalFileViewReadTrace(view, off, readLen, 0, started, err))

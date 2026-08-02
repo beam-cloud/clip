@@ -66,6 +66,7 @@ type MountOptions struct {
 	CachePath             string
 	ContentCache          storage.ContentCache
 	ContentCacheAvailable bool
+	StorageModeOverride   common.StorageMode
 	StorageInfo           common.ClipStorageInfo
 	Credentials           storage.ClipStorageCredentials
 	UseCheckpoints        bool        // Enable checkpoint-based partial decompression for OCI layers
@@ -229,12 +230,15 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 			go server.Serve()
 
 			if err := server.WaitMount(); err != nil {
+				_ = clipfs.closeViewFiles()
+				_ = archiveStorage.Cleanup()
 				serverError <- err
 				return
 			}
 
 			server.Wait()
-			archiveStorage.Cleanup()
+			_ = clipfs.closeViewFiles()
+			_ = archiveStorage.Cleanup()
 
 			close(serverError)
 		}()
@@ -266,6 +270,7 @@ func openArchiveStorage(options MountOptions) (storage.ClipStorageInterface, err
 		ArchivePath:           options.ArchivePath,
 		CachePath:             options.CachePath,
 		Metadata:              metadata,
+		StorageModeOverride:   options.StorageModeOverride,
 		Credentials:           options.Credentials,
 		StorageInfo:           s3Info,
 		ContentCache:          options.ContentCache,

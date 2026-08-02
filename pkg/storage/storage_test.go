@@ -3,12 +3,64 @@ package storage
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/beam-cloud/clip/pkg/common"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNewClipStorageS3CredentialsAreOptional(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+
+	metadata := &common.ClipArchiveMetadata{
+		Header: common.ClipArchiveHeader{StorageInfoLength: 1},
+		StorageInfo: common.S3StorageInfo{
+			Bucket:         "test-bucket",
+			Region:         "us-east-1",
+			Key:            "image.clip",
+			Endpoint:       server.URL,
+			ForcePathStyle: true,
+		},
+	}
+
+	storage, err := NewClipStorage(ClipStorageOpts{Metadata: metadata})
+	require.NoError(t, err)
+	require.NotNil(t, storage)
+	require.NoError(t, storage.Cleanup())
+}
+
+func TestNewClipStorageLocalModeOverridesRemoteMetadata(t *testing.T) {
+	archive, err := os.CreateTemp(t.TempDir(), "archive-*.clip")
+	require.NoError(t, err)
+	require.NoError(t, archive.Close())
+
+	metadata := &common.ClipArchiveMetadata{
+		Header: common.ClipArchiveHeader{StorageInfoLength: 1},
+		StorageInfo: common.S3StorageInfo{
+			Bucket: "remote-bucket",
+			Region: "us-east-1",
+			Key:    "image.clip",
+		},
+	}
+
+	storage, err := NewClipStorage(ClipStorageOpts{
+		ArchivePath:         archive.Name(),
+		Metadata:            metadata,
+		StorageModeOverride: common.StorageModeLocal,
+	})
+	require.NoError(t, err)
+	require.IsType(t, &LocalClipStorage{}, storage)
+	require.NoError(t, storage.Cleanup())
+}
 
 // TestDecompressedHashMapping verifies that layer digest to decompressed hash mapping works
 func TestDecompressedHashMapping(t *testing.T) {

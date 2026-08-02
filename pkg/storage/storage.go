@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/beam-cloud/clip/pkg/common"
 )
@@ -96,6 +97,7 @@ type ClipStorageOpts struct {
 	ArchivePath           string
 	CachePath             string
 	Metadata              *common.ClipArchiveMetadata
+	StorageModeOverride   common.StorageMode
 	StorageInfo           *common.S3StorageInfo
 	Credentials           ClipStorageCredentials
 	ContentCache          ContentCache // For OCI storage remote caching
@@ -107,29 +109,32 @@ type ClipStorageOpts struct {
 
 func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 	var storage ClipStorageInterface = nil
-	var storageType common.StorageMode
+	storageType := opts.StorageModeOverride
 	var err error = nil
 
 	header := opts.Metadata.Header
 	metadata := opts.Metadata
 
-	// Determine storage type from header or metadata
-	if header.StorageInfoLength > 0 {
-		// Check the actual storage info type
-		if metadata.StorageInfo != nil {
-			switch metadata.StorageInfo.Type() {
-			case string(common.StorageModeOCI):
-				storageType = common.StorageModeOCI
-			case string(common.StorageModeS3):
+	// Determine storage type from header or metadata unless the caller has
+	// materialized remote content into a verified local archive.
+	if storageType == "" {
+		if header.StorageInfoLength > 0 {
+			// Check the actual storage info type
+			if metadata.StorageInfo != nil {
+				switch metadata.StorageInfo.Type() {
+				case string(common.StorageModeOCI):
+					storageType = common.StorageModeOCI
+				case string(common.StorageModeS3):
+					storageType = common.StorageModeS3
+				default:
+					storageType = common.StorageModeS3 // default to S3 for backward compatibility
+				}
+			} else {
 				storageType = common.StorageModeS3
-			default:
-				storageType = common.StorageModeS3 // default to S3 for backward compatibility
 			}
 		} else {
-			storageType = common.StorageModeS3
+			storageType = common.StorageModeLocal
 		}
-	} else {
-		storageType = common.StorageModeLocal
 	}
 
 	switch storageType {
@@ -141,9 +146,26 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 		// If StorageInfo is passed in, we can use that to override the configuration
 		// stored in the metadata. This way you can use a different bucket for the
 		// archive than the one used when the archive was created.
-		storageInfo := metadata.StorageInfo.(common.S3StorageInfo)
+		var storageInfo common.S3StorageInfo
+		switch info := metadata.StorageInfo.(type) {
+		case common.S3StorageInfo:
+			storageInfo = info
+		case *common.S3StorageInfo:
+			if info != nil {
+				storageInfo = *info
+			}
+		case nil:
+		default:
+			return nil, fmt.Errorf("invalid S3 storage info type %T", metadata.StorageInfo)
+		}
 		if opts.StorageInfo != nil {
 			storageInfo = *opts.StorageInfo
+		}
+
+		var accessKey, secretKey string
+		if opts.Credentials.S3 != nil {
+			accessKey = opts.Credentials.S3.AccessKey
+			secretKey = opts.Credentials.S3.SecretKey
 		}
 
 		storage, err = NewS3ClipStorage(metadata, S3ClipStorageOpts{
@@ -153,8 +175,8 @@ func NewClipStorage(opts ClipStorageOpts) (ClipStorageInterface, error) {
 			Endpoint:       storageInfo.Endpoint,
 			ForcePathStyle: storageInfo.ForcePathStyle,
 			CachePath:      opts.CachePath,
-			AccessKey:      opts.Credentials.S3.AccessKey,
-			SecretKey:      opts.Credentials.S3.SecretKey,
+			AccessKey:      accessKey,
+			SecretKey:      secretKey,
 		})
 	case common.StorageModeOCI:
 		// Convert interface{} to RegistryCredentialProvider if provided
