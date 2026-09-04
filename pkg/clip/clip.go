@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -211,13 +212,22 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 	}
 
 	root, _ := clipfs.Root()
+	maxWrite := 1024 * 1024
+	if limit := spliceSafeMaxWrite(); limit > 0 && maxWrite > limit {
+		// go-fuse sets max_read = MaxWrite and serves fd-backed reads by
+		// splicing header+payload+one page through a pipe bounded by
+		// fs.pipe-max-size. If a full read doesn't fit, every read falls back
+		// to a copy and go-fuse logs "trySplice: splice: want N bytes".
+		log.Info().Int("max_write", limit).Msg("capping FUSE read/write size to fit fs.pipe-max-size")
+		maxWrite = limit
+	}
 	server, err := fuse.NewServer(fs.NewNodeFS(root, immutableFilesystemOptions()), options.MountPoint, &fuse.MountOptions{
 		MaxBackground:        512,
 		DisableXAttrs:        true,
 		EnableSymlinkCaching: true,
 		SyncRead:             false,
 		RememberInodes:       true,
-		MaxWrite:             1024 * 1024,
+		MaxWrite:             maxWrite,
 		MaxReadAhead:         1024 * 1024,
 	})
 	if err != nil {
@@ -429,4 +439,27 @@ func CreateAndUploadOCIArchive(ctx context.Context, options CreateFromOCIImageOp
 	}
 
 	return nil
+}
+
+// spliceSafeMaxWrite returns the largest page-aligned FUSE read/write size for
+// which go-fuse's zero-copy splice path (header + payload + one extra page)
+// fits in the kernel's maximum pipe size. Returns 0 if the limit is unknown.
+func spliceSafeMaxWrite() int {
+	content, err := os.ReadFile("/proc/sys/fs/pipe-max-size")
+	if err != nil {
+		return 0
+	}
+	pipeMax, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	if err != nil || pipeMax <= 0 {
+		return 0
+	}
+	return spliceSafeMaxWriteFor(pipeMax, os.Getpagesize())
+}
+
+func spliceSafeMaxWriteFor(pipeMax, pageSize int) int {
+	if pageSize <= 0 || pipeMax <= 2*pageSize {
+		return 0
+	}
+	limit := pipeMax - 2*pageSize
+	return limit - limit%pageSize
 }
