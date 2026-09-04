@@ -105,3 +105,45 @@ func TestWarmPacerOnlyThrottlesWhileForegroundReadsAreRecent(t *testing.T) {
 		t.Fatalf("warm stayed paced after reader went idle: %s", el)
 	}
 }
+
+func TestWarmPacerBudgetIsSharedAcrossConcurrentRestores(t *testing.T) {
+	s := &OCIClipStorage{}
+	s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+
+	// Two restores writing at once should together take about as long as one
+	// writing the same total: 32 MiB across both at the contended rate.
+	start := time.Now()
+	var wg sync.WaitGroup
+	for r := 0; r < 2; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pace := s.warmPacer()
+			for i := 0; i < 4; i++ {
+				s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+				pace(4 << 20)
+			}
+		}()
+	}
+	wg.Wait()
+	el := time.Since(start)
+	want := time.Duration(float64(32<<20) / float64(warmPacerContendedBytesPerSec) * float64(time.Second))
+	if el < want*8/10 || el > want*2 {
+		t.Fatalf("two contended restores ran for %s, want about %s (shared budget)", el, want)
+	}
+}
+
+func TestWarmPacerYieldsToForegroundLayerWaiters(t *testing.T) {
+	s := &OCIClipStorage{}
+	s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+	s.foregroundLayerWaiters.Add(1)
+	pace := s.warmPacer()
+	start := time.Now()
+	for i := 0; i < 16; i++ {
+		s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+		pace(4 << 20)
+	}
+	if el := time.Since(start); el > 50*time.Millisecond {
+		t.Fatalf("restore was paced while a foreground caller waited on a layer: %s", el)
+	}
+}

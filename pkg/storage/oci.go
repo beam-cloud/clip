@@ -34,6 +34,10 @@ type OCIClipStorage struct {
 	// while it is recent so they do not starve the reads they are meant to
 	// speed up (see warmPacer).
 	lastForegroundReadNanos atomic.Int64
+	foregroundLayerWaiters  atomic.Int32
+	warmPaceMu              sync.Mutex
+	warmPaceSince           time.Time
+	warmPaceBytes           int64
 
 	metadata              *common.ClipArchiveMetadata
 	storageInfo           *common.OCIStorageInfo
@@ -248,7 +252,9 @@ func (s *OCIClipStorage) Prepare(ctx context.Context, opts PrepareOptions) error
 		opts.Progress(PrepareProgress{Total: len(layers)})
 	}
 
-	group, groupCtx := errgroup.WithContext(ctx)
+	// Prepare copies whole layers in behind a running container; its writes
+	// yield to that container's reads like any other background warm.
+	group, groupCtx := errgroup.WithContext(withBackgroundLayerWarm(ctx))
 	group.SetLimit(concurrency)
 	for _, layerDigest := range layers {
 		layerDigest := layerDigest
@@ -748,6 +754,14 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 		log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit")
 		s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
 		return decompressedHash, layerPath, nil
+	}
+
+	// A foreground caller is about to wait on this layer. Background restores
+	// on this mount stop pacing while one is waiting, since the restore it
+	// joins (or competes with) is now on a container's critical path.
+	if !isBackgroundLayerWarm(ctx) {
+		s.foregroundLayerWaiters.Add(1)
+		defer s.foregroundLayerWaiters.Add(-1)
 	}
 
 	waitStart := time.Now()
@@ -1395,29 +1409,33 @@ func isBackgroundLayerWarm(ctx context.Context) bool {
 	return v
 }
 
-// warmPacer returns a function the layer restore calls after writing each
-// chunk; it sleeps as needed to hold the contended write rate.
+// warmPacer returns a function a layer restore calls after writing each
+// chunk; it sleeps as needed to hold the contended write rate. The budget is
+// shared by every paced restore on this mount (Prepare runs several layers at
+// once), so the cap is on the mount's total background write rate.
 func (s *OCIClipStorage) warmPacer() func(int) {
 	if s == nil {
 		return nil
 	}
-	var contendedSince time.Time
-	var contendedBytes int64
 	return func(n int) {
 		last := s.lastForegroundReadNanos.Load()
-		if last == 0 || time.Since(time.Unix(0, last)) > warmPacerActiveWindow {
-			contendedSince = time.Time{}
-			contendedBytes = 0
+		s.warmPaceMu.Lock()
+		if last == 0 || time.Since(time.Unix(0, last)) > warmPacerActiveWindow || s.foregroundLayerWaiters.Load() > 0 {
+			s.warmPaceSince = time.Time{}
+			s.warmPaceBytes = 0
+			s.warmPaceMu.Unlock()
 			return
 		}
 		now := time.Now()
-		if contendedSince.IsZero() {
-			contendedSince = now
-			contendedBytes = 0
+		if s.warmPaceSince.IsZero() {
+			s.warmPaceSince = now
+			s.warmPaceBytes = 0
 		}
-		contendedBytes += int64(n)
-		allowed := time.Duration(float64(contendedBytes) / float64(warmPacerContendedBytesPerSec) * float64(time.Second))
-		if sleep := allowed - now.Sub(contendedSince); sleep > 0 {
+		s.warmPaceBytes += int64(n)
+		allowed := time.Duration(float64(s.warmPaceBytes) / float64(warmPacerContendedBytesPerSec) * float64(time.Second))
+		sleep := allowed - now.Sub(s.warmPaceSince)
+		s.warmPaceMu.Unlock()
+		if sleep > 0 {
 			time.Sleep(sleep)
 		}
 	}
