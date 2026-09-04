@@ -13,7 +13,7 @@ const (
 	// the cache host for a sequential reader, at the cost of latency and
 	// waste for a reader that touches one page of it.
 	DefaultContentCacheReadAheadBytes = 4 * 1024 * 1024
-	DefaultContentCacheReadAheadSlots = 16
+	DefaultContentCacheReadAheadSlots = 24
 )
 
 type ContentCacheReadAheadOptions struct {
@@ -34,10 +34,28 @@ type ContentCacheReadAhead struct {
 	inflight    sync.Mutex
 	prefetching map[contentCacheWindowKey]struct{}
 	prefetchWG  sync.WaitGroup
+
+	streamsMu sync.Mutex
+	streams   map[string]*contentCacheStream
 }
 
-// maxPrefetchInFlight bounds background window fetches per read-ahead cache.
-const maxPrefetchInFlight = 4
+// contentCacheStream remembers where the last window read of a layer ended so
+// a reader that keeps arriving at the next window is recognised as sequential
+// and gets progressively deeper prefetch.
+type contentCacheStream struct {
+	lastEnd int64
+	depth   int
+}
+
+const (
+	// maxPrefetchInFlight bounds background window fetches per read-ahead cache.
+	maxPrefetchInFlight = 16
+	// maxPrefetchDepth is how many windows ahead a sequential reader is
+	// fetched. One window ahead bounds throughput at two windows per round
+	// trip (~270 MiB/s at 4 MiB windows and 30 ms); eight keeps 32 MiB in
+	// flight, enough to run at the cache host's transfer rate.
+	maxPrefetchDepth = 8
+)
 
 type contentCacheWindowKey struct {
 	hash       string
@@ -102,8 +120,20 @@ func (r *ContentCacheReadAhead) Read(hash string, offset int64, dest []byte, opt
 	key := contentCacheWindowKey{hash: hash, routingKey: opts.RoutingKey, start: start, end: end}
 	// A reader in the second half of a window is likely sequential: fetch the
 	// next window now so its transfer overlaps with the pages being consumed.
-	if offset+length > start+r.windowBytes/2 && end < limit {
-		r.prefetch(hash, end, limit, opts)
+	// A reader that has already walked consecutive windows is sequential for
+	// sure and is kept several windows ahead from the moment it enters a new
+	// window.
+	if end < limit {
+		depth := r.sequentialDepth(key)
+		if depth > 1 || offset+length > start+r.windowBytes/2 {
+			for i := 0; i < depth; i++ {
+				next := end + int64(i)*r.windowBytes
+				if next >= limit {
+					break
+				}
+				r.prefetch(hash, next, limit, opts)
+			}
+		}
 	}
 	data, err := r.window(key, opts)
 	if err != nil {
@@ -114,6 +144,39 @@ func (r *ContentCacheReadAhead) Read(hash string, offset int64, dest []byte, opt
 	}
 	copy(dest, data[offset-start:offset-start+length])
 	return length, nil
+}
+
+// sequentialDepth records that a reader is in window key and returns how many
+// windows ahead to prefetch: 1 for a new or non-contiguous reader, doubling
+// with every consecutive window up to maxPrefetchDepth.
+func (r *ContentCacheReadAhead) sequentialDepth(key contentCacheWindowKey) int {
+	r.streamsMu.Lock()
+	defer r.streamsMu.Unlock()
+	if r.streams == nil {
+		r.streams = map[string]*contentCacheStream{}
+	}
+	id := key.hash + "\x00" + key.routingKey
+	stream := r.streams[id]
+	if stream == nil {
+		if len(r.streams) >= 1024 {
+			r.streams = map[string]*contentCacheStream{}
+		}
+		stream = &contentCacheStream{}
+		r.streams[id] = stream
+	}
+	if stream.lastEnd == key.end {
+		return stream.depth // same window as last time
+	}
+	if stream.lastEnd == key.start && stream.depth > 0 {
+		stream.depth *= 2
+		if stream.depth > maxPrefetchDepth {
+			stream.depth = maxPrefetchDepth
+		}
+	} else {
+		stream.depth = 1
+	}
+	stream.lastEnd = key.end
+	return stream.depth
 }
 
 // window returns the bytes of key, fetching them once across concurrent callers.
