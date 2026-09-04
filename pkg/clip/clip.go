@@ -345,6 +345,7 @@ type CreateFromOCIImageOptions struct {
 	Platform         *v1.Platform
 	ContentCache     storage.ContentCache    // Optional cache to warm with decompressed layer streams
 	ContentCacheDir  string                  // Optional temp directory for layer cache upload spooling
+	SeedDecompressed bool                    // Store freshly indexed layers' decompressed bytes in ContentCache
 	LayerIndexCache  storage.LayerIndexCache // Optional per-layer index artifact cache (skips pull+index on hit)
 	IndexConcurrency int                     // Max layers indexed concurrently (default 4)
 }
@@ -380,6 +381,7 @@ func CreateFromOCIImage(ctx context.Context, options CreateFromOCIImageOptions) 
 		Platform:         options.Platform,
 		ContentCache:     options.ContentCache,
 		ContentCacheDir:  options.ContentCacheDir,
+		SeedDecompressed: options.SeedDecompressed,
 		LayerIndexCache:  options.LayerIndexCache,
 		IndexConcurrency: options.IndexConcurrency,
 	}, options.OutputPath)

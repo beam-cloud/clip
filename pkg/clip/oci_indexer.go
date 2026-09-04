@@ -71,6 +71,7 @@ type IndexOCIImageOptions struct {
 	Platform         *v1.Platform                      // Target platform (defaults to linux/runtime.GOARCH)
 	ContentCache     storage.ContentCache              // optional remote cache for fully decompressed layers
 	ContentCacheDir  string                            // optional temp directory for cache upload spooling
+	SeedDecompressed bool                              // store each freshly indexed layer's decompressed bytes in ContentCache
 	LayerIndexCache  storage.LayerIndexCache           // optional cache of per-layer index artifacts (skips pull+index on hit)
 	IndexConcurrency int                               // max layers indexed concurrently (default 4)
 }
@@ -557,12 +558,20 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 	}
 	defer gzr.Close()
 
-	// Streaming hash computation via TeeReader.
-	// The runtime warms decompressed layers after first access; the build path
-	// keeps indexing strictly streaming so large layers do not pay extra disk
-	// writes just to seed an optional warm cache.
+	// Streaming hash computation via TeeReader. With SeedDecompressed the same
+	// decompressed stream is spooled to disk once and stored in the content
+	// cache after indexing, so the first container to use the layer reads it
+	// page-wise from the cache instead of materializing the whole layer.
 	hasher := sha256.New()
 	hashWriter := io.Writer(hasher)
+	var cacheSpool *indexedLayerContentCacheSpool
+	if opts.SeedDecompressed && opts.ContentCache != nil {
+		cacheSpool = newIndexedLayerContentCacheSpool(opts.ContentCacheDir, layerDigest)
+		if cacheSpool != nil {
+			defer cacheSpool.closeAndRemove()
+			hashWriter = io.MultiWriter(hasher, cacheSpool)
+		}
+	}
 	hashingReader := io.TeeReader(gzr, hashWriter)
 	uncompressedCounter := &countingReader{r: hashingReader, onRead: func(total int64) {
 		if onBytes != nil {
@@ -644,6 +653,27 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 
 	// Finalize hash (includes all bytes: file contents + tar headers + padding)
 	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// Stored synchronously: the indexing process (a build worker) often exits
+	// as soon as indexing completes, and the seed is the point of the option.
+	if cacheSpool != nil {
+		if cacheSpool.err != nil {
+			log.Warn().Err(cacheSpool.err).Str("layer_digest", layerDigest).Msg("indexed layer not seeded: spool write failed")
+		} else if path, ok := cacheSpool.detach(); ok {
+			seedStart := time.Now()
+			err := ca.storeIndexedLayerInContentCache(ctx, opts.ContentCache, path, decompressedHash, layerDigest)
+			os.Remove(path)
+			if err != nil {
+				log.Warn().Err(err).Str("layer_digest", layerDigest).Msg("indexed layer not seeded in content cache")
+			} else {
+				log.Info().
+					Str("layer_digest", layerDigest).
+					Int64("bytes", uncompressedCounter.n).
+					Dur("duration", time.Since(seedStart)).
+					Msg("seeded decompressed layer into content cache")
+			}
+		}
+	}
 
 	return &LayerArtifact{
 		Version:          LayerArtifactVersion,

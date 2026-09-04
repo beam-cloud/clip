@@ -3,6 +3,7 @@ package clip
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -189,4 +190,35 @@ func TestCompressedLayerContentCacheReadThrough(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, bytes1, bytes2, "index must be identical regardless of layer source")
 	assert.Equal(t, hashes1, hashes2)
+}
+
+func TestSeedDecompressedStoresIndexedLayerBytes(t *testing.T) {
+	compressed := buildLayer(t, []tarEntry{
+		{name: "dir/", typeflag: tar.TypeDir},
+		{name: "dir/a.txt", typeflag: tar.TypeReg, content: "hello"},
+	})
+	sum := sha256.Sum256(compressed)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+
+	for _, seed := range []bool{false, true} {
+		cache := newFakeBlobContentCache()
+		artifact, err := NewClipArchiver().indexLayerToArtifact(
+			context.Background(),
+			io.NopCloser(bytes.NewReader(compressed)),
+			digest,
+			IndexOCIImageOptions{CheckpointMiB: 2, ContentCache: cache, ContentCacheDir: t.TempDir(), SeedDecompressed: seed},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, seed, cache.has(artifact.DecompressedHash), "seed=%v", seed)
+		if seed {
+			data, err := cache.GetContent(artifact.DecompressedHash, 0, artifact.UncompressedSize, struct{ RoutingKey string }{})
+			require.NoError(t, err)
+			gz, err := gzip.NewReader(bytes.NewReader(compressed))
+			require.NoError(t, err)
+			want, err := io.ReadAll(gz)
+			require.NoError(t, err)
+			assert.Equal(t, want, data)
+		}
+	}
 }
