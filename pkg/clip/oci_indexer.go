@@ -12,6 +12,7 @@ import (
 	"path"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -74,6 +75,10 @@ type IndexOCIImageOptions struct {
 	SeedDecompressed bool                              // store each freshly indexed layer's decompressed bytes in ContentCache
 	LayerIndexCache  storage.LayerIndexCache           // optional cache of per-layer index artifacts (skips pull+index on hit)
 	IndexConcurrency int                               // max layers indexed concurrently (default 4)
+
+	// seeder runs SeedDecompressed uploads off the indexing goroutines so a
+	// slow store does not hold an indexing slot; set by IndexOCIImage.
+	seeder *layerSeeder
 }
 
 const defaultIndexConcurrency = 4
@@ -385,6 +390,14 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrency)
 
+	// Content cache seeds run alongside indexing, on the parent context
+	// (gctx is cancelled once g.Wait returns), and are all awaited before
+	// the index is returned: the indexing process may exit right after.
+	if opts.SeedDecompressed && opts.ContentCache != nil {
+		opts.seeder = newLayerSeeder(ctx, concurrency)
+		defer opts.seeder.wait()
+	}
+
 	var completedLayers atomic.Int64
 
 	for i := range layers {
@@ -654,23 +667,32 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 	// Finalize hash (includes all bytes: file contents + tar headers + padding)
 	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Stored synchronously: the indexing process (a build worker) often exits
-	// as soon as indexing completes, and the seed is the point of the option.
+	// The seed is awaited before indexing returns (the indexing process, a
+	// build worker, often exits right after); through the seeder it runs
+	// off this goroutine so the upload overlaps with indexing other layers.
 	if cacheSpool != nil {
 		if cacheSpool.err != nil {
 			log.Warn().Err(cacheSpool.err).Str("layer_digest", layerDigest).Msg("indexed layer not seeded: spool write failed")
 		} else if path, ok := cacheSpool.detach(); ok {
-			seedStart := time.Now()
-			err := ca.storeIndexedLayerInContentCache(ctx, opts.ContentCache, path, decompressedHash, layerDigest)
-			os.Remove(path)
-			if err != nil {
-				log.Warn().Err(err).Str("layer_digest", layerDigest).Msg("indexed layer not seeded in content cache")
-			} else {
+			uncompressedBytes := uncompressedCounter.n
+			seed := func(ctx context.Context) {
+				seedStart := time.Now()
+				err := ca.storeIndexedLayerInContentCache(ctx, opts.ContentCache, path, decompressedHash, layerDigest)
+				os.Remove(path)
+				if err != nil {
+					log.Warn().Err(err).Str("layer_digest", layerDigest).Msg("indexed layer not seeded in content cache")
+					return
+				}
 				log.Info().
 					Str("layer_digest", layerDigest).
-					Int64("bytes", uncompressedCounter.n).
+					Int64("bytes", uncompressedBytes).
 					Dur("duration", time.Since(seedStart)).
 					Msg("seeded decompressed layer into content cache")
+			}
+			if opts.seeder != nil {
+				opts.seeder.run(seed)
+			} else {
+				seed(ctx)
 			}
 		}
 	}
@@ -685,6 +707,34 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 		UncompressedSize: uncompressedCounter.n,
 	}, nil
 }
+
+// layerSeeder runs content cache seeds concurrently, up to a limit, and lets
+// the indexer wait for all of them.
+type layerSeeder struct {
+	ctx context.Context
+	wg  sync.WaitGroup
+	sem chan struct{}
+}
+
+func newLayerSeeder(ctx context.Context, limit int) *layerSeeder {
+	if limit < 1 {
+		limit = 1
+	}
+	return &layerSeeder{ctx: ctx, sem: make(chan struct{}, limit)}
+}
+
+// run starts fn once a slot is free; it blocks only while every slot is busy.
+func (s *layerSeeder) run(fn func(ctx context.Context)) {
+	s.wg.Add(1)
+	s.sem <- struct{}{}
+	go func() {
+		defer s.wg.Done()
+		defer func() { <-s.sem }()
+		fn(s.ctx)
+	}()
+}
+
+func (s *layerSeeder) wait() { s.wg.Wait() }
 
 func (ca *ClipArchiver) storeIndexedLayerInContentCache(ctx context.Context, contentCache storage.ContentCache, filePath, decompressedHash, layerDigest string) error {
 	return ca.storeLayerBlobInContentCache(ctx, contentCache, filePath, decompressedHash, layerDigest, "indexed layer")
