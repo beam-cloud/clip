@@ -105,11 +105,23 @@ func (r *ContentCacheReadAhead) Read(hash string, offset int64, dest []byte, opt
 		return readContentCacheInto(r.cache, hash, offset, dest, opts)
 	}
 
+	// A read that straddles a window boundary is served from each aligned
+	// window in turn. Windows must stay aligned: an oversized window for the
+	// straddling read would be a separate fetch of almost the same bytes, and
+	// its odd end would break the sequential-stream detection below.
 	start := (offset / r.windowBytes) * r.windowBytes
-	end := start + r.windowBytes
-	if needEnd := offset + length; end < needEnd {
-		end = needEnd
+	if offset+length > start+r.windowBytes {
+		var done int64
+		for done < length {
+			n, err := r.Read(hash, offset+done, dest[done:min(length, ((offset+done)/r.windowBytes+1)*r.windowBytes-offset)], opts, limit)
+			if err != nil {
+				return done, err
+			}
+			done += n
+		}
+		return done, nil
 	}
+	end := start + r.windowBytes
 	if end > limit {
 		end = limit
 	}
