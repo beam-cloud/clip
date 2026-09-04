@@ -3505,3 +3505,12 @@ func TestCheckpointEmptyList(t *testing.T) {
 	assert.Equal(t, int64(0), cOff, "should return 0 for empty checkpoint list")
 	assert.Equal(t, int64(0), uOff, "should return 0 for empty checkpoint list")
 }
+
+func TestNoteContentCacheServedCrossesThresholdOnce(t *testing.T) {
+	s := &OCIClipStorage{}
+	half := int64(contentCacheWarmThreshold / 2)
+	require.False(t, s.noteContentCacheServed("a", half), "below threshold")
+	require.True(t, s.noteContentCacheServed("a", half), "crossing threshold schedules the warm")
+	require.False(t, s.noteContentCacheServed("a", half), "only once per layer")
+	require.False(t, s.noteContentCacheServed("b", half), "layers are counted separately")
+}

@@ -43,6 +43,7 @@ type OCIClipStorage struct {
 	contentCacheWarmOnce  map[string]struct{}
 	layerWarmMu           sync.Mutex
 	layerWarmOnce         map[string]struct{}
+	contentCacheServed    map[string]int64 // bytes range-read from the content cache, per decompressed hash
 	checkpointLogMu       sync.Mutex
 	checkpointSuccessOnce map[string]struct{}
 	checkpointFailureOnce map[string]struct{}
@@ -59,6 +60,15 @@ type localDecompressedLayer struct {
 var globalLayerDecompress = newLayerDecompressGroup()
 
 const maxBackgroundLayerWarms = 2
+
+// contentCacheWarmThreshold is how much of a layer a mount has to range-read
+// from the content cache before the whole layer is pulled to local disk in
+// the background. Range reads go a window at a time and top out well below
+// the network; a layer read this much (a big shared library being mapped, a
+// model being loaded) is going to be read much more, and one streamed copy
+// makes every further read local. Layers touched only lightly are left in
+// the cache, so a 5 GiB layer is not copied for one small file.
+const contentCacheWarmThreshold = 64 << 20
 
 var backgroundLayerWarmSlots = make(chan struct{}, maxBackgroundLayerWarms)
 
@@ -591,6 +601,9 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 				Int64("length", readLen).
 				Int("bytes_read", n).
 				Msg("content cache hit - range read from remote")
+			if s.noteContentCacheServed(decompressedHash, int64(n)) {
+				readAttrs["layer_warm"] = s.scheduleLayerDecompressWarm(remote.LayerDigest, "content_cache_read")
+			}
 			return n, nil
 		} else {
 			metrics.RecordReadMiss()
@@ -971,6 +984,20 @@ func (s *OCIClipStorage) scheduleLayerDecompressWarm(layerDigest string, reason 
 
 	go s.runLayerDecompressWarm(layerDigest, decompressedHash, reason)
 	return "scheduled"
+}
+
+// noteContentCacheServed adds n to the bytes of the layer served from the
+// content cache and reports whether the total just crossed the warm
+// threshold.
+func (s *OCIClipStorage) noteContentCacheServed(decompressedHash string, n int64) bool {
+	s.layerWarmMu.Lock()
+	defer s.layerWarmMu.Unlock()
+	if s.contentCacheServed == nil {
+		s.contentCacheServed = make(map[string]int64)
+	}
+	before := s.contentCacheServed[decompressedHash]
+	s.contentCacheServed[decompressedHash] = before + n
+	return before < contentCacheWarmThreshold && before+n >= contentCacheWarmThreshold
 }
 
 func (s *OCIClipStorage) markLayerWarmAttempt(decompressedHash string) bool {
