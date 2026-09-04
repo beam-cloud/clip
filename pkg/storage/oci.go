@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
@@ -28,6 +29,12 @@ import (
 
 // OCIClipStorage implements lazy, range-based reading from OCI registries with disk + remote caching
 type OCIClipStorage struct {
+	// lastForegroundReadNanos is when a container last read through this
+	// mount from the content cache; background layer warms pace themselves
+	// while it is recent so they do not starve the reads they are meant to
+	// speed up (see warmPacer).
+	lastForegroundReadNanos atomic.Int64
+
 	metadata              *common.ClipArchiveMetadata
 	storageInfo           *common.OCIStorageInfo
 	layerCache            map[string]v1.Layer
@@ -568,6 +575,7 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 	// Try remote ContentCache range read
 	if s.contentCache != nil && decompressedHash != "" && s.contentCacheAvailable {
 		cacheStart := time.Now()
+		s.lastForegroundReadNanos.Store(cacheStart.UnixNano())
 		if n, err := s.tryRangeReadFromContentCache(decompressedHash, wantUStart, dest[:readLen], s.contentCacheReadLimit(decompressedHash, remote)); err == nil {
 			metrics.RecordReadHit()
 			metrics.RecordRangeGet(decompressedHash, int64(n))
@@ -1024,7 +1032,7 @@ func (s *OCIClipStorage) runLayerDecompressWarm(layerDigest string, decompressed
 	backgroundLayerWarmSlots <- struct{}{}
 	defer func() { <-backgroundLayerWarmSlots }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(withBackgroundLayerWarm(context.Background()), 30*time.Minute)
 	defer cancel()
 
 	startedAt := time.Now()
@@ -1102,7 +1110,11 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 
 	if s.contentCacheAvailable && s.contentCache != nil {
 		if cacheStream, ok := s.contentCache.(ContentCacheStream); ok {
-			written, err := restoreLayerFromContentCache(ctx, cacheStream, decompressedHash, diskPath)
+			var pace func(int)
+			if isBackgroundLayerWarm(ctx) {
+				pace = s.warmPacer()
+			}
+			written, err := restoreLayerFromContentCache(ctx, cacheStream, decompressedHash, diskPath, pace)
 			if err == nil {
 				log.Info().
 					Str("layer", digest).
@@ -1358,7 +1370,60 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func restoreLayerFromContentCache(ctx context.Context, cacheStream ContentCacheStream, decompressedHash, diskPath string) (int64, error) {
+// Background layer warms write a whole layer to local disk while the
+// container that triggered them is still reading through the mount. On a
+// host whose disk is the bottleneck the warm's writes starve those reads,
+// which is backwards: the warm exists to make later reads fast. While the
+// mount has been read in the last warmPacerActiveWindow the warm is held to
+// warmPacerContendedBytesPerSec; once the reader goes quiet it runs flat out.
+const (
+	warmPacerActiveWindow         = 250 * time.Millisecond
+	warmPacerContendedBytesPerSec = 64 << 20
+)
+
+type backgroundLayerWarmKey struct{}
+
+// withBackgroundLayerWarm marks ctx as belonging to a background warm, whose
+// restore is paced; a foreground materialization (a reader waiting on the
+// whole layer) never is.
+func withBackgroundLayerWarm(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backgroundLayerWarmKey{}, true)
+}
+
+func isBackgroundLayerWarm(ctx context.Context) bool {
+	v, _ := ctx.Value(backgroundLayerWarmKey{}).(bool)
+	return v
+}
+
+// warmPacer returns a function the layer restore calls after writing each
+// chunk; it sleeps as needed to hold the contended write rate.
+func (s *OCIClipStorage) warmPacer() func(int) {
+	if s == nil {
+		return nil
+	}
+	var contendedSince time.Time
+	var contendedBytes int64
+	return func(n int) {
+		last := s.lastForegroundReadNanos.Load()
+		if last == 0 || time.Since(time.Unix(0, last)) > warmPacerActiveWindow {
+			contendedSince = time.Time{}
+			contendedBytes = 0
+			return
+		}
+		now := time.Now()
+		if contendedSince.IsZero() {
+			contendedSince = now
+			contendedBytes = 0
+		}
+		contendedBytes += int64(n)
+		allowed := time.Duration(float64(contendedBytes) / float64(warmPacerContendedBytesPerSec) * float64(time.Second))
+		if sleep := allowed - now.Sub(contendedSince); sleep > 0 {
+			time.Sleep(sleep)
+		}
+	}
+}
+
+func restoreLayerFromContentCache(ctx context.Context, cacheStream ContentCacheStream, decompressedHash, diskPath string, pace func(int)) (int64, error) {
 	chunks, expectedSize, err := cacheStream.GetContentStream(decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
 	if err != nil {
 		return 0, err
@@ -1398,6 +1463,9 @@ func restoreLayerFromContentCache(ctx context.Context, cacheStream ContentCacheS
 				if n != len(chunk) {
 					go drainContentChunks(chunks)
 					return written, io.ErrShortWrite
+				}
+				if pace != nil {
+					pace(n)
 				}
 			}
 		}

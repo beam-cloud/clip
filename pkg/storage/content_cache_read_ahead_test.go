@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"sync"
 	"testing"
+	"time"
 )
 
 // countingContentCache records every window fetch offset.
@@ -64,5 +65,43 @@ func TestContentCacheReadAheadStraddlingReadsFetchEachWindowOnce(t *testing.T) {
 		if c != 1 {
 			t.Fatalf("window at %d fetched %d times", off, c)
 		}
+	}
+}
+
+func TestWarmPacerOnlyThrottlesWhileForegroundReadsAreRecent(t *testing.T) {
+	s := &OCIClipStorage{}
+	pace := s.warmPacer()
+
+	// No foreground reads: 64 MiB of chunks pass through with no sleeping.
+	start := time.Now()
+	for i := 0; i < 16; i++ {
+		pace(4 << 20)
+	}
+	if el := time.Since(start); el > 50*time.Millisecond {
+		t.Fatalf("idle warm was paced: %s", el)
+	}
+
+	// A reader is active: 32 MiB should take about half a second at the
+	// contended rate.
+	s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+	start = time.Now()
+	for i := 0; i < 8; i++ {
+		s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+		pace(4 << 20)
+	}
+	el := time.Since(start)
+	want := time.Duration(float64(32<<20) / float64(warmPacerContendedBytesPerSec) * float64(time.Second))
+	if el < want*8/10 || el > want*2 {
+		t.Fatalf("contended warm ran for %s, want about %s", el, want)
+	}
+
+	// Reader went quiet: full speed again.
+	time.Sleep(warmPacerActiveWindow + 20*time.Millisecond)
+	start = time.Now()
+	for i := 0; i < 16; i++ {
+		pace(4 << 20)
+	}
+	if el := time.Since(start); el > 50*time.Millisecond {
+		t.Fatalf("warm stayed paced after reader went idle: %s", el)
 	}
 }
