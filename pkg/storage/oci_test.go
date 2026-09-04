@@ -806,11 +806,67 @@ func TestOCIStorage_ContentCacheReadAheadCoalescesAdjacentReads(t *testing.T) {
 	require.Equal(t, 4, n)
 	require.Equal(t, []byte("klmn"), third)
 
+	// The read at 10 reached the second half of window 0-16 and prefetched
+	// 16-32, which the read at 20 then joined instead of fetching again; the
+	// read at 20 ends exactly at that window's midpoint, so it prefetches
+	// nothing. Every window is fetched exactly once.
+	storage.contentCacheReadAhead.WaitPrefetches()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	require.Equal(t, 2, cache.getCalls)
-	require.Equal(t, []int64{0, 16}, cache.getOffsets)
-	require.Equal(t, []int64{16, 16}, cache.getLengths)
+	require.ElementsMatch(t, []int64{0, 16}, cache.getOffsets)
+	require.ElementsMatch(t, []int64{16, 16}, cache.getLengths)
+}
+
+func TestContentCacheReadAheadPrefetchesNextWindowForSequentialReaders(t *testing.T) {
+	data := make([]byte, 64)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	cache := newMockCache()
+	cache.store["h"] = data
+	ra := NewContentCacheReadAhead(cache, ContentCacheReadAheadOptions{WindowBytes: 16, MaxWindows: 4})
+	opts := struct{ RoutingKey string }{RoutingKey: "h"}
+
+	// First half of the first window: nothing speculative.
+	buf := make([]byte, 4)
+	_, err := ra.Read("h", 0, buf, opts, 64)
+	require.NoError(t, err)
+	ra.WaitPrefetches()
+	cache.mu.Lock()
+	require.Equal(t, []int64{0}, cache.getOffsets)
+	cache.mu.Unlock()
+
+	// Second half: the next window is fetched in the background, once.
+	_, err = ra.Read("h", 12, buf, opts, 64)
+	require.NoError(t, err)
+	_, err = ra.Read("h", 8, buf, opts, 64)
+	require.NoError(t, err)
+	ra.WaitPrefetches()
+	cache.mu.Lock()
+	require.ElementsMatch(t, []int64{0, 16}, cache.getOffsets)
+	cache.mu.Unlock()
+
+	// The prefetched window is served without another fetch, and reading its
+	// tail prefetches the one after it.
+	_, err = ra.Read("h", 16, buf, opts, 64)
+	require.NoError(t, err)
+	require.Equal(t, data[16:20], buf)
+	_, err = ra.Read("h", 28, buf, opts, 64)
+	require.NoError(t, err)
+	ra.WaitPrefetches()
+	cache.mu.Lock()
+	require.ElementsMatch(t, []int64{0, 16, 32}, cache.getOffsets)
+	cache.mu.Unlock()
+
+	// The last window stops at the limit and nothing is fetched past it.
+	_, err = ra.Read("h", 60, buf, opts, 64)
+	require.NoError(t, err)
+	ra.WaitPrefetches()
+	cache.mu.Lock()
+	require.ElementsMatch(t, []int64{0, 16, 32, 48}, cache.getOffsets)
+	require.ElementsMatch(t, []int64{16, 16, 16, 16}, cache.getLengths)
+	cache.mu.Unlock()
 }
 
 func TestOCIStorage_CacheMiss(t *testing.T) {
