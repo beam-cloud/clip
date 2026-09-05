@@ -1400,15 +1400,29 @@ const (
 	warmPacerContendedBytesPerSec = 64 << 20
 )
 
-func (s *OCIClipStorage) layerRecentlyRead(decompressedHash string) bool {
+// layerIsCurrentRead reports whether decompressedHash is the layer the mount's
+// reader is in right now: the most recently read layer, read within the
+// active window. Only that one layer's restore runs unpaced. Exempting every
+// layer the reader had touched let a torch import on a fresh worker (14
+// layers, 5.4 GiB, most of them touched within the first second) run every
+// restore flat out, and the import's own page reads then queued behind
+// 5 GiB of background copy (first import 5–17 s against 1.5 s once local).
+func (s *OCIClipStorage) layerIsCurrentRead(decompressedHash string) bool {
 	if decompressedHash == "" {
 		return false
 	}
-	v, ok := s.lastReadByLayer.Load(decompressedHash)
-	if !ok {
+	var newest int64
+	current := ""
+	s.lastReadByLayer.Range(func(k, v any) bool {
+		if ts := v.(int64); ts > newest {
+			newest, current = ts, k.(string)
+		}
+		return true
+	})
+	if current != decompressedHash {
 		return false
 	}
-	return time.Since(time.Unix(0, v.(int64))) <= warmPacerActiveWindow
+	return time.Since(time.Unix(0, newest)) <= warmPacerActiveWindow
 }
 
 type backgroundLayerWarmKey struct{}
@@ -1429,9 +1443,9 @@ func isBackgroundLayerWarm(ctx context.Context) bool {
 // after writing each chunk; it sleeps as needed to hold the contended write
 // rate. The budget is shared by every paced restore on this mount (Prepare
 // runs several layers at once), so the cap is on the mount's total background
-// write rate. A layer the container is itself reading is never paced: once it
-// is local those reads stop going to the network, so finishing it fast is the
-// point, and the bandwidth comes out of the layers nobody is reading.
+// write rate. The one layer the container is reading right now is never
+// paced: once it is local those reads stop going to the network, so finishing
+// it fast is the point, and the bandwidth comes out of the other layers.
 func (s *OCIClipStorage) warmPacer(decompressedHash string) func(int) {
 	if s == nil {
 		return nil
@@ -1439,7 +1453,7 @@ func (s *OCIClipStorage) warmPacer(decompressedHash string) func(int) {
 	return func(n int) {
 		last := s.lastForegroundReadNanos.Load()
 		s.warmPaceMu.Lock()
-		if last == 0 || time.Since(time.Unix(0, last)) > warmPacerActiveWindow || s.foregroundLayerWaiters.Load() > 0 || s.layerRecentlyRead(decompressedHash) {
+		if last == 0 || time.Since(time.Unix(0, last)) > warmPacerActiveWindow || s.foregroundLayerWaiters.Load() > 0 || s.layerIsCurrentRead(decompressedHash) {
 			s.warmPaceSince = time.Time{}
 			s.warmPaceBytes = 0
 			s.warmPaceMu.Unlock()

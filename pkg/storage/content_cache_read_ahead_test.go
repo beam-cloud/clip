@@ -178,3 +178,38 @@ func TestWarmPacerDoesNotThrottleALayerBeingRead(t *testing.T) {
 		t.Fatalf("restore of an unread layer was not paced: %s, want about %s", el, want)
 	}
 }
+
+func TestWarmPacerExemptsOnlyTheLayerBeingReadNow(t *testing.T) {
+	s := &OCIClipStorage{}
+	now := time.Now().UnixNano()
+	s.lastForegroundReadNanos.Store(now)
+	// The reader touched "earlier" and then moved on to "current" (an import
+	// walks many layers within the first second).
+	s.lastReadByLayer.Store("earlier", now-int64(10*time.Millisecond))
+	s.lastReadByLayer.Store("current", now)
+
+	// The layer being read now restores flat out...
+	current := s.warmPacer("current")
+	start := time.Now()
+	for i := 0; i < 16; i++ {
+		s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+		s.lastReadByLayer.Store("current", time.Now().UnixNano())
+		current(4 << 20)
+	}
+	if el := time.Since(start); el > 50*time.Millisecond {
+		t.Fatalf("restore of the layer being read was paced: %s", el)
+	}
+
+	// ...but a layer the reader has already left is paced like any other.
+	earlier := s.warmPacer("earlier")
+	start = time.Now()
+	for i := 0; i < 4; i++ {
+		s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+		s.lastReadByLayer.Store("current", time.Now().UnixNano())
+		earlier(4 << 20)
+	}
+	want := time.Duration(float64(16<<20) / float64(warmPacerContendedBytesPerSec) * float64(time.Second))
+	if el := time.Since(start); el < want*8/10 {
+		t.Fatalf("restore of a layer the reader left was not paced: %s, want about %s", el, want)
+	}
+}
