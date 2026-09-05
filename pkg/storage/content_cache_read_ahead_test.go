@@ -70,7 +70,7 @@ func TestContentCacheReadAheadStraddlingReadsFetchEachWindowOnce(t *testing.T) {
 
 func TestWarmPacerOnlyThrottlesWhileForegroundReadsAreRecent(t *testing.T) {
 	s := &OCIClipStorage{}
-	pace := s.warmPacer()
+	pace := s.warmPacer("layer-a")
 
 	// No foreground reads: 64 MiB of chunks pass through with no sleeping.
 	start := time.Now()
@@ -118,7 +118,7 @@ func TestWarmPacerBudgetIsSharedAcrossConcurrentRestores(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			pace := s.warmPacer()
+			pace := s.warmPacer("layer-a")
 			for i := 0; i < 4; i++ {
 				s.lastForegroundReadNanos.Store(time.Now().UnixNano())
 				pace(4 << 20)
@@ -137,7 +137,7 @@ func TestWarmPacerYieldsToForegroundLayerWaiters(t *testing.T) {
 	s := &OCIClipStorage{}
 	s.lastForegroundReadNanos.Store(time.Now().UnixNano())
 	s.foregroundLayerWaiters.Add(1)
-	pace := s.warmPacer()
+	pace := s.warmPacer("layer-a")
 	start := time.Now()
 	for i := 0; i < 16; i++ {
 		s.lastForegroundReadNanos.Store(time.Now().UnixNano())
@@ -145,5 +145,36 @@ func TestWarmPacerYieldsToForegroundLayerWaiters(t *testing.T) {
 	}
 	if el := time.Since(start); el > 50*time.Millisecond {
 		t.Fatalf("restore was paced while a foreground caller waited on a layer: %s", el)
+	}
+}
+
+func TestWarmPacerDoesNotThrottleALayerBeingRead(t *testing.T) {
+	s := &OCIClipStorage{}
+	now := time.Now().UnixNano()
+	s.lastForegroundReadNanos.Store(now)
+	s.lastReadByLayer.Store("hot", now)
+
+	// The layer the container is reading restores at full speed...
+	pace := s.warmPacer("hot")
+	start := time.Now()
+	for i := 0; i < 16; i++ {
+		s.lastReadByLayer.Store("hot", time.Now().UnixNano())
+		s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+		pace(4 << 20)
+	}
+	if el := time.Since(start); el > 50*time.Millisecond {
+		t.Fatalf("restore of a layer being read was paced: %s", el)
+	}
+
+	// ...while a layer nobody is reading is paced on the same mount.
+	cold := s.warmPacer("cold")
+	start = time.Now()
+	for i := 0; i < 4; i++ {
+		s.lastForegroundReadNanos.Store(time.Now().UnixNano())
+		cold(4 << 20)
+	}
+	want := time.Duration(float64(16<<20) / float64(warmPacerContendedBytesPerSec) * float64(time.Second))
+	if el := time.Since(start); el < want*8/10 {
+		t.Fatalf("restore of an unread layer was not paced: %s, want about %s", el, want)
 	}
 }

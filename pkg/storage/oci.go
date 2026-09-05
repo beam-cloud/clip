@@ -35,9 +35,13 @@ type OCIClipStorage struct {
 	// speed up (see warmPacer).
 	lastForegroundReadNanos atomic.Int64
 	foregroundLayerWaiters  atomic.Int32
-	warmPaceMu              sync.Mutex
-	warmPaceSince           time.Time
-	warmPaceBytes           int64
+	// lastReadByLayer maps a layer's decompressed hash to the unix-nanos of
+	// the last content-cache read a container made from it; a layer being
+	// read is restored at full speed since that directly shortens the reads.
+	lastReadByLayer sync.Map
+	warmPaceMu      sync.Mutex
+	warmPaceSince   time.Time
+	warmPaceBytes   int64
 
 	metadata              *common.ClipArchiveMetadata
 	storageInfo           *common.OCIStorageInfo
@@ -582,6 +586,7 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 	if s.contentCache != nil && decompressedHash != "" && s.contentCacheAvailable {
 		cacheStart := time.Now()
 		s.lastForegroundReadNanos.Store(cacheStart.UnixNano())
+		s.lastReadByLayer.Store(decompressedHash, cacheStart.UnixNano())
 		if n, err := s.tryRangeReadFromContentCache(decompressedHash, wantUStart, dest[:readLen], s.contentCacheReadLimit(decompressedHash, remote)); err == nil {
 			metrics.RecordReadHit()
 			metrics.RecordRangeGet(decompressedHash, int64(n))
@@ -1126,7 +1131,7 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 		if cacheStream, ok := s.contentCache.(ContentCacheStream); ok {
 			var pace func(int)
 			if isBackgroundLayerWarm(ctx) {
-				pace = s.warmPacer()
+				pace = s.warmPacer(decompressedHash)
 			}
 			written, err := restoreLayerFromContentCache(ctx, cacheStream, decompressedHash, diskPath, pace)
 			if err == nil {
@@ -1395,6 +1400,17 @@ const (
 	warmPacerContendedBytesPerSec = 64 << 20
 )
 
+func (s *OCIClipStorage) layerRecentlyRead(decompressedHash string) bool {
+	if decompressedHash == "" {
+		return false
+	}
+	v, ok := s.lastReadByLayer.Load(decompressedHash)
+	if !ok {
+		return false
+	}
+	return time.Since(time.Unix(0, v.(int64))) <= warmPacerActiveWindow
+}
+
 type backgroundLayerWarmKey struct{}
 
 // withBackgroundLayerWarm marks ctx as belonging to a background warm, whose
@@ -1409,18 +1425,21 @@ func isBackgroundLayerWarm(ctx context.Context) bool {
 	return v
 }
 
-// warmPacer returns a function a layer restore calls after writing each
-// chunk; it sleeps as needed to hold the contended write rate. The budget is
-// shared by every paced restore on this mount (Prepare runs several layers at
-// once), so the cap is on the mount's total background write rate.
-func (s *OCIClipStorage) warmPacer() func(int) {
+// warmPacer returns a function the restore of layer decompressedHash calls
+// after writing each chunk; it sleeps as needed to hold the contended write
+// rate. The budget is shared by every paced restore on this mount (Prepare
+// runs several layers at once), so the cap is on the mount's total background
+// write rate. A layer the container is itself reading is never paced: once it
+// is local those reads stop going to the network, so finishing it fast is the
+// point, and the bandwidth comes out of the layers nobody is reading.
+func (s *OCIClipStorage) warmPacer(decompressedHash string) func(int) {
 	if s == nil {
 		return nil
 	}
 	return func(n int) {
 		last := s.lastForegroundReadNanos.Load()
 		s.warmPaceMu.Lock()
-		if last == 0 || time.Since(time.Unix(0, last)) > warmPacerActiveWindow || s.foregroundLayerWaiters.Load() > 0 {
+		if last == 0 || time.Since(time.Unix(0, last)) > warmPacerActiveWindow || s.foregroundLayerWaiters.Load() > 0 || s.layerRecentlyRead(decompressedHash) {
 			s.warmPaceSince = time.Time{}
 			s.warmPaceBytes = 0
 			s.warmPaceMu.Unlock()
