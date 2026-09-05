@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3524,4 +3525,67 @@ func TestNoteContentCacheServedCrossesThresholdOnce(t *testing.T) {
 	require.True(t, s.noteContentCacheServed("a", half), "crossing threshold schedules the warm")
 	require.False(t, s.noteContentCacheServed("a", half), "only once per layer")
 	require.False(t, s.noteContentCacheServed("b", half), "layers are counted separately")
+}
+
+// A transient failure of the layer stream must not fail the read: the caller
+// retries, and a waiter that shared the failed attempt retries as well.
+func TestRetryLayerMaterializeRetriesTransientFailuresForOwnerAndWaiters(t *testing.T) {
+	group := newLayerDecompressGroup()
+	var attempts atomic.Int32
+	ownerStarted := make(chan struct{})
+	waiterJoined := make(chan struct{})
+
+	materialize := func(ctx context.Context) error {
+		return retryLayerMaterialize(ctx, "sha256:layer", func() error {
+			_, err := group.Do(ctx, "layer", func() error {
+				n := attempts.Add(1)
+				if n == 1 {
+					close(ownerStarted)
+					<-waiterJoined
+					return errors.New("failed to decompress layer to disk: connection reset by peer")
+				}
+				return nil
+			})
+			return err
+		})
+	}
+
+	ownerDone := make(chan error, 1)
+	go func() { ownerDone <- materialize(context.Background()) }()
+	<-ownerStarted
+
+	waiterDone := make(chan error, 1)
+	go func() {
+		// Join the in-flight (failing) attempt, then release it.
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			close(waiterJoined)
+		}()
+		waiterDone <- materialize(context.Background())
+	}()
+
+	require.NoError(t, <-ownerDone)
+	require.NoError(t, <-waiterDone)
+	require.GreaterOrEqual(t, attempts.Load(), int32(2), "the failed stream must be attempted again")
+	require.LessOrEqual(t, attempts.Load(), int32(3), "retries share one attempt through the singleflight")
+}
+
+func TestRetryLayerMaterializeGivesUpAfterTheBudgetAndNotOnCancellation(t *testing.T) {
+	var attempts int
+	err := retryLayerMaterialize(context.Background(), "sha256:layer", func() error {
+		attempts++
+		return errors.New("layer not found")
+	})
+	require.EqualError(t, err, "layer not found")
+	require.Equal(t, layerMaterializeAttempts, attempts)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts = 0
+	err = retryLayerMaterialize(ctx, "sha256:layer", func() error {
+		attempts++
+		cancel()
+		return context.Canceled
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, attempts, "an abandoned container's read is not retried")
 }

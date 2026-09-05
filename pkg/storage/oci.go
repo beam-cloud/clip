@@ -771,54 +771,59 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 
 	waitStart := time.Now()
 	decompressKey := layerDecompressKey(decompressedHash, layerPath)
-	shared, err := globalLayerDecompress.Do(ctx, decompressKey, func() error {
-		// Double-check disk cache inside the process-wide singleflight. A
-		// separate OCIClipStorage instance may have materialized the same layer
-		// between our fast-path stat and entering this call.
-		if _, err := os.Stat(layerPath); err == nil {
-			log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit (after global lock)")
-			s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
-			return nil
-		}
+	var shared bool
+	err := retryLayerMaterialize(ctx, digest, func() error {
+		var attemptErr error
+		shared, attemptErr = globalLayerDecompress.Do(ctx, decompressKey, func() error {
+			// Double-check disk cache inside the process-wide singleflight. A
+			// separate OCIClipStorage instance may have materialized the same layer
+			// between our fast-path stat and entering this call.
+			if _, err := os.Stat(layerPath); err == nil {
+				log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit (after global lock)")
+				s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
+				return nil
+			}
 
-		fileLock := flock.New(layerPath + ".lock")
-		locked, err := fileLock.TryLockContext(ctx, 100*time.Millisecond)
-		if err != nil {
-			return fmt.Errorf("wait for layer cache lock: %w", err)
-		}
-		if !locked {
-			return fmt.Errorf("failed to acquire layer cache lock: %s", layerPath)
-		}
-		defer fileLock.Unlock()
+			fileLock := flock.New(layerPath + ".lock")
+			locked, err := fileLock.TryLockContext(ctx, 100*time.Millisecond)
+			if err != nil {
+				return fmt.Errorf("wait for layer cache lock: %w", err)
+			}
+			if !locked {
+				return fmt.Errorf("failed to acquire layer cache lock: %s", layerPath)
+			}
+			defer fileLock.Unlock()
 
-		// Another worker process may have completed the layer while this process
-		// was waiting on the shared disk lock.
-		if _, err := os.Stat(layerPath); err == nil {
-			s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
-			return nil
-		}
+			// Another worker process may have completed the layer while this process
+			// was waiting on the shared disk lock.
+			if _, err := os.Stat(layerPath); err == nil {
+				s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
+				return nil
+			}
 
-		log.Info().
-			Str("layer_digest", digest).
-			Str("decompressed_hash", decompressedHash).
-			Msg("oci layer cache miss - materializing layer")
+			log.Info().
+				Str("layer_digest", digest).
+				Str("decompressed_hash", decompressedHash).
+				Msg("oci layer cache miss - materializing layer")
 
-		decompressStart := time.Now()
-		source, err := s.decompressAndCacheLayerContext(ctx, digest, layerPath)
-		if source == "" {
-			source = "oci_registry"
-		}
-		s.observeRead(ctx, common.ReadTraceEvent{
-			Operation:        "clip.layer_decompress",
-			Source:           source,
-			LayerDigest:      digest,
-			DecompressedHash: decompressedHash,
-			StartedAt:        decompressStart,
-			Duration:         time.Since(decompressStart),
-			Success:          err == nil,
-			Error:            errorString(err),
+			decompressStart := time.Now()
+			source, err := s.decompressAndCacheLayerContext(ctx, digest, layerPath)
+			if source == "" {
+				source = "oci_registry"
+			}
+			s.observeRead(ctx, common.ReadTraceEvent{
+				Operation:        "clip.layer_decompress",
+				Source:           source,
+				LayerDigest:      digest,
+				DecompressedHash: decompressedHash,
+				StartedAt:        decompressStart,
+				Duration:         time.Since(decompressStart),
+				Success:          err == nil,
+				Error:            errorString(err),
+			})
+			return err
 		})
-		return err
+		return attemptErr
 	})
 	if shared {
 		log.Info().Str("digest", digest).Msg("waited for in-progress layer decompression")
@@ -844,6 +849,39 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 	}
 
 	return decompressedHash, layerPath, nil
+}
+
+// Materializing a layer streams it whole from the registry or the content
+// cache, so one reset connection or throttled response fails the stream, and
+// with it every process whose read is waiting on that layer in the
+// singleflight: each of them gets EIO at the same moment, which in a fresh
+// container is an ImportError. Those failures are transient, so the read
+// retries a few times before giving up. Waiters that shared a failed attempt
+// retry too, and one of them leads the next attempt.
+const (
+	layerMaterializeAttempts     = 4
+	layerMaterializeRetryBackoff = 500 * time.Millisecond
+)
+
+func retryLayerMaterialize(ctx context.Context, digest string, attempt func() error) error {
+	var err error
+	for i := 1; i <= layerMaterializeAttempts; i++ {
+		err = attempt()
+		if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if i == layerMaterializeAttempts {
+			break
+		}
+		backoff := layerMaterializeRetryBackoff * time.Duration(1<<(i-1))
+		log.Warn().Err(err).Str("layer_digest", digest).Int("attempt", i).Dur("retry_in", backoff).Msg("layer materialization failed, retrying")
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
 }
 
 // getDecompressedCachePath returns the cache path for a decompressed hash
