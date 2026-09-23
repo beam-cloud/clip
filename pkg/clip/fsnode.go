@@ -226,6 +226,9 @@ func (n *FSNode) readData(ctx context.Context, dest []byte, off int64) (fuse.Rea
 			nRead, err = n.filesystem.storage.ReadFile(n.clipNode, dest[:readLen], off)
 		}
 		if err != nil {
+			// The process sees EIO with no detail; leave the cause where an
+			// operator can find it.
+			log.Warn().Err(err).Str("path", n.clipNode.Path).Int64("offset", off).Int64("length", readLen).Msg("read failed, returning EIO to the container")
 			return nil, syscall.EIO
 		}
 	} else {

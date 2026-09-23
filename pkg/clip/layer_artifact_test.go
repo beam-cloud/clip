@@ -127,6 +127,25 @@ func TestLayerArtifactRoundTripDeterminism(t *testing.T) {
 	assert.Equal(t, common.SymLinkNode, nodes["/link"].NodeType)
 }
 
+func TestLayerArtifactHardLinkToSymlink(t *testing.T) {
+	archiver := NewClipArchiver()
+
+	layer := buildLayer(t, []tarEntry{
+		{name: "dir/", typeflag: tar.TypeDir},
+		{name: "dir/a.txt", typeflag: tar.TypeReg, content: "hello"},
+		{name: "link", typeflag: tar.TypeSymlink, linkname: "dir/a.txt"},
+		{name: "hard-to-link", typeflag: tar.TypeLink, linkname: "link"},
+	})
+
+	index := archiver.newIndex()
+	archiver.applyLayerArtifact(index, indexLayerHelper(t, archiver, layer, "sha256:layer1"))
+
+	nodes := indexPaths(index)
+	require.Contains(t, nodes, "/hard-to-link")
+	assert.Equal(t, common.SymLinkNode, nodes["/hard-to-link"].NodeType, "a hard link to a symlink is a symlink")
+	assert.Equal(t, nodes["/link"].Target, nodes["/hard-to-link"].Target)
+}
+
 func TestLayerArtifactSanitizesUnsetTarTimes(t *testing.T) {
 	archiver := NewClipArchiver()
 

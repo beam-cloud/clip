@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/beam-cloud/clip/pkg/common"
@@ -28,6 +29,20 @@ import (
 
 // OCIClipStorage implements lazy, range-based reading from OCI registries with disk + remote caching
 type OCIClipStorage struct {
+	// lastForegroundReadNanos is when a container last read through this
+	// mount from the content cache; background layer warms pace themselves
+	// while it is recent so they do not starve the reads they are meant to
+	// speed up (see warmPacer).
+	lastForegroundReadNanos atomic.Int64
+	foregroundLayerWaiters  atomic.Int32
+	// lastReadByLayer maps a layer's decompressed hash to the unix-nanos of
+	// the last content-cache read a container made from it; a layer being
+	// read is restored at full speed since that directly shortens the reads.
+	lastReadByLayer sync.Map
+	warmPaceMu      sync.Mutex
+	warmPaceSince   time.Time
+	warmPaceBytes   int64
+
 	metadata              *common.ClipArchiveMetadata
 	storageInfo           *common.OCIStorageInfo
 	layerCache            map[string]v1.Layer
@@ -43,6 +58,7 @@ type OCIClipStorage struct {
 	contentCacheWarmOnce  map[string]struct{}
 	layerWarmMu           sync.Mutex
 	layerWarmOnce         map[string]struct{}
+	contentCacheServed    map[string]int64 // bytes range-read from the content cache, per decompressed hash
 	checkpointLogMu       sync.Mutex
 	checkpointSuccessOnce map[string]struct{}
 	checkpointFailureOnce map[string]struct{}
@@ -59,6 +75,15 @@ type localDecompressedLayer struct {
 var globalLayerDecompress = newLayerDecompressGroup()
 
 const maxBackgroundLayerWarms = 2
+
+// contentCacheWarmThreshold is how much of a layer a mount has to range-read
+// from the content cache before the whole layer is pulled to local disk in
+// the background. Range reads go a window at a time and top out well below
+// the network; a layer read this much (a big shared library being mapped, a
+// model being loaded) is going to be read much more, and one streamed copy
+// makes every further read local. Layers touched only lightly are left in
+// the cache, so a 5 GiB layer is not copied for one small file.
+const contentCacheWarmThreshold = 64 << 20
 
 var backgroundLayerWarmSlots = make(chan struct{}, maxBackgroundLayerWarms)
 
@@ -231,7 +256,9 @@ func (s *OCIClipStorage) Prepare(ctx context.Context, opts PrepareOptions) error
 		opts.Progress(PrepareProgress{Total: len(layers)})
 	}
 
-	group, groupCtx := errgroup.WithContext(ctx)
+	// Prepare copies whole layers in behind a running container; its writes
+	// yield to that container's reads like any other background warm.
+	group, groupCtx := errgroup.WithContext(withBackgroundLayerWarm(ctx))
 	group.SetLimit(concurrency)
 	for _, layerDigest := range layers {
 		layerDigest := layerDigest
@@ -558,6 +585,8 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 	// Try remote ContentCache range read
 	if s.contentCache != nil && decompressedHash != "" && s.contentCacheAvailable {
 		cacheStart := time.Now()
+		s.lastForegroundReadNanos.Store(cacheStart.UnixNano())
+		s.lastReadByLayer.Store(decompressedHash, cacheStart.UnixNano())
 		if n, err := s.tryRangeReadFromContentCache(decompressedHash, wantUStart, dest[:readLen], s.contentCacheReadLimit(decompressedHash, remote)); err == nil {
 			metrics.RecordReadHit()
 			metrics.RecordRangeGet(decompressedHash, int64(n))
@@ -591,6 +620,9 @@ func (s *OCIClipStorage) ReadFileContext(ctx context.Context, node *common.ClipN
 				Int64("length", readLen).
 				Int("bytes_read", n).
 				Msg("content cache hit - range read from remote")
+			if s.noteContentCacheServed(decompressedHash, int64(n)) {
+				readAttrs["layer_warm"] = s.scheduleLayerDecompressWarm(remote.LayerDigest, "content_cache_read")
+			}
 			return n, nil
 		} else {
 			metrics.RecordReadMiss()
@@ -729,56 +761,69 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 		return decompressedHash, layerPath, nil
 	}
 
+	// A foreground caller is about to wait on this layer. Background restores
+	// on this mount stop pacing while one is waiting, since the restore it
+	// joins (or competes with) is now on a container's critical path.
+	if !isBackgroundLayerWarm(ctx) {
+		s.foregroundLayerWaiters.Add(1)
+		defer s.foregroundLayerWaiters.Add(-1)
+	}
+
 	waitStart := time.Now()
 	decompressKey := layerDecompressKey(decompressedHash, layerPath)
-	shared, err := globalLayerDecompress.Do(ctx, decompressKey, func() error {
-		// Double-check disk cache inside the process-wide singleflight. A
-		// separate OCIClipStorage instance may have materialized the same layer
-		// between our fast-path stat and entering this call.
-		if _, err := os.Stat(layerPath); err == nil {
-			log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit (after global lock)")
-			s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
-			return nil
-		}
+	var shared bool
+	err := retryLayerMaterialize(ctx, digest, func() error {
+		var attemptErr error
+		shared, attemptErr = globalLayerDecompress.Do(ctx, decompressKey, func() error {
+			// Double-check disk cache inside the process-wide singleflight. A
+			// separate OCIClipStorage instance may have materialized the same layer
+			// between our fast-path stat and entering this call.
+			if _, err := os.Stat(layerPath); err == nil {
+				log.Debug().Str("digest", digest).Str("decompressed_hash", decompressedHash).Msg("disk cache hit (after global lock)")
+				s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
+				return nil
+			}
 
-		fileLock := flock.New(layerPath + ".lock")
-		locked, err := fileLock.TryLockContext(ctx, 100*time.Millisecond)
-		if err != nil {
-			return fmt.Errorf("wait for layer cache lock: %w", err)
-		}
-		if !locked {
-			return fmt.Errorf("failed to acquire layer cache lock: %s", layerPath)
-		}
-		defer fileLock.Unlock()
+			fileLock := flock.New(layerPath + ".lock")
+			locked, err := fileLock.TryLockContext(ctx, 100*time.Millisecond)
+			if err != nil {
+				return fmt.Errorf("wait for layer cache lock: %w", err)
+			}
+			if !locked {
+				return fmt.Errorf("failed to acquire layer cache lock: %s", layerPath)
+			}
+			defer fileLock.Unlock()
 
-		// Another worker process may have completed the layer while this process
-		// was waiting on the shared disk lock.
-		if _, err := os.Stat(layerPath); err == nil {
-			s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
-			return nil
-		}
+			// Another worker process may have completed the layer while this process
+			// was waiting on the shared disk lock.
+			if _, err := os.Stat(layerPath); err == nil {
+				s.scheduleDecompressedLayerContentCacheWarm(decompressedHash, layerPath)
+				return nil
+			}
 
-		log.Info().
-			Str("layer_digest", digest).
-			Str("decompressed_hash", decompressedHash).
-			Msg("oci layer cache miss - materializing layer")
+			log.Info().
+				Str("layer_digest", digest).
+				Str("decompressed_hash", decompressedHash).
+				Msg("oci layer cache miss - materializing layer")
 
-		decompressStart := time.Now()
-		source, err := s.decompressAndCacheLayerContext(ctx, digest, layerPath)
-		if source == "" {
-			source = "oci_registry"
-		}
-		s.observeRead(ctx, common.ReadTraceEvent{
-			Operation:        "clip.layer_decompress",
-			Source:           source,
-			LayerDigest:      digest,
-			DecompressedHash: decompressedHash,
-			StartedAt:        decompressStart,
-			Duration:         time.Since(decompressStart),
-			Success:          err == nil,
-			Error:            errorString(err),
+			decompressStart := time.Now()
+			source, err := s.decompressAndCacheLayerContext(ctx, digest, layerPath)
+			if source == "" {
+				source = "oci_registry"
+			}
+			s.observeRead(ctx, common.ReadTraceEvent{
+				Operation:        "clip.layer_decompress",
+				Source:           source,
+				LayerDigest:      digest,
+				DecompressedHash: decompressedHash,
+				StartedAt:        decompressStart,
+				Duration:         time.Since(decompressStart),
+				Success:          err == nil,
+				Error:            errorString(err),
+			})
+			return err
 		})
-		return err
+		return attemptErr
 	})
 	if shared {
 		log.Info().Str("digest", digest).Msg("waited for in-progress layer decompression")
@@ -804,6 +849,39 @@ func (s *OCIClipStorage) ensureLayerCached(ctx context.Context, digest string) (
 	}
 
 	return decompressedHash, layerPath, nil
+}
+
+// Materializing a layer streams it whole from the registry or the content
+// cache, so one reset connection or throttled response fails the stream, and
+// with it every process whose read is waiting on that layer in the
+// singleflight: each of them gets EIO at the same moment, which in a fresh
+// container is an ImportError. Those failures are transient, so the read
+// retries a few times before giving up. Waiters that shared a failed attempt
+// retry too, and one of them leads the next attempt.
+const (
+	layerMaterializeAttempts     = 4
+	layerMaterializeRetryBackoff = 500 * time.Millisecond
+)
+
+func retryLayerMaterialize(ctx context.Context, digest string, attempt func() error) error {
+	var err error
+	for i := 1; i <= layerMaterializeAttempts; i++ {
+		err = attempt()
+		if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if i == layerMaterializeAttempts {
+			break
+		}
+		backoff := layerMaterializeRetryBackoff * time.Duration(1<<(i-1))
+		log.Warn().Err(err).Str("layer_digest", digest).Int("attempt", i).Dur("retry_in", backoff).Msg("layer materialization failed, retrying")
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
 }
 
 // getDecompressedCachePath returns the cache path for a decompressed hash
@@ -973,6 +1051,20 @@ func (s *OCIClipStorage) scheduleLayerDecompressWarm(layerDigest string, reason 
 	return "scheduled"
 }
 
+// noteContentCacheServed adds n to the bytes of the layer served from the
+// content cache and reports whether the total just crossed the warm
+// threshold.
+func (s *OCIClipStorage) noteContentCacheServed(decompressedHash string, n int64) bool {
+	s.layerWarmMu.Lock()
+	defer s.layerWarmMu.Unlock()
+	if s.contentCacheServed == nil {
+		s.contentCacheServed = make(map[string]int64)
+	}
+	before := s.contentCacheServed[decompressedHash]
+	s.contentCacheServed[decompressedHash] = before + n
+	return before < contentCacheWarmThreshold && before+n >= contentCacheWarmThreshold
+}
+
 func (s *OCIClipStorage) markLayerWarmAttempt(decompressedHash string) bool {
 	s.layerWarmMu.Lock()
 	defer s.layerWarmMu.Unlock()
@@ -997,7 +1089,7 @@ func (s *OCIClipStorage) runLayerDecompressWarm(layerDigest string, decompressed
 	backgroundLayerWarmSlots <- struct{}{}
 	defer func() { <-backgroundLayerWarmSlots }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(withBackgroundLayerWarm(context.Background()), 30*time.Minute)
 	defer cancel()
 
 	startedAt := time.Now()
@@ -1075,7 +1167,11 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 
 	if s.contentCacheAvailable && s.contentCache != nil {
 		if cacheStream, ok := s.contentCache.(ContentCacheStream); ok {
-			written, err := restoreLayerFromContentCache(ctx, cacheStream, decompressedHash, diskPath)
+			var pace func(int)
+			if isBackgroundLayerWarm(ctx) {
+				pace = s.warmPacer(decompressedHash)
+			}
+			written, err := restoreLayerFromContentCache(ctx, cacheStream, decompressedHash, diskPath, pace)
 			if err == nil {
 				log.Info().
 					Str("layer", digest).
@@ -1331,7 +1427,92 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func restoreLayerFromContentCache(ctx context.Context, cacheStream ContentCacheStream, decompressedHash, diskPath string) (int64, error) {
+// Background layer warms write a whole layer to local disk while the
+// container that triggered them is still reading through the mount. On a
+// host whose disk is the bottleneck the warm's writes starve those reads,
+// which is backwards: the warm exists to make later reads fast. While the
+// mount has been read in the last warmPacerActiveWindow the warm is held to
+// warmPacerContendedBytesPerSec; once the reader goes quiet it runs flat out.
+const (
+	warmPacerActiveWindow         = 250 * time.Millisecond
+	warmPacerContendedBytesPerSec = 64 << 20
+)
+
+// layerIsCurrentRead reports whether decompressedHash is the layer the mount's
+// reader is in right now: the most recently read layer, read within the
+// active window. Only that one layer's restore runs unpaced. Exempting every
+// layer the reader had touched let a torch import on a fresh worker (14
+// layers, 5.4 GiB, most of them touched within the first second) run every
+// restore flat out, and the import's own page reads then queued behind
+// 5 GiB of background copy (first import 5–17 s against 1.5 s once local).
+func (s *OCIClipStorage) layerIsCurrentRead(decompressedHash string) bool {
+	if decompressedHash == "" {
+		return false
+	}
+	var newest int64
+	current := ""
+	s.lastReadByLayer.Range(func(k, v any) bool {
+		if ts := v.(int64); ts > newest {
+			newest, current = ts, k.(string)
+		}
+		return true
+	})
+	if current != decompressedHash {
+		return false
+	}
+	return time.Since(time.Unix(0, newest)) <= warmPacerActiveWindow
+}
+
+type backgroundLayerWarmKey struct{}
+
+// withBackgroundLayerWarm marks ctx as belonging to a background warm, whose
+// restore is paced; a foreground materialization (a reader waiting on the
+// whole layer) never is.
+func withBackgroundLayerWarm(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backgroundLayerWarmKey{}, true)
+}
+
+func isBackgroundLayerWarm(ctx context.Context) bool {
+	v, _ := ctx.Value(backgroundLayerWarmKey{}).(bool)
+	return v
+}
+
+// warmPacer returns a function the restore of layer decompressedHash calls
+// after writing each chunk; it sleeps as needed to hold the contended write
+// rate. The budget is shared by every paced restore on this mount (Prepare
+// runs several layers at once), so the cap is on the mount's total background
+// write rate. The one layer the container is reading right now is never
+// paced: once it is local those reads stop going to the network, so finishing
+// it fast is the point, and the bandwidth comes out of the other layers.
+func (s *OCIClipStorage) warmPacer(decompressedHash string) func(int) {
+	if s == nil {
+		return nil
+	}
+	return func(n int) {
+		last := s.lastForegroundReadNanos.Load()
+		s.warmPaceMu.Lock()
+		if last == 0 || time.Since(time.Unix(0, last)) > warmPacerActiveWindow || s.foregroundLayerWaiters.Load() > 0 || s.layerIsCurrentRead(decompressedHash) {
+			s.warmPaceSince = time.Time{}
+			s.warmPaceBytes = 0
+			s.warmPaceMu.Unlock()
+			return
+		}
+		now := time.Now()
+		if s.warmPaceSince.IsZero() {
+			s.warmPaceSince = now
+			s.warmPaceBytes = 0
+		}
+		s.warmPaceBytes += int64(n)
+		allowed := time.Duration(float64(s.warmPaceBytes) / float64(warmPacerContendedBytesPerSec) * float64(time.Second))
+		sleep := allowed - now.Sub(s.warmPaceSince)
+		s.warmPaceMu.Unlock()
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
+	}
+}
+
+func restoreLayerFromContentCache(ctx context.Context, cacheStream ContentCacheStream, decompressedHash, diskPath string, pace func(int)) (int64, error) {
 	chunks, expectedSize, err := cacheStream.GetContentStream(decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash})
 	if err != nil {
 		return 0, err
@@ -1371,6 +1552,9 @@ func restoreLayerFromContentCache(ctx context.Context, cacheStream ContentCacheS
 				if n != len(chunk) {
 					go drainContentChunks(chunks)
 					return written, io.ErrShortWrite
+				}
+				if pace != nil {
+					pace(n)
 				}
 			}
 		}

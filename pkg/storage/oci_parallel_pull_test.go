@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -487,4 +488,180 @@ func TestRemoveOnCloseFileIsIdempotentForRemovedPath(t *testing.T) {
 	path := file.Name()
 	require.NoError(t, os.Remove(path))
 	require.NoError(t, (&removeOnCloseFile{File: file, path: path}).Close())
+}
+
+func TestStragglerRule(t *testing.T) {
+	now := time.Now()
+	mk := func(age time.Duration, bytes int64, aborts int32) *rangePart {
+		p := &rangePart{startedAt: now.Add(-age)}
+		p.bytes.Store(bytes)
+		p.aborts.Store(aborts)
+		return p
+	}
+	const floor = 4 << 20
+	grace := 3 * time.Second
+	rule := func(parts []*rangePart, completed []float64, tail bool) []*rangePart {
+		return stragglerRule(parts, completed, tail, now, grace, floor, 3)
+	}
+
+	fast := mk(4*time.Second, 400<<20, 0)  // 100 MiB/s
+	fast2 := mk(4*time.Second, 320<<20, 0) // 80 MiB/s
+	stalled := mk(4*time.Second, 0, 0)
+	slow := mk(4*time.Second, 4<<20, 0)  // 1 MiB/s: below floor and far below median
+	young := mk(time.Second, 0, 0)       // inside grace
+	exhausted := mk(4*time.Second, 0, 3) // hit the abort cap
+
+	got := rule([]*rangePart{fast, fast2, stalled, slow, young, exhausted}, nil, false)
+	require.ElementsMatch(t, []*rangePart{stalled, slow}, got)
+
+	// Uniformly slow link: everything is below the floor but nothing is far
+	// below the median, so nothing is abandoned.
+	uniform := []*rangePart{mk(4*time.Second, 8<<20, 0), mk(4*time.Second, 9<<20, 0), mk(4*time.Second, 12<<20, 0)}
+	require.Empty(t, rule(uniform, nil, false))
+
+	// ...unless recently completed parts show the link can do far better.
+	require.ElementsMatch(t, uniform, rule(uniform, []float64{60 << 20, 70 << 20, 80 << 20}, false))
+
+	// A lone part has no peers; the floor alone decides.
+	require.Equal(t, []*rangePart{slow}, rule([]*rangePart{slow}, nil, false))
+	require.Empty(t, rule([]*rangePart{fast}, nil, false))
+
+	// Tail: a part above the floor but well below the reference is abandoned,
+	// and the grace period is halved.
+	tailSlow := mk(2*time.Second, 20<<20, 0) // 10 MiB/s
+	require.Empty(t, rule([]*rangePart{tailSlow}, []float64{60 << 20, 70 << 20}, false))
+	require.Equal(t, []*rangePart{tailSlow}, rule([]*rangePart{tailSlow}, []float64{60 << 20, 70 << 20}, true))
+	require.Empty(t, rule([]*rangePart{mk(2*time.Second, 60<<20, 0)}, []float64{60 << 20, 70 << 20}, true))
+	// Tail with no reference falls back to the floor.
+	require.Empty(t, rule([]*rangePart{tailSlow}, nil, true))
+	require.Equal(t, []*rangePart{slow}, rule([]*rangePart{slow}, nil, true))
+}
+
+func TestSlowEndpointSetExpires(t *testing.T) {
+	set := &slowEndpointSet{ttl: time.Minute, seen: map[string]time.Time{}}
+	set.mark("52.216.1.2:443")
+	set.mark("[2600::1]:443")
+	now := time.Now()
+	require.True(t, set.isSlow("52.216.1.2", now))
+	require.True(t, set.isSlow("2600::1", now))
+	require.False(t, set.isSlow("52.216.1.3", now))
+	require.False(t, set.isSlow("52.216.1.2", now.Add(2*time.Minute)))
+	require.False(t, set.isSlow("52.216.1.2", now), "expired entries are dropped")
+}
+
+// stallingBlobServer serves ranges normally except that the first attempt at
+// each range whose start is in stallStarts sends headers and a few bytes, then
+// hangs until the client abandons it.
+type stallingBlobServer struct {
+	data        []byte
+	stallStarts map[int64]bool
+	mu          sync.Mutex
+	stalled     map[int64]int
+	resumeFrom  map[int64]bool
+	resumed     atomic.Int64
+	requests    atomic.Int64
+}
+
+func (s *stallingBlobServer) serve(w http.ResponseWriter, r *http.Request) {
+	start, end, err := parseTestRange(r.Header.Get("Range"), int64(len(s.data)))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	s.requests.Add(1)
+	s.mu.Lock()
+	if s.resumeFrom[start] {
+		s.resumed.Add(1)
+	}
+	s.mu.Unlock()
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(s.data)))
+	w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+	w.WriteHeader(http.StatusPartialContent)
+	s.mu.Lock()
+	stall := s.stallStarts[start] && s.stalled[start] == 0
+	if stall {
+		s.stalled[start]++
+	}
+	s.mu.Unlock()
+	if stall {
+		// Partial progress, then starvation: the resume must pick up at +16.
+		s.mu.Lock()
+		s.resumeFrom[start+16] = true
+		s.mu.Unlock()
+		_, _ = w.Write(s.data[start : start+16])
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+		return
+	}
+	_, _ = w.Write(s.data[start : end+1])
+}
+
+func TestParallelBlobTransportAbandonsStragglersAndRefetches(t *testing.T) {
+	const partSize = 64 << 10
+	data := make([]byte, 16*partSize+1)
+	for i := range data {
+		data[i] = byte((i*17 + 3) % 253)
+	}
+	// Parts start at 1 + k*partSize (byte 0 is the probe).
+	blobState := &stallingBlobServer{
+		data:        data,
+		stallStarts: map[int64]bool{1 + 2*partSize: true, 1 + 9*partSize: true},
+		stalled:     map[int64]int{},
+		resumeFrom:  map[int64]bool{},
+	}
+	blob := httptest.NewServer(http.HandlerFunc(blobState.serve))
+	defer blob.Close()
+	registryState := &registryRedirectServer{data: data, redirectURL: blob.URL + "/signed"}
+	registry := httptest.NewServer(http.HandlerFunc(registryState.serve))
+	defer registry.Close()
+	parsed, err := url.Parse(registry.URL)
+	require.NoError(t, err)
+
+	var marked sync.Map
+	tempDir := t.TempDir()
+	client := &http.Client{Transport: newParallelBlobTransport(parallelBlobPullConfig{
+		inner:            registry.Client().Transport,
+		registryHost:     parsed.Host,
+		digest:           parallelPullTestDigest,
+		size:             int64(len(data)),
+		tempDir:          tempDir,
+		minimumFree:      1,
+		threshold:        1,
+		partSize:         partSize,
+		concurrency:      4,
+		attempts:         3,
+		retryBackoff:     time.Millisecond,
+		availableBytes:   func(string) (int64, error) { return math.MaxInt64, nil },
+		stragglerGrace:   150 * time.Millisecond,
+		stragglerFloor:   1 << 20,
+		slots:            make(chan struct{}, 3),
+		markSlowEndpoint: func(addr string) { marked.Store(addr, true) },
+	})}
+
+	started := time.Now()
+	resp, err := parallelTestRequest(t, client, registry.URL, context.Background())
+	require.NoError(t, err)
+	actual, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, data, actual, "abandoned ranges must be resumed byte-exact")
+	require.Less(t, time.Since(started), 5*time.Second)
+	require.Zero(t, registryState.fullRequests.Load(), "stragglers must not trigger the single-stream fallback")
+	require.Equal(t, 1, blobState.stalled[1+2*partSize])
+	require.Equal(t, 1, blobState.stalled[1+9*partSize])
+	// 1 probe + 16 parts + 2 resumes, each resume starting after the 16 bytes
+	// the starved attempt delivered.
+	require.Equal(t, int64(19), blobState.requests.Load())
+	require.Equal(t, int64(2), blobState.resumed.Load())
+	blobHost, _, _ := net.SplitHostPort(strings.TrimPrefix(blob.URL, "http://"))
+	var markedHosts []string
+	marked.Range(func(k, _ any) bool {
+		h, _, _ := net.SplitHostPort(k.(string))
+		markedHosts = append(markedHosts, h)
+		return true
+	})
+	require.Equal(t, []string{blobHost}, markedHosts, "the starving front-end is marked slow")
+	requireNoParallelTemps(t, tempDir)
 }

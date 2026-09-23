@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -806,11 +807,78 @@ func TestOCIStorage_ContentCacheReadAheadCoalescesAdjacentReads(t *testing.T) {
 	require.Equal(t, 4, n)
 	require.Equal(t, []byte("klmn"), third)
 
+	// The read at 10 reached the second half of window 0-16 and prefetched
+	// 16-32, which the read at 20 then joined instead of fetching again. The
+	// read at 20 entered the window right after the previous one, so the
+	// reader is treated as sequential and the window after it is prefetched
+	// too. Every window is fetched exactly once.
+	storage.contentCacheReadAhead.WaitPrefetches()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	require.Equal(t, 2, cache.getCalls)
-	require.Equal(t, []int64{0, 16}, cache.getOffsets)
-	require.Equal(t, []int64{16, 16}, cache.getLengths)
+	require.Equal(t, 3, cache.getCalls)
+	require.ElementsMatch(t, []int64{0, 16, 32}, cache.getOffsets)
+	require.ElementsMatch(t, []int64{16, 16, int64(len(testData)) - 32}, cache.getLengths)
+}
+
+func TestContentCacheReadAheadPrefetchesNextWindowForSequentialReaders(t *testing.T) {
+	data := make([]byte, 256)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	cache := newMockCache()
+	cache.store["h"] = data
+	ra := NewContentCacheReadAhead(cache, ContentCacheReadAheadOptions{WindowBytes: 16, MaxWindows: 16})
+	opts := struct{ RoutingKey string }{RoutingKey: "h"}
+	offsets := func() []int64 {
+		ra.WaitPrefetches()
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		return append([]int64(nil), cache.getOffsets...)
+	}
+
+	// First half of the first window: nothing speculative.
+	buf := make([]byte, 4)
+	_, err := ra.Read("h", 0, buf, opts, 256)
+	require.NoError(t, err)
+	require.Equal(t, []int64{0}, offsets())
+
+	// Second half: the next window is fetched in the background, once.
+	_, err = ra.Read("h", 12, buf, opts, 256)
+	require.NoError(t, err)
+	_, err = ra.Read("h", 8, buf, opts, 256)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{0, 16}, offsets())
+
+	// Entering the window right after the previous one marks the reader as
+	// sequential: the prefetched window is served without another fetch and
+	// two windows are fetched ahead of it at once.
+	_, err = ra.Read("h", 16, buf, opts, 256)
+	require.NoError(t, err)
+	require.Equal(t, data[16:20], buf)
+	require.ElementsMatch(t, []int64{0, 16, 32, 48}, offsets())
+
+	// Each further consecutive window doubles the depth (4, then 8) ...
+	_, err = ra.Read("h", 32, buf, opts, 256)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{0, 16, 32, 48, 64, 80, 96}, offsets())
+	_, err = ra.Read("h", 48, buf, opts, 256)
+	require.NoError(t, err)
+	require.Len(t, offsets(), 12) // 48+8*16 = 176 -> windows through 160-176 are in flight or cached
+
+	// ... and a jump elsewhere in the layer resets the reader to one window
+	// ahead, fetched only once it is past the midpoint of its window.
+	_, err = ra.Read("h", 224, buf, opts, 256)
+	require.NoError(t, err)
+	require.Len(t, offsets(), 13)
+	_, err = ra.Read("h", 236, buf, opts, 256)
+	require.NoError(t, err)
+	require.Contains(t, offsets(), int64(240))
+	require.Len(t, offsets(), 14)
+
+	// Nothing is ever fetched past the limit.
+	for _, off := range offsets() {
+		require.Less(t, off, int64(256))
+	}
 }
 
 func TestOCIStorage_CacheMiss(t *testing.T) {
@@ -3448,4 +3516,76 @@ func TestCheckpointEmptyList(t *testing.T) {
 	cOff, uOff := common.NearestCheckpoint([]common.GzipCheckpoint{}, 1000)
 	assert.Equal(t, int64(0), cOff, "should return 0 for empty checkpoint list")
 	assert.Equal(t, int64(0), uOff, "should return 0 for empty checkpoint list")
+}
+
+func TestNoteContentCacheServedCrossesThresholdOnce(t *testing.T) {
+	s := &OCIClipStorage{}
+	half := int64(contentCacheWarmThreshold / 2)
+	require.False(t, s.noteContentCacheServed("a", half), "below threshold")
+	require.True(t, s.noteContentCacheServed("a", half), "crossing threshold schedules the warm")
+	require.False(t, s.noteContentCacheServed("a", half), "only once per layer")
+	require.False(t, s.noteContentCacheServed("b", half), "layers are counted separately")
+}
+
+// A transient failure of the layer stream must not fail the read: the caller
+// retries, and a waiter that shared the failed attempt retries as well.
+func TestRetryLayerMaterializeRetriesTransientFailuresForOwnerAndWaiters(t *testing.T) {
+	group := newLayerDecompressGroup()
+	var attempts atomic.Int32
+	ownerStarted := make(chan struct{})
+	waiterJoined := make(chan struct{})
+
+	materialize := func(ctx context.Context) error {
+		return retryLayerMaterialize(ctx, "sha256:layer", func() error {
+			_, err := group.Do(ctx, "layer", func() error {
+				n := attempts.Add(1)
+				if n == 1 {
+					close(ownerStarted)
+					<-waiterJoined
+					return errors.New("failed to decompress layer to disk: connection reset by peer")
+				}
+				return nil
+			})
+			return err
+		})
+	}
+
+	ownerDone := make(chan error, 1)
+	go func() { ownerDone <- materialize(context.Background()) }()
+	<-ownerStarted
+
+	waiterDone := make(chan error, 1)
+	go func() {
+		// Join the in-flight (failing) attempt, then release it.
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			close(waiterJoined)
+		}()
+		waiterDone <- materialize(context.Background())
+	}()
+
+	require.NoError(t, <-ownerDone)
+	require.NoError(t, <-waiterDone)
+	require.GreaterOrEqual(t, attempts.Load(), int32(2), "the failed stream must be attempted again")
+	require.LessOrEqual(t, attempts.Load(), int32(3), "retries share one attempt through the singleflight")
+}
+
+func TestRetryLayerMaterializeGivesUpAfterTheBudgetAndNotOnCancellation(t *testing.T) {
+	var attempts int
+	err := retryLayerMaterialize(context.Background(), "sha256:layer", func() error {
+		attempts++
+		return errors.New("layer not found")
+	})
+	require.EqualError(t, err, "layer not found")
+	require.Equal(t, layerMaterializeAttempts, attempts)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts = 0
+	err = retryLayerMaterialize(ctx, "sha256:layer", func() error {
+		attempts++
+		cancel()
+		return context.Canceled
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, attempts, "an abandoned container's read is not retried")
 }

@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -23,14 +28,38 @@ import (
 )
 
 const (
-	parallelBlobPullThreshold   int64 = 1 << 30 // 1 GiB
-	parallelBlobPullConcurrency       = 16
-	parallelBlobPullPartSize    int64 = 256 << 20 // 256 MiB
-	parallelBlobPullDiskReserve int64 = 1 << 30   // 1 GiB
+	// Every layer a container waits on is worth fanning out: a single registry
+	// stream from a remote worker is bounded by one TCP flow to one blob-store
+	// front-end, and some front-ends are an order of magnitude slower than
+	// others from the same site.
+	parallelBlobPullThreshold   int64 = 32 << 20 // 32 MiB
+	parallelBlobPullConcurrency       = 8        // per layer
+	parallelBlobPullPartSize    int64 = 32 << 20 // 32 MiB
+	parallelBlobPullDiskReserve int64 = 1 << 30  // 1 GiB
 	parallelBlobPullAttempts          = 3
+
+	// Ranges across all layers materializing on this worker share one
+	// connection budget so eight concurrent layers do not open 64 flows.
+	parallelBlobPullGlobalConcurrency = 24
+
+	// A range whose connection is starved is abandoned and its remaining bytes
+	// re-fetched on a new connection (to a different front-end where possible)
+	// instead of holding the whole layer hostage. See stragglerRule.
+	parallelBlobStragglerGrace            = 3 * time.Second
+	parallelBlobStragglerFloorPerSec      = 4 << 20 // 4 MiB/s
+	parallelBlobStragglerMedianDivisor    = 6
+	parallelBlobStragglerTailDivisor      = 4
+	parallelBlobStragglerMaxAbortsPerPart = 3
+	parallelBlobStragglerRateHistory      = 32
+	parallelBlobSlowEndpointTTL           = 2 * time.Minute
 )
 
 var errParallelBlobRangeUnsupported = errors.New("registry blob range request unsupported")
+
+// errParallelBlobStraggler marks an attempt the straggler monitor cut short.
+var errParallelBlobStraggler = errors.New("registry blob range attempt abandoned as straggler")
+
+var parallelBlobRangeSlots = make(chan struct{}, parallelBlobPullGlobalConcurrency)
 
 type parallelBlobPullConfig struct {
 	inner          http.RoundTripper
@@ -45,6 +74,16 @@ type parallelBlobPullConfig struct {
 	attempts       int
 	retryBackoff   time.Duration
 	availableBytes func(string) (int64, error)
+
+	// stragglerGrace <= 0 disables the straggler monitor (tests).
+	stragglerGrace time.Duration
+	stragglerFloor int64
+	// slots bounds concurrent range requests across transports; nil means the
+	// package-wide budget.
+	slots chan struct{}
+	// markSlowEndpoint records the remote address of an abandoned attempt so
+	// later dials avoid it. nil disables.
+	markSlowEndpoint func(string)
 }
 
 // parallelBlobTransport turns one large authenticated registry blob GET into
@@ -55,6 +94,71 @@ type parallelBlobPullConfig struct {
 // decompressed digest verifier.
 type parallelBlobTransport struct {
 	parallelBlobPullConfig
+}
+
+// rangePart is one in-flight range attempt, observed by the straggler monitor.
+type rangePart struct {
+	start, end int64
+	startedAt  time.Time
+	// bytes is the progress of the current attempt; done is the total already
+	// written to the file across attempts, so a resumed attempt only asks for
+	// the remainder.
+	bytes  atomic.Int64
+	done   int64
+	remote atomic.Pointer[string]
+	cancel context.CancelFunc
+	aborts atomic.Int32
+}
+
+func (p *rangePart) rate(now time.Time) (float64, time.Duration) {
+	elapsed := now.Sub(p.startedAt)
+	if elapsed <= 0 {
+		return 0, 0
+	}
+	return float64(p.bytes.Load()) / elapsed.Seconds(), elapsed
+}
+
+// stragglerRule picks the in-flight parts to abandon. A part is a straggler
+// when, past the grace period, it is below the absolute floor and far below
+// the median rate of its progressing peers and recently completed parts. The
+// relative test keeps a uniformly slow link from churning every connection;
+// the floor keeps a lone tail part from crawling when there is nothing to
+// compare against, and a part with no bytes at all past grace is always
+// abandoned. In the tail (no parts left to hand out) idle workers have nothing
+// better to do, so any part well below the reference rate is abandoned even
+// above the floor; the remainder is resumed, so an abort costs a reconnect.
+func stragglerRule(parts []*rangePart, completed []float64, tail bool, now time.Time, grace time.Duration, floor int64, maxAborts int) []*rangePart {
+	rates := make([]float64, 0, len(parts)+len(completed))
+	for _, part := range parts {
+		if rate, elapsed := part.rate(now); elapsed >= time.Second && rate > 0 {
+			rates = append(rates, rate)
+		}
+	}
+	rates = append(rates, completed...)
+	sort.Float64s(rates)
+	var reference float64
+	if len(rates) > 0 {
+		reference = rates[len(rates)/2]
+	}
+	if tail {
+		grace /= 2
+	}
+	var stragglers []*rangePart
+	for _, part := range parts {
+		rate, elapsed := part.rate(now)
+		if elapsed < grace || int(part.aborts.Load()) >= maxAborts {
+			continue
+		}
+		switch {
+		case rate == 0:
+		case tail && len(rates) >= 2 && rate < reference/parallelBlobStragglerTailDivisor:
+		case rate < float64(floor) && (len(rates) < 2 || rate < reference/parallelBlobStragglerMedianDivisor):
+		default:
+			continue
+		}
+		stragglers = append(stragglers, part)
+	}
+	return stragglers
 }
 
 func (s *OCIClipStorage) parallelBlobTransport(digest string) http.RoundTripper {
@@ -70,19 +174,129 @@ func (s *OCIClipStorage) parallelBlobTransport(digest string) http.RoundTripper 
 	}
 
 	return newParallelBlobTransport(parallelBlobPullConfig{
-		inner:          remote.DefaultTransport,
-		registryHost:   normalizedRegistryHost(s.storageInfo.RegistryURL),
-		digest:         digest,
-		size:           size,
-		tempDir:        s.diskCacheDir,
-		minimumFree:    saturatingAdd(size, uncompressedSize, parallelBlobPullDiskReserve),
-		threshold:      parallelBlobPullThreshold,
-		partSize:       parallelBlobPullPartSize,
-		concurrency:    parallelBlobPullConcurrency,
-		attempts:       parallelBlobPullAttempts,
-		retryBackoff:   100 * time.Millisecond,
-		availableBytes: filesystemAvailableBytes,
+		inner:            blobRangeTransport(),
+		registryHost:     normalizedRegistryHost(s.storageInfo.RegistryURL),
+		digest:           digest,
+		size:             size,
+		tempDir:          s.diskCacheDir,
+		minimumFree:      saturatingAdd(size, uncompressedSize, parallelBlobPullDiskReserve),
+		threshold:        parallelBlobPullThreshold,
+		partSize:         parallelBlobPullPartSize,
+		concurrency:      parallelBlobPullConcurrency,
+		attempts:         parallelBlobPullAttempts,
+		retryBackoff:     100 * time.Millisecond,
+		availableBytes:   filesystemAvailableBytes,
+		stragglerGrace:   parallelBlobStragglerGrace,
+		stragglerFloor:   parallelBlobStragglerFloorPerSec,
+		slots:            parallelBlobRangeSlots,
+		markSlowEndpoint: slowBlobEndpoints.mark,
 	})
+}
+
+// slowEndpointSet remembers blob-store front-ends that starved a range so new
+// dials prefer the others. Entries expire; a front-end is not slow forever.
+type slowEndpointSet struct {
+	mu        sync.Mutex
+	ttl       time.Duration
+	seen      map[string]time.Time
+	closeIdle func()
+}
+
+var slowBlobEndpoints = &slowEndpointSet{ttl: parallelBlobSlowEndpointTTL, seen: map[string]time.Time{}}
+
+func (s *slowEndpointSet) mark(remoteAddr string) {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	if host == "" {
+		return
+	}
+	s.mu.Lock()
+	s.seen[host] = time.Now().Add(s.ttl)
+	s.mu.Unlock()
+	if s.closeIdle != nil {
+		// Keep-alive would otherwise hand the next range the same starved
+		// connection. Re-dialing every pooled connection costs a handshake.
+		s.closeIdle()
+	}
+}
+
+func (s *slowEndpointSet) isSlow(ip string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, ok := s.seen[ip]
+	if !ok {
+		return false
+	}
+	if now.After(until) {
+		delete(s.seen, ip)
+		return false
+	}
+	return true
+}
+
+// dial resolves addr and connects to a randomly chosen address that is not
+// currently marked slow, so concurrent ranges spread over the blob store's
+// front-ends instead of piling onto whichever one the resolver listed first.
+func (s *slowEndpointSet) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || net.ParseIP(host) != nil {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	now := time.Now()
+	candidates := make([]net.IPAddr, 0, len(ips))
+	for _, ip := range ips {
+		if !s.isSlow(ip.String(), now) {
+			candidates = append(candidates, ip)
+		}
+	}
+	if len(candidates) == 0 {
+		candidates = ips
+	}
+	rand.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
+	var lastErr error
+	for _, ip := range candidates {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+var (
+	blobRangeTransportOnce sync.Once
+	blobRangeTransportInst http.RoundTripper
+)
+
+// blobRangeTransport is the shared HTTP transport for range subrequests. It
+// mirrors go-containerregistry's defaults but dials through slowBlobEndpoints
+// and keeps enough idle connections for the range fan-out to reuse.
+func blobRangeTransport() http.RoundTripper {
+	blobRangeTransportOnce.Do(func() {
+		base, ok := remote.DefaultTransport.(*http.Transport)
+		if !ok {
+			blobRangeTransportInst = remote.DefaultTransport
+			return
+		}
+		transport := base.Clone()
+		transport.DialContext = slowBlobEndpoints.dial
+		transport.MaxIdleConnsPerHost = parallelBlobPullGlobalConcurrency * 2
+		transport.MaxIdleConns = parallelBlobPullGlobalConcurrency * 4
+		slowBlobEndpoints.closeIdle = transport.CloseIdleConnections
+		blobRangeTransportInst = transport
+	})
+	return blobRangeTransportInst
 }
 
 func (s *OCIClipStorage) fetchLayerByDigestWithTransport(ctx context.Context, digest string, transport http.RoundTripper) (v1.Layer, error) {
@@ -128,7 +342,7 @@ func (t *parallelBlobTransport) RoundTrip(req *http.Request) (*http.Response, er
 
 	available, err := t.availableBytes(t.tempDir)
 	if err != nil || (t.minimumFree > 0 && available < t.minimumFree) {
-		log.Debug().
+		log.Warn().
 			Err(err).
 			Int64("available_bytes", available).
 			Int64("required_bytes", t.minimumFree).
@@ -191,6 +405,7 @@ func (t *parallelBlobTransport) prefetch(req *http.Request) (*http.Response, err
 		return nil, err
 	}
 
+	pullStart := time.Now()
 	group, groupCtx := errgroup.WithContext(req.Context())
 	var nextOffset atomic.Int64
 	nextOffset.Store(1)
@@ -203,6 +418,58 @@ func (t *parallelBlobTransport) prefetch(req *http.Request) (*http.Response, err
 	if int64(workers) > partCount {
 		workers = int(partCount)
 	}
+
+	var (
+		activeMu  sync.Mutex
+		active    = map[*rangePart]struct{}{}
+		completed []float64
+		aborts    atomic.Int64
+		retries   atomic.Int64
+	)
+	track := func(part *rangePart, on bool) {
+		activeMu.Lock()
+		if on {
+			active[part] = struct{}{}
+		} else {
+			delete(active, part)
+			if rate, elapsed := part.rate(time.Now()); elapsed > 0 && part.done == part.end-part.start+1 {
+				completed = append(completed, rate)
+				if len(completed) > parallelBlobStragglerRateHistory {
+					completed = completed[1:]
+				}
+			}
+		}
+		activeMu.Unlock()
+	}
+	monitorDone := make(chan struct{})
+	if t.stragglerGrace > 0 {
+		go func() {
+			ticker := time.NewTicker(t.stragglerGrace / 3)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-monitorDone:
+					return
+				case <-groupCtx.Done():
+					return
+				case now := <-ticker.C:
+					activeMu.Lock()
+					parts := make([]*rangePart, 0, len(active))
+					for part := range active {
+						parts = append(parts, part)
+					}
+					tail := nextOffset.Load() >= t.size
+					stragglers := stragglerRule(parts, completed, tail, now, t.stragglerGrace, t.stragglerFloor, parallelBlobStragglerMaxAbortsPerPart)
+					for _, part := range stragglers {
+						part.aborts.Add(1)
+						part.cancel()
+					}
+					activeMu.Unlock()
+				}
+			}
+		}()
+	}
+
 	for i := 0; i < workers; i++ {
 		group.Go(func() error {
 			for {
@@ -214,18 +481,32 @@ func (t *parallelBlobTransport) prefetch(req *http.Request) (*http.Response, err
 				if end < start || end >= t.size {
 					end = t.size - 1
 				}
-				if err := t.downloadRange(groupCtx, req, tempFile, start, end); err != nil {
+				part := &rangePart{start: start, end: end}
+				if err := t.downloadPart(groupCtx, req, tempFile, part, track, &aborts, &retries); err != nil {
 					return err
 				}
 			}
 		})
 	}
-	if err := group.Wait(); err != nil {
+	err = group.Wait()
+	close(monitorDone)
+	if err != nil {
 		return nil, err
 	}
 	if err := req.Context().Err(); err != nil {
 		return nil, err
 	}
+	elapsed := time.Since(pullStart)
+	log.Info().
+		Str("layer_digest", t.digest).
+		Int64("compressed_bytes", t.size).
+		Int64("parts", partCount).
+		Int("concurrency", workers).
+		Int64("straggler_aborts", aborts.Load()).
+		Int64("retries", retries.Load()).
+		Dur("duration", elapsed).
+		Float64("mib_per_s", float64(t.size)/(1<<20)/elapsed.Seconds()).
+		Msg("parallel registry blob prefetch complete")
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("rewind compressed layer prefetch file: %w", err)
 	}
@@ -247,10 +528,19 @@ func (t *parallelBlobTransport) prefetch(req *http.Request) (*http.Response, err
 	}, nil
 }
 
+// downloadRange fetches one range with the normal retry policy and without
+// straggler supervision (used for the probe).
 func (t *parallelBlobTransport) downloadRange(ctx context.Context, original *http.Request, dest *os.File, start, end int64) error {
-	want := end - start + 1
+	return t.downloadPart(ctx, original, dest, &rangePart{start: start, end: end}, nil, nil, nil)
+}
+
+// downloadPart fetches one range, retrying transient failures with backoff and
+// immediately re-issuing attempts the straggler monitor abandons. Straggler
+// aborts do not consume the transient-failure budget; they are bounded per part
+// by parallelBlobStragglerMaxAbortsPerPart inside stragglerRule.
+func (t *parallelBlobTransport) downloadPart(ctx context.Context, original *http.Request, dest *os.File, part *rangePart, track func(*rangePart, bool), aborts, retries *atomic.Int64) error {
 	var lastErr error
-	for attempt := 0; attempt < t.attempts; attempt++ {
+	for attempt := 0; attempt < t.attempts; {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -265,55 +555,150 @@ func (t *parallelBlobTransport) downloadRange(ctx context.Context, original *htt
 			}
 		}
 
-		req := original.Clone(ctx)
-		req.Header = original.Header.Clone()
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-		resp, err := (&http.Client{Transport: t.inner}).Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		if resp.StatusCode != http.StatusPartialContent {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
-				return fmt.Errorf("%w: status %s", errParallelBlobRangeUnsupported, resp.Status)
-			}
-			lastErr = fmt.Errorf("range %d-%d returned status %s", start, end, resp.Status)
-			continue
-		}
-
-		gotStart, gotEnd, gotTotal, err := parseContentRange(resp.Header.Get("Content-Range"))
-		if err != nil || gotStart != start || gotEnd != end || gotTotal != t.size {
-			_ = resp.Body.Close()
-			return fmt.Errorf("%w: requested %d-%d/%d, got %q", errParallelBlobRangeUnsupported, start, end, t.size, resp.Header.Get("Content-Range"))
-		}
-		if resp.ContentLength >= 0 && resp.ContentLength != want {
-			_ = resp.Body.Close()
-			return fmt.Errorf("%w: range %d-%d content length %d, expected %d", errParallelBlobRangeUnsupported, start, end, resp.ContentLength, want)
-		}
-
-		written, copyErr := io.CopyN(io.NewOffsetWriter(dest, start), resp.Body, want)
-		if copyErr == nil {
-			var extra [1]byte
-			n, readErr := resp.Body.Read(extra[:])
-			if n != 0 || (readErr != nil && !errors.Is(readErr, io.EOF)) {
-				copyErr = fmt.Errorf("range response exceeded declared length")
+		if t.slots != nil {
+			select {
+			case t.slots <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
-		closeErr := resp.Body.Close()
-		if copyErr == nil && closeErr == nil && written == want {
+		partCtx, cancel := context.WithCancel(ctx)
+		part.startedAt = time.Now()
+		part.bytes.Store(0)
+		part.remote.Store(nil)
+		part.cancel = cancel
+		if track != nil {
+			track(part, true)
+		}
+		err := t.downloadRangeAttempt(partCtx, original, dest, part)
+		if track != nil {
+			track(part, false)
+		}
+		// Only the straggler monitor cancels partCtx while ctx is alive; read
+		// that before our own cancel() below makes partCtx.Err() non-nil.
+		straggled := partCtx.Err() != nil && ctx.Err() == nil
+		cancel()
+		if t.slots != nil {
+			<-t.slots
+		}
+		if err == nil {
 			return nil
 		}
-		if copyErr != nil {
-			lastErr = copyErr
-		} else if closeErr != nil {
-			lastErr = closeErr
-		} else {
-			lastErr = fmt.Errorf("short range write: wrote %d, expected %d", written, want)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if straggled {
+			if aborts != nil {
+				aborts.Add(1)
+			}
+			remote := ""
+			if addr := part.remote.Load(); addr != nil {
+				remote = *addr
+			}
+			if t.markSlowEndpoint != nil && remote != "" {
+				t.markSlowEndpoint(remote)
+			}
+			rate, elapsed := part.rate(time.Now())
+			log.Debug().
+				Str("layer_digest", t.digest).
+				Int64("range_start", part.start).
+				Int64("range_end", part.end).
+				Int64("resume_at", part.start+part.done).
+				Str("remote", remote).
+				Float64("mib_per_s", rate/(1<<20)).
+				Dur("elapsed", elapsed).
+				Int32("aborts", part.aborts.Load()).
+				Msg("registry blob range straggler abandoned; resuming on a new connection")
+			lastErr = errParallelBlobStraggler
+			continue
+		}
+		if errors.Is(err, errParallelBlobRangeUnsupported) {
+			return err
+		}
+		lastErr = err
+		attempt++
+		if retries != nil && attempt < t.attempts {
+			retries.Add(1)
 		}
 	}
-	return fmt.Errorf("download range %d-%d after %d attempts: %w", start, end, t.attempts, lastErr)
+	return fmt.Errorf("download range %d-%d after %d attempts: %w", part.start, part.end, t.attempts, lastErr)
+}
+
+// downloadRangeAttempt performs a single validated range request into dest.
+func (t *parallelBlobTransport) downloadRangeAttempt(ctx context.Context, original *http.Request, dest *os.File, part *rangePart) error {
+	start, end := part.start+part.done, part.end
+	want := end - start + 1
+	if want <= 0 {
+		return nil
+	}
+
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Conn != nil && info.Conn.RemoteAddr() != nil {
+				addr := info.Conn.RemoteAddr().String()
+				part.remote.Store(&addr)
+			}
+		},
+	})
+	req := original.Clone(ctx)
+	req.Header = original.Header.Clone()
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	resp, err := (&http.Client{Transport: t.inner}).Do(req)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusPartialContent {
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+			return fmt.Errorf("%w: status %s", errParallelBlobRangeUnsupported, resp.Status)
+		}
+		return fmt.Errorf("range %d-%d returned status %s", start, end, resp.Status)
+	}
+
+	gotStart, gotEnd, gotTotal, err := parseContentRange(resp.Header.Get("Content-Range"))
+	if err != nil || gotStart != start || gotEnd != end || gotTotal != t.size {
+		_ = resp.Body.Close()
+		return fmt.Errorf("%w: requested %d-%d/%d, got %q", errParallelBlobRangeUnsupported, start, end, t.size, resp.Header.Get("Content-Range"))
+	}
+	if resp.ContentLength >= 0 && resp.ContentLength != want {
+		_ = resp.Body.Close()
+		return fmt.Errorf("%w: range %d-%d content length %d, expected %d", errParallelBlobRangeUnsupported, start, end, resp.ContentLength, want)
+	}
+
+	body := &rangeCountingReader{r: resp.Body, n: &part.bytes}
+	written, copyErr := io.CopyN(io.NewOffsetWriter(dest, start), body, want)
+	part.done += written
+	if copyErr == nil {
+		var extra [1]byte
+		n, readErr := resp.Body.Read(extra[:])
+		if n != 0 || (readErr != nil && !errors.Is(readErr, io.EOF)) {
+			copyErr = fmt.Errorf("range response exceeded declared length")
+		}
+	}
+	closeErr := resp.Body.Close()
+	if copyErr == nil && closeErr == nil && written == want {
+		return nil
+	}
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return fmt.Errorf("short range write: wrote %d, expected %d", written, want)
+}
+
+// rangeCountingReader adds bytes read to a shared counter (progress for stragglerRule).
+type rangeCountingReader struct {
+	r io.Reader
+	n *atomic.Int64
+}
+
+func (c *rangeCountingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
 }
 
 func parseContentRange(value string) (start, end, total int64, err error) {
