@@ -112,15 +112,12 @@ func (ca *ClipArchiver) applyLayerArtifact(index *btree.BTree, artifact *LayerAr
 		case LayerEntryOpaqueWhiteout:
 			ca.deleteRange(index, entry.Path+"/")
 		case LayerEntryHardLink:
-			targetNode := index.Get(&common.ClipNode{Path: entry.Target})
-			if targetNode != nil {
-				tn := targetNode.(*common.ClipNode)
-				index.Set(&common.ClipNode{
-					Path:     entry.Path,
-					NodeType: common.FileNode,
-					Attr:     tn.Attr,
-					Remote:   tn.Remote,
-				})
+			// The same inode under another name: a copy of the target, symlinks included
+			// (nix's optimised store hard-links symlinks into /nix/store/.links).
+			if targetNode := index.Get(&common.ClipNode{Path: entry.Target}); targetNode != nil {
+				linked := *targetNode.(*common.ClipNode)
+				linked.Path = entry.Path
+				index.Set(&linked)
 			}
 		}
 	}
