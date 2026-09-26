@@ -549,6 +549,21 @@ func TestSlowEndpointSetExpires(t *testing.T) {
 	require.False(t, set.isSlow("52.216.1.2", now), "expired entries are dropped")
 }
 
+func TestOrderFamiliesKeepsTheResolversPreference(t *testing.T) {
+	ips := []net.IPAddr{{IP: net.ParseIP("2600::1")}, {IP: net.ParseIP("52.216.1.2")}, {IP: net.ParseIP("2600::2")}, {IP: net.ParseIP("52.216.1.3")}}
+	strs := func() (out []string) {
+		for _, ip := range ips {
+			out = append(out, ip.IP.String())
+		}
+		return out
+	}
+
+	orderFamilies(ips, net.IPAddr{IP: net.ParseIP("52.216.1.9")})
+	require.Equal(t, []string{"52.216.1.2", "52.216.1.3", "2600::1", "2600::2"}, strs())
+	orderFamilies(ips, net.IPAddr{IP: net.ParseIP("2600::9")})
+	require.Equal(t, []string{"2600::1", "2600::2", "52.216.1.2", "52.216.1.3"}, strs())
+}
+
 // stallingBlobServer serves ranges normally except that the first attempt at
 // each range whose start is in stallStarts sends headers and a few bytes, then
 // hangs until the client abandons it.
