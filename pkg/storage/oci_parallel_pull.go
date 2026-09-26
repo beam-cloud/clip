@@ -260,6 +260,7 @@ func (s *slowEndpointSet) dial(ctx context.Context, network, addr string) (net.C
 		candidates = ips
 	}
 	rand.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
+	orderFamilies(candidates, ips[0])
 	var lastErr error
 	for _, ip := range candidates {
 		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
@@ -272,6 +273,17 @@ func (s *slowEndpointSet) dial(ctx context.Context, network, addr string) (net.C
 		}
 	}
 	return nil, lastErr
+}
+
+// orderFamilies moves addresses of the resolver's preferred family (its first
+// result, ranked by RFC 6724) ahead of the other. A host can hold a default
+// route for a family it cannot reach; an address of that family dialed first
+// waits out the full dial timeout.
+func orderFamilies(candidates []net.IPAddr, first net.IPAddr) {
+	preferV4 := first.IP.To4() != nil
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return (candidates[i].IP.To4() != nil) == preferV4 && (candidates[j].IP.To4() != nil) != preferV4
+	})
 }
 
 var (
