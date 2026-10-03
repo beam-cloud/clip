@@ -14,12 +14,15 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/klauspost/compress/zstd"
 	log "github.com/rs/zerolog/log"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 
 	common "github.com/beam-cloud/clip/pkg/common"
@@ -53,6 +56,11 @@ type ClipArchiverOptions struct {
 type ClipArchiver struct {
 }
 
+const batchedMetadataVersion = 2
+const metadataBatchSize = 32768
+const metadataBatchMaxBytes = 64 << 20
+const metadataBatchMaxFrames = 65536
+
 func NewClipArchiver() *ClipArchiver {
 	return &ClipArchiver{}
 }
@@ -61,7 +69,8 @@ func (ca *ClipArchiver) newIndex() *btree.BTree {
 	compare := func(a, b interface{}) bool {
 		return a.(*common.ClipNode).Path < b.(*common.ClipNode).Path
 	}
-	return btree.New(compare)
+	// Wider nodes reduce serial index construction work for large metadata archives.
+	return btree.NewOptions(compare, btree.Options{Degree: 128})
 }
 
 // InodeGenerator generates unique inodes for each ClipNode
@@ -402,33 +411,31 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 	}
 
 	// Verify the header
-	if !bytes.Equal(header.StartBytes[:], common.ClipFileStartBytes) || header.ClipFileFormatVersion != common.ClipFileFormatVersion {
+	if !bytes.Equal(header.StartBytes[:], common.ClipFileStartBytes) || (header.ClipFileFormatVersion != common.ClipFileFormatVersion && header.ClipFileFormatVersion != batchedMetadataVersion) {
 		return nil, common.ErrFileHeaderMismatch
 	}
 
-	// Seek to the correct position for the index
-	_, err = file.Seek(header.IndexPos, 0)
+	stat, err := file.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("error seeking to index: %v", err)
+		return nil, err
 	}
-
-	// Read and decode the index
-	indexBytes := make([]byte, header.IndexLength)
-	if _, err := io.ReadFull(file, indexBytes); err != nil {
-		return nil, fmt.Errorf("error reading index: %v", err)
+	if header.IndexPos < 0 || header.IndexLength < 0 || header.IndexPos > stat.Size() || header.IndexLength > stat.Size()-header.IndexPos {
+		return nil, fmt.Errorf("error reading index: %w", io.ErrUnexpectedEOF)
 	}
-
-	indexReader := bytes.NewReader(indexBytes)
-	indexDec := gob.NewDecoder(indexReader)
-
-	var nodes []*common.ClipNode
-	if err := indexDec.Decode(&nodes); err != nil {
-		return nil, fmt.Errorf("error decoding index: %v", err)
-	}
-
-	index := ca.newIndex()
-	for _, node := range nodes {
-		index.Set(node)
+	metadata := &common.ClipArchiveMetadata{Index: ca.newIndex(), Header: *header}
+	index := metadata.Index
+	if header.ClipFileFormatVersion == batchedMetadataVersion {
+		if err := ca.decodeIndexV2(file, metadata); err != nil {
+			return nil, err
+		}
+	} else {
+		var nodes []*common.ClipNode
+		if err := gob.NewDecoder(io.NewSectionReader(file, header.IndexPos, header.IndexLength)).Decode(&nodes); err != nil {
+			return nil, fmt.Errorf("error decoding index: %v", err)
+		}
+		for _, node := range nodes {
+			index.Load(node)
+		}
 	}
 
 	var storageInfo common.ClipStorageInfo
@@ -470,11 +477,8 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 		}
 	}
 
-	return &common.ClipArchiveMetadata{
-		Index:       index,
-		Header:      *header,
-		StorageInfo: storageInfo,
-	}, nil
+	metadata.StorageInfo = storageInfo
+	return metadata, nil
 }
 
 func (ca *ClipArchiver) Extract(opts ClipArchiverOptions) error {
@@ -798,4 +802,320 @@ func (ca *ClipArchiver) EncodeIndex(index *btree.BTree) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// Version 2 stores independent compressed batches with a fixed node field order.
+func (ca *ClipArchiver) encodeIndexV2(index *btree.BTree, sourceHash []byte, sourceSize int64) ([]byte, error) {
+	var nodes []*common.ClipNode
+	index.Ascend(nil, func(item interface{}) bool { nodes = append(nodes, item.(*common.ClipNode)); return true })
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithWindowSize(4<<20), zstd.WithEncoderCRC(true))
+	if err != nil {
+		return nil, err
+	}
+	defer encoder.Close()
+	var frames [][]byte
+	for start := 0; start < len(nodes); {
+		end := min(start+metadataBatchSize, len(nodes))
+		data := encodeNodeBatch(nodes[start:end])
+		for len(data) > metadataBatchMaxBytes {
+			if end-start == 1 {
+				return nil, fmt.Errorf("metadata node exceeds batch size limit")
+			}
+			end = start + (end-start)/2
+			data = encodeNodeBatch(nodes[start:end])
+		}
+		if len(frames) == metadataBatchMaxFrames {
+			return nil, fmt.Errorf("metadata exceeds batch count limit")
+		}
+		frames = append(frames, encoder.EncodeAll(data, nil))
+		start = end
+	}
+	var out bytes.Buffer
+	out.WriteString("CLIPBIN2")
+	out.Write(sourceHash)
+	binary.Write(&out, binary.LittleEndian, sourceSize)
+	binary.Write(&out, binary.LittleEndian, uint32(len(frames)))
+	for _, frame := range frames {
+		binary.Write(&out, binary.LittleEndian, uint32(len(frame)))
+	}
+	for _, frame := range frames {
+		out.Write(frame)
+	}
+	return out.Bytes(), nil
+}
+
+func (ca *ClipArchiver) decodeIndexV2(file *os.File, metadata *common.ClipArchiveMetadata) error {
+	header, index := &metadata.Header, metadata.Index
+	reader := io.NewSectionReader(file, header.IndexPos, header.IndexLength)
+	var marker [8]byte
+	if _, err := io.ReadFull(reader, marker[:]); err != nil {
+		return err
+	}
+	if string(marker[:]) != "CLIPBIN2" {
+		return fmt.Errorf("invalid v2 index marker")
+	}
+	var sourceHash [32]byte
+	if _, err := io.ReadFull(reader, sourceHash[:]); err != nil {
+		return err
+	}
+	metadata.OriginalArchiveHash = hex.EncodeToString(sourceHash[:])
+	if err := binary.Read(reader, binary.LittleEndian, &metadata.OriginalArchiveSize); err != nil {
+		return err
+	}
+	if metadata.OriginalArchiveSize < common.ClipHeaderLength {
+		return fmt.Errorf("invalid source archive size")
+	}
+	var count uint32
+	if err := binary.Read(reader, binary.LittleEndian, &count); err != nil {
+		return err
+	}
+	if count > metadataBatchMaxFrames || 52+int64(count)*4 > header.IndexLength {
+		return fmt.Errorf("invalid v2 index frame count")
+	}
+	lengths := make([]uint32, count)
+	if err := binary.Read(reader, binary.LittleEndian, lengths); err != nil {
+		return err
+	}
+	offsets := make([]int64, count)
+	offset := int64(52) + int64(count)*4
+	for i, length := range lengths {
+		if length == 0 || length > 2*metadataBatchMaxBytes || int64(length) > header.IndexLength-offset {
+			return fmt.Errorf("invalid v2 index frame length")
+		}
+		offsets[i] = offset
+		offset += int64(length)
+	}
+	if offset != header.IndexLength {
+		return fmt.Errorf("v2 index frame boundary mismatch")
+	}
+	batches := make([][]common.ClipNode, count)
+	group := new(errgroup.Group)
+	group.SetLimit(min(16, runtime.GOMAXPROCS(0)))
+	for i, length := range lengths {
+		section := io.NewSectionReader(file, header.IndexPos+offsets[i], int64(length))
+		group.Go(func() error {
+			compressed := make([]byte, length)
+			if _, err := io.ReadFull(section, compressed); err != nil {
+				return err
+			}
+			decoder, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxMemory(metadataBatchMaxBytes))
+			if err != nil {
+				return err
+			}
+			defer decoder.Close()
+			data, err := decoder.DecodeAll(compressed, nil)
+			if err != nil {
+				return err
+			}
+			batches[i], err = decodeNodeBatch(data)
+			return err
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	for _, batch := range batches {
+		for i := range batch {
+			index.Load(&batch[i])
+		}
+	}
+	return nil
+}
+
+func encodeNodeBatch(nodes []*common.ClipNode) []byte {
+	data := binary.AppendUvarint(nil, uint64(len(nodes)))
+	for _, n := range nodes {
+		for _, s := range []string{string(n.NodeType), n.Path, n.Target, n.ContentHash} {
+			data = binary.AppendUvarint(data, uint64(len(s)))
+			data = append(data, s...)
+		}
+		for _, value := range []uint64{n.Attr.Ino, n.Attr.Size, n.Attr.Blocks, n.Attr.Atime, n.Attr.Mtime, n.Attr.Ctime, uint64(n.Attr.Atimensec), uint64(n.Attr.Mtimensec), uint64(n.Attr.Ctimensec), uint64(n.Attr.Mode), uint64(n.Attr.Nlink), uint64(n.Attr.Uid), uint64(n.Attr.Gid), uint64(n.Attr.Rdev), uint64(n.Attr.Blksize), uint64(n.Attr.Padding)} {
+			data = binary.AppendUvarint(data, value)
+		}
+		data = binary.AppendVarint(data, n.DataPos)
+		data = binary.AppendVarint(data, n.DataLen)
+		if n.Remote == nil {
+			data = append(data, 0)
+			continue
+		}
+		data = append(data, 1)
+		data = binary.AppendUvarint(data, uint64(len(n.Remote.LayerDigest)))
+		data = append(data, n.Remote.LayerDigest...)
+		data = binary.AppendVarint(data, n.Remote.UOffset)
+		data = binary.AppendVarint(data, n.Remote.ULength)
+	}
+	return data
+}
+
+type nodeBatchReader struct {
+	data []byte
+	err  error
+}
+
+func (r *nodeBatchReader) uint() uint64 {
+	if r.err != nil {
+		return 0
+	}
+	value, n := binary.Uvarint(r.data)
+	if n <= 0 {
+		r.err = fmt.Errorf("invalid metadata integer")
+		return 0
+	}
+	r.data = r.data[n:]
+	return value
+}
+func (r *nodeBatchReader) int() int64 { value := r.uint(); return int64(value>>1) ^ -int64(value&1) }
+func (r *nodeBatchReader) bytes() []byte {
+	length := r.uint()
+	if length > uint64(len(r.data)) {
+		r.err = io.ErrUnexpectedEOF
+		return nil
+	}
+	value := r.data[:length]
+	r.data = r.data[length:]
+	return value
+}
+func (r *nodeBatchReader) string() string { return string(r.bytes()) }
+
+func internMetadataString(data []byte, known map[string]string) string {
+	value := known[string(data)]
+	if value == "" {
+		value = string(data)
+		known[value] = value
+	}
+	return value
+}
+
+func decodeNodeBatch(data []byte) ([]common.ClipNode, error) {
+	r := nodeBatchReader{data: data}
+	count := r.uint()
+	if count > metadataBatchSize || count > uint64(len(r.data))/23 {
+		return nil, fmt.Errorf("invalid metadata node count")
+	}
+	nodes := make([]common.ClipNode, count)
+	remotes := make([]common.RemoteRef, count)
+	known := make(map[string]string)
+	for i := range nodes {
+		n := &nodes[i]
+		n.NodeType = common.ClipNodeType(internMetadataString(r.bytes(), known))
+		n.Path = r.string()
+		n.Target = r.string()
+		n.ContentHash = r.string()
+		var a [16]uint64
+		for j := range a {
+			a[j] = r.uint()
+			if j >= 6 && a[j] > uint64(^uint32(0)) {
+				return nil, fmt.Errorf("metadata attribute overflow")
+			}
+		}
+		n.Attr = fuse.Attr{Ino: a[0], Size: a[1], Blocks: a[2], Atime: a[3], Mtime: a[4], Ctime: a[5], Atimensec: uint32(a[6]), Mtimensec: uint32(a[7]), Ctimensec: uint32(a[8]), Mode: uint32(a[9]), Nlink: uint32(a[10]), Owner: fuse.Owner{Uid: uint32(a[11]), Gid: uint32(a[12])}, Rdev: uint32(a[13]), Blksize: uint32(a[14]), Padding: uint32(a[15])}
+		n.DataPos = r.int()
+		n.DataLen = r.int()
+		switch r.uint() {
+		case 0:
+		case 1:
+			remotes[i] = common.RemoteRef{LayerDigest: internMetadataString(r.bytes(), known), UOffset: r.int(), ULength: r.int()}
+			n.Remote = &remotes[i]
+		default:
+			return nil, fmt.Errorf("invalid metadata remote flag")
+		}
+	}
+	if r.err != nil {
+		return nil, r.err
+	}
+	if len(r.data) != 0 {
+		return nil, fmt.Errorf("trailing metadata node data")
+	}
+	return nodes, nil
+}
+
+// TranscodeMetadata derives a deterministic batched OCI metadata archive without
+// changing its source. A nil metadata argument loads the source index first.
+func (ca *ClipArchiver) TranscodeMetadata(sourcePath, destinationPath string, metadata *common.ClipArchiveMetadata) error {
+	var err error
+	if metadata == nil {
+		metadata, err = ca.ExtractMetadata(sourcePath)
+		if err != nil {
+			return err
+		}
+	}
+	if metadata.Header.ClipFileFormatVersion != common.ClipFileFormatVersion || metadata.StorageInfo == nil || metadata.StorageInfo.Type() != string(common.StorageModeOCI) {
+		return fmt.Errorf("batched metadata requires a legacy OCI archive")
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	stat, err := source.Stat()
+	if err != nil {
+		return err
+	}
+	sourceAbs, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return err
+	}
+	destinationAbs, err := filepath.Abs(destinationPath)
+	if err != nil {
+		return err
+	}
+	if sourceAbs == destinationAbs {
+		return fmt.Errorf("source and destination archives must differ")
+	}
+	if destinationStat, err := os.Stat(destinationPath); err == nil && os.SameFile(stat, destinationStat) {
+		return fmt.Errorf("source and destination archives must differ")
+	}
+	headerBytes := make([]byte, common.ClipHeaderLength)
+	if _, err := source.ReadAt(headerBytes, 0); err != nil {
+		return err
+	}
+	sourceHeader, err := ca.DecodeHeader(headerBytes)
+	if err != nil {
+		return err
+	}
+	if *sourceHeader != metadata.Header {
+		return fmt.Errorf("metadata header does not match source archive")
+	}
+	header := metadata.Header
+	if header.StorageInfoPos < 0 || header.StorageInfoLength < 0 || header.StorageInfoPos > stat.Size() || header.StorageInfoLength > stat.Size()-header.StorageInfoPos {
+		return fmt.Errorf("invalid source storage info boundary")
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, source); err != nil {
+		return err
+	}
+	index, err := ca.encodeIndexV2(metadata.Index, hash.Sum(nil), stat.Size())
+	if err != nil {
+		return err
+	}
+	header.ClipFileFormatVersion = batchedMetadataVersion
+	header.IndexPos = common.ClipHeaderLength
+	header.IndexLength = int64(len(index))
+	header.StorageInfoPos = header.IndexPos + header.IndexLength
+	encoded, err := ca.EncodeHeader(&header)
+	if err != nil {
+		return err
+	}
+	output, err := os.CreateTemp(filepath.Dir(destinationPath), ".clip-batch-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(output.Name())
+	defer output.Close()
+	if _, err := output.Write(encoded); err != nil {
+		return err
+	}
+	if _, err := output.Write(index); err != nil {
+		return err
+	}
+	if _, err := io.CopyN(output, io.NewSectionReader(source, metadata.Header.StorageInfoPos, metadata.Header.StorageInfoLength), metadata.Header.StorageInfoLength); err != nil {
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		return err
+	}
+	if err := output.Close(); err != nil {
+		return err
+	}
+	return os.Rename(output.Name(), destinationPath)
 }

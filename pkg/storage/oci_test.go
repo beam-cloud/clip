@@ -59,6 +59,16 @@ type streamingMockCache struct {
 	nilStreamSize       int64
 }
 
+type warmPresenceCache struct {
+	streamingMockCache
+	exists bool
+	err    error
+}
+
+func (m *warmPresenceCache) ContentExists(string, struct{ RoutingKey string }) (bool, error) {
+	return m.exists, m.err
+}
+
 func (m *streamingMockCache) GetContentStream(hash string, _ struct{ RoutingKey string }) (<-chan []byte, int64, error) {
 	m.mu.Lock()
 	m.streamCalls++
@@ -1737,6 +1747,35 @@ func TestOCIStorage_FullContentCacheStreamAvoidsRegistry(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, testData, got)
 	require.Equal(t, 1, cache.streamCalls)
+}
+
+func TestOCIStorage_LayerWarmSkipsCompleteContent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		exists bool
+		err    error
+	}{{"complete", true, nil}, {"missing", false, nil}, {"unknown", false, errors.New("cache unavailable")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte("cached decompressed layer")
+			digest := v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("a", 64)}
+			sum := sha256.Sum256(data)
+			hash := hex.EncodeToString(sum[:])
+			cache := &warmPresenceCache{streamingMockCache: streamingMockCache{mockCache: mockCache{store: map[string][]byte{hash: data}}}, exists: tc.exists, err: tc.err}
+			info := &common.OCIStorageInfo{DecompressedHashByLayer: map[string]string{digest.String(): hash}}
+			storage := &OCIClipStorage{storageInfo: info, metadata: &common.ClipArchiveMetadata{StorageInfo: info}, contentCache: cache, contentCacheAvailable: true,
+				layerCache: map[string]v1.Layer{digest.String(): &mockLayer{digest: digest, fetchError: errors.New("registry should not be read")}}, diskCacheDir: t.TempDir()}
+			storage.runLayerDecompressWarm(digest.String(), hash, "test")
+			entries, err := os.ReadDir(storage.diskCacheDir)
+			require.NoError(t, err)
+			if tc.exists {
+				require.Empty(t, entries)
+				require.Zero(t, cache.streamCalls)
+			} else {
+				require.NotEmpty(t, entries)
+				require.Equal(t, 1, cache.streamCalls)
+			}
+		})
+	}
 }
 
 func TestOCIStorage_InvalidContentCacheStreamFallsBackToRegistry(t *testing.T) {
