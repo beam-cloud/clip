@@ -208,6 +208,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		ReadTraceObserver:     options.ReadTraceObserver,
 	})
 	if err != nil {
+		_ = archiveStorage.Cleanup()
 		return nil, nil, nil, fmt.Errorf("could not create filesystem: %v", err)
 	}
 
@@ -231,6 +232,7 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		MaxReadAhead:         1024 * 1024,
 	})
 	if err != nil {
+		_ = archiveStorage.Cleanup()
 		return nil, nil, nil, fmt.Errorf("could not create server: %v", err)
 	}
 
