@@ -212,7 +212,10 @@ func NewOCIClipStorage(opts OCIClipStorageOpts) (*OCIClipStorage, error) {
 		checkpointSuccessOnce: make(map[string]struct{}),
 		checkpointFailureOnce: make(map[string]struct{}),
 		contentCacheReadAhead: NewContentCacheReadAhead(opts.ContentCache, ContentCacheReadAheadOptions{}),
-		layerLimitByHash:      ociLayerLimitsByHash(opts.Metadata, &storageInfo),
+	}
+
+	if opts.ContentCacheAvailable && opts.ContentCache != nil && len(storageInfo.Layers) > 0 {
+		go storage.contentCacheReadLimit(storageInfo.DecompressedHashByLayer[storageInfo.Layers[0]], nil)
 	}
 
 	log.Info().
@@ -1086,6 +1089,11 @@ func (s *OCIClipStorage) unmarkLayerWarmAttempt(decompressedHash string) {
 }
 
 func (s *OCIClipStorage) runLayerDecompressWarm(layerDigest string, decompressedHash string, reason string) {
+	if cache, ok := s.contentCache.(ContentCacheExists); ok && s.contentCacheAvailable {
+		if exists, err := cache.ContentExists(decompressedHash, struct{ RoutingKey string }{RoutingKey: decompressedHash}); err == nil && exists {
+			return
+		}
+	}
 	backgroundLayerWarmSlots <- struct{}{}
 	defer func() { <-backgroundLayerWarmSlots }()
 

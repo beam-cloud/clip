@@ -33,13 +33,13 @@ const (
 	// front-end, and some front-ends are an order of magnitude slower than
 	// others from the same site.
 	parallelBlobPullThreshold   int64 = 32 << 20 // 32 MiB
-	parallelBlobPullConcurrency       = 8        // per layer
-	parallelBlobPullPartSize    int64 = 32 << 20 // 32 MiB
+	parallelBlobPullConcurrency       = 16       // per layer
+	parallelBlobPullPartSize    int64 = 16 << 20 // 16 MiB
 	parallelBlobPullDiskReserve int64 = 1 << 30  // 1 GiB
 	parallelBlobPullAttempts          = 3
 
 	// Ranges across all layers materializing on this worker share one
-	// connection budget so eight concurrent layers do not open 64 flows.
+	// connection budget so concurrent layers do not multiply the flow count.
 	parallelBlobPullGlobalConcurrency = 24
 
 	// A range whose connection is starved is abandoned and its remaining bytes

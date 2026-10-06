@@ -69,5 +69,5 @@ func (s *LocalClipStorage) Metadata() *common.ClipArchiveMetadata {
 }
 
 func (s *LocalClipStorage) Cleanup() error {
-	return nil
+	return s.fileHandle.Close()
 }

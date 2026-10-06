@@ -60,6 +60,8 @@ func TestNewClipStorageLocalModeOverridesRemoteMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.IsType(t, &LocalClipStorage{}, storage)
 	require.NoError(t, storage.Cleanup())
+	_, err = storage.(*LocalClipStorage).fileHandle.Stat()
+	require.ErrorIs(t, err, os.ErrClosed)
 }
 
 // TestDecompressedHashMapping verifies that layer digest to decompressed hash mapping works

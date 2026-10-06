@@ -57,9 +57,11 @@ func (n *ClipNode) IsSymlink() bool {
 }
 
 type ClipArchiveMetadata struct {
-	Header      ClipArchiveHeader
-	Index       *btree.BTree
-	StorageInfo ClipStorageInfo
+	Header              ClipArchiveHeader
+	Index               *btree.BTree
+	StorageInfo         ClipStorageInfo
+	OriginalArchiveHash string
+	OriginalArchiveSize int64
 }
 
 func (m *ClipArchiveMetadata) Insert(node *ClipNode) {

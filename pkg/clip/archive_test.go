@@ -1,18 +1,26 @@
 package clip
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
+	"encoding/gob"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"archive/tar"
 
+	"github.com/beam-cloud/clip/pkg/common"
 	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/stretchr/testify/require"
 )
 
 func generateRandomContent(size int) []byte {
@@ -252,4 +260,134 @@ func BenchmarkCreateArchiveFromOCIImage(b *testing.B) {
 		duration := time.Since(start)
 		b.Logf("Archive creation took %s", duration)
 	}
+}
+
+func TestExtractMetadataIndexCompatibility(t *testing.T) {
+	nodes := []*common.ClipNode{{Path: "c"}, {Path: "a"}, {Path: "b"}, {Path: "b", ContentHash: "replacement"}}
+	var index bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&index).Encode(nodes))
+	for _, tc := range []struct {
+		name   string
+		length int64
+		valid  bool
+	}{{"unordered and duplicate nodes", int64(index.Len()), true}, {"truncated index boundary", int64(index.Len() - 1), false}, {"index exceeds file", int64(index.Len() + 1), false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			header := common.ClipArchiveHeader{ClipFileFormatVersion: common.ClipFileFormatVersion, IndexPos: common.ClipHeaderLength, IndexLength: tc.length}
+			copy(header.StartBytes[:], common.ClipFileStartBytes)
+			archiver := NewClipArchiver()
+			encoded, err := archiver.EncodeHeader(&header)
+			require.NoError(t, err)
+			path := filepath.Join(t.TempDir(), "image.clip")
+			require.NoError(t, os.WriteFile(path, append(encoded, index.Bytes()...), 0600))
+			metadata, err := archiver.ExtractMetadata(path)
+			if !tc.valid {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 3, metadata.Index.Len())
+			require.Equal(t, "replacement", metadata.Index.Get(&common.ClipNode{Path: "b"}).(*common.ClipNode).ContentHash)
+		})
+	}
+}
+
+func TestTranscodeMetadata(t *testing.T) {
+	archiver := NewClipArchiver()
+	index := archiver.newIndex()
+	node := &common.ClipNode{NodeType: common.FileNode, Path: "/file", Target: "target", ContentHash: "\x00\xff", DataPos: -7, DataLen: 42,
+		Attr:   fuse.Attr{Ino: 1, Size: 2, Blocks: 3, Atime: 4, Mtime: 5, Ctime: 6, Atimensec: 7, Mtimensec: 8, Ctimensec: 9, Mode: 10, Nlink: 11, Owner: fuse.Owner{Uid: 12, Gid: 13}, Rdev: 14, Blksize: 15, Padding: 16},
+		Remote: &common.RemoteRef{LayerDigest: "layer", UOffset: -11, ULength: 17}}
+	index.Set(node)
+	index.Set(&common.ClipNode{Path: "/nil", NodeType: common.SymLinkNode})
+	source := filepath.Join(t.TempDir(), "image.rclip")
+	info := common.OCIStorageInfo{Layers: []string{"layer"}, DecompressedHashByLayer: map[string]string{"b": "2", "a": "1"}}
+	require.NoError(t, archiver.CreateRemoteArchive(info, &common.ClipArchiveMetadata{Index: index}, source))
+	original, err := os.ReadFile(source)
+	require.NoError(t, err)
+	first := source + ".batch"
+	require.NoError(t, archiver.TranscodeMetadata(source, first, nil))
+	require.NoError(t, gob.NewEncoder(io.Discard).Encode(struct{ Unrelated string }{"other type"}))
+	second := source + ".second"
+	require.NoError(t, archiver.TranscodeMetadata(source, second, nil))
+	encoded, err := os.ReadFile(first)
+	require.NoError(t, err)
+	other, err := os.ReadFile(second)
+	require.NoError(t, err)
+	require.Equal(t, encoded, other)
+	metadata, err := archiver.ExtractMetadata(first)
+	require.NoError(t, err)
+	require.Equal(t, calculateChecksum(original), metadata.OriginalArchiveHash)
+	require.Equal(t, int64(len(original)), metadata.OriginalArchiveSize)
+	require.Equal(t, index.Len(), metadata.Index.Len())
+	require.Equal(t, node, metadata.Index.Get(node))
+	require.Nil(t, metadata.Index.Get(&common.ClipNode{Path: "/nil"}).(*common.ClipNode).Remote)
+	require.Equal(t, info, metadata.StorageInfo)
+	require.Equal(t, original[int64(len(original))-metadata.Header.StorageInfoLength:], encoded[metadata.Header.StorageInfoPos:])
+	require.Error(t, archiver.TranscodeMetadata(source, source, nil))
+	failed := source + ".directory"
+	require.NoError(t, os.Mkdir(failed, 0700))
+	require.Error(t, archiver.TranscodeMetadata(source, failed, nil))
+	temporary, err := filepath.Glob(filepath.Join(filepath.Dir(source), ".clip-batch-*"))
+	require.NoError(t, err)
+	require.Empty(t, temporary)
+	unchanged, err := os.ReadFile(source)
+	require.NoError(t, err)
+	require.Equal(t, original, unchanged)
+}
+
+func TestNodeBatchRejectsInvalidInput(t *testing.T) {
+	encoded := encodeNodeBatch([]*common.ClipNode{{Path: "node"}})
+	for _, invalid := range [][]byte{nil, {0xff}, encoded[:len(encoded)-1], append(encoded, 0)} {
+		_, err := decodeNodeBatch(invalid)
+		require.Error(t, err)
+	}
+}
+
+func TestBatchedIndexRejectsOversizedCompressedFrame(t *testing.T) {
+	var index bytes.Buffer
+	index.WriteString(batchedMetadataMagic)
+	index.Write(make([]byte, sha256.Size))
+	require.NoError(t, binary.Write(&index, binary.LittleEndian, int64(common.ClipHeaderLength)))
+	require.NoError(t, binary.Write(&index, binary.LittleEndian, uint32(1)))
+	length := uint32(2*metadataBatchMaxBytes + 1)
+	require.NoError(t, binary.Write(&index, binary.LittleEndian, length))
+	file, err := os.CreateTemp(t.TempDir(), "sparse-index")
+	require.NoError(t, err)
+	defer file.Close()
+	_, err = file.Write(index.Bytes())
+	require.NoError(t, err)
+	require.NoError(t, file.Truncate(int64(index.Len())+int64(length)))
+	metadata := &common.ClipArchiveMetadata{Header: common.ClipArchiveHeader{IndexLength: int64(index.Len()) + int64(length)}, Index: NewClipArchiver().newIndex()}
+	require.ErrorContains(t, NewClipArchiver().decodeIndexV2(file, metadata), "invalid v2 index frame length")
+}
+
+func TestBatchedCodecGolden(t *testing.T) {
+	index := NewClipArchiver().newIndex()
+	for i := 0; i < 40000; i++ {
+		index.Set(&common.ClipNode{NodeType: common.FileNode, Path: fmt.Sprintf("/usr/lib/library-%03d.so", i), ContentHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Attr: fuse.Attr{Ino: uint64(i + 1), Size: 1048576, Mode: 0100644, Nlink: 1}, Remote: &common.RemoteRef{LayerDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", UOffset: int64(i) * 1048576, ULength: 1048576}})
+	}
+	encoded, err := NewClipArchiver().encodeIndexV2(index, make([]byte, sha256.Size), common.ClipHeaderLength)
+	require.NoError(t, err)
+	// The batch version must change if codec options or dependency changes alter this hash.
+	require.Equal(t, "f9bde62963b666d90e23ca93ed120a374fc513d109024ba5d76a93cc123fcfa4", calculateChecksum(encoded))
+}
+
+func TestBatchedIndexSplitsLongPaths(t *testing.T) {
+	archiver := NewClipArchiver()
+	index := archiver.newIndex()
+	for i := 0; i < 18000; i++ {
+		index.Load(&common.ClipNode{Path: fmt.Sprintf("/%05d/%s", i, strings.Repeat("p", 3800))})
+	}
+	encoded, err := archiver.encodeIndexV2(index, make([]byte, sha256.Size), common.ClipHeaderLength)
+	require.NoError(t, err)
+	file, err := os.CreateTemp(t.TempDir(), "index")
+	require.NoError(t, err)
+	defer file.Close()
+	_, err = file.Write(encoded)
+	require.NoError(t, err)
+	metadata := &common.ClipArchiveMetadata{Header: common.ClipArchiveHeader{IndexLength: int64(len(encoded))}, Index: archiver.newIndex()}
+	require.NoError(t, archiver.decodeIndexV2(file, metadata))
+	require.Equal(t, index.Len(), metadata.Index.Len())
+	require.Equal(t, index.Min(), metadata.Index.Min())
+	require.Equal(t, index.Max(), metadata.Index.Max())
 }
