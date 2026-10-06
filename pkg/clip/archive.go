@@ -56,10 +56,14 @@ type ClipArchiverOptions struct {
 type ClipArchiver struct {
 }
 
-const batchedMetadataVersion = 2
-const metadataBatchSize = 32768
-const metadataBatchMaxBytes = 64 << 20
-const metadataBatchMaxFrames = 65536
+const (
+	batchedMetadataVersion      uint8 = 2
+	batchedMetadataMagic              = "CLIPBIN2"
+	batchedMetadataHeaderLength       = int64(len(batchedMetadataMagic) + sha256.Size + 8 + 4)
+	metadataBatchSize                 = 32768
+	metadataBatchMaxBytes             = 64 << 20
+	metadataBatchMaxFrames            = 65536
+)
 
 func NewClipArchiver() *ClipArchiver {
 	return &ClipArchiver{}
@@ -831,7 +835,7 @@ func (ca *ClipArchiver) encodeIndexV2(index *btree.BTree, sourceHash []byte, sou
 		start = end
 	}
 	var out bytes.Buffer
-	out.WriteString("CLIPBIN2")
+	out.WriteString(batchedMetadataMagic)
 	out.Write(sourceHash)
 	binary.Write(&out, binary.LittleEndian, sourceSize)
 	binary.Write(&out, binary.LittleEndian, uint32(len(frames)))
@@ -847,14 +851,14 @@ func (ca *ClipArchiver) encodeIndexV2(index *btree.BTree, sourceHash []byte, sou
 func (ca *ClipArchiver) decodeIndexV2(file *os.File, metadata *common.ClipArchiveMetadata) error {
 	header, index := &metadata.Header, metadata.Index
 	reader := io.NewSectionReader(file, header.IndexPos, header.IndexLength)
-	var marker [8]byte
+	var marker [len(batchedMetadataMagic)]byte
 	if _, err := io.ReadFull(reader, marker[:]); err != nil {
 		return err
 	}
-	if string(marker[:]) != "CLIPBIN2" {
+	if string(marker[:]) != batchedMetadataMagic {
 		return fmt.Errorf("invalid v2 index marker")
 	}
-	var sourceHash [32]byte
+	var sourceHash [sha256.Size]byte
 	if _, err := io.ReadFull(reader, sourceHash[:]); err != nil {
 		return err
 	}
@@ -869,7 +873,7 @@ func (ca *ClipArchiver) decodeIndexV2(file *os.File, metadata *common.ClipArchiv
 	if err := binary.Read(reader, binary.LittleEndian, &count); err != nil {
 		return err
 	}
-	if count > metadataBatchMaxFrames || 52+int64(count)*4 > header.IndexLength {
+	if count > metadataBatchMaxFrames || batchedMetadataHeaderLength+int64(count)*4 > header.IndexLength {
 		return fmt.Errorf("invalid v2 index frame count")
 	}
 	lengths := make([]uint32, count)
@@ -877,7 +881,7 @@ func (ca *ClipArchiver) decodeIndexV2(file *os.File, metadata *common.ClipArchiv
 		return err
 	}
 	offsets := make([]int64, count)
-	offset := int64(52) + int64(count)*4
+	offset := batchedMetadataHeaderLength + int64(count)*4
 	for i, length := range lengths {
 		if length == 0 || length > 2*metadataBatchMaxBytes || int64(length) > header.IndexLength-offset {
 			return fmt.Errorf("invalid v2 index frame length")

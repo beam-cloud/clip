@@ -344,19 +344,20 @@ func TestNodeBatchRejectsInvalidInput(t *testing.T) {
 }
 
 func TestBatchedIndexRejectsOversizedCompressedFrame(t *testing.T) {
-	index := make([]byte, 56)
-	copy(index, "CLIPBIN2")
-	binary.LittleEndian.PutUint64(index[40:], common.ClipHeaderLength)
-	binary.LittleEndian.PutUint32(index[48:], 1)
+	var index bytes.Buffer
+	index.WriteString(batchedMetadataMagic)
+	index.Write(make([]byte, sha256.Size))
+	require.NoError(t, binary.Write(&index, binary.LittleEndian, int64(common.ClipHeaderLength)))
+	require.NoError(t, binary.Write(&index, binary.LittleEndian, uint32(1)))
 	length := uint32(2*metadataBatchMaxBytes + 1)
-	binary.LittleEndian.PutUint32(index[52:], length)
+	require.NoError(t, binary.Write(&index, binary.LittleEndian, length))
 	file, err := os.CreateTemp(t.TempDir(), "sparse-index")
 	require.NoError(t, err)
 	defer file.Close()
-	_, err = file.Write(index)
+	_, err = file.Write(index.Bytes())
 	require.NoError(t, err)
-	require.NoError(t, file.Truncate(int64(len(index))+int64(length)))
-	metadata := &common.ClipArchiveMetadata{Header: common.ClipArchiveHeader{IndexLength: int64(len(index)) + int64(length)}, Index: NewClipArchiver().newIndex()}
+	require.NoError(t, file.Truncate(int64(index.Len())+int64(length)))
+	metadata := &common.ClipArchiveMetadata{Header: common.ClipArchiveHeader{IndexLength: int64(index.Len()) + int64(length)}, Index: NewClipArchiver().newIndex()}
 	require.ErrorContains(t, NewClipArchiver().decodeIndexV2(file, metadata), "invalid v2 index frame length")
 }
 
@@ -365,7 +366,7 @@ func TestBatchedCodecGolden(t *testing.T) {
 	for i := 0; i < 40000; i++ {
 		index.Set(&common.ClipNode{NodeType: common.FileNode, Path: fmt.Sprintf("/usr/lib/library-%03d.so", i), ContentHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Attr: fuse.Attr{Ino: uint64(i + 1), Size: 1048576, Mode: 0100644, Nlink: 1}, Remote: &common.RemoteRef{LayerDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", UOffset: int64(i) * 1048576, ULength: 1048576}})
 	}
-	encoded, err := NewClipArchiver().encodeIndexV2(index, make([]byte, 32), common.ClipHeaderLength)
+	encoded, err := NewClipArchiver().encodeIndexV2(index, make([]byte, sha256.Size), common.ClipHeaderLength)
 	require.NoError(t, err)
 	// The batch version must change if codec options or dependency changes alter this hash.
 	require.Equal(t, "f9bde62963b666d90e23ca93ed120a374fc513d109024ba5d76a93cc123fcfa4", calculateChecksum(encoded))
@@ -377,7 +378,7 @@ func TestBatchedIndexSplitsLongPaths(t *testing.T) {
 	for i := 0; i < 18000; i++ {
 		index.Load(&common.ClipNode{Path: fmt.Sprintf("/%05d/%s", i, strings.Repeat("p", 3800))})
 	}
-	encoded, err := archiver.encodeIndexV2(index, make([]byte, 32), common.ClipHeaderLength)
+	encoded, err := archiver.encodeIndexV2(index, make([]byte, sha256.Size), common.ClipHeaderLength)
 	require.NoError(t, err)
 	file, err := os.CreateTemp(t.TempDir(), "index")
 	require.NoError(t, err)
