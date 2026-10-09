@@ -25,7 +25,6 @@ import (
 	ocilayout "github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/klauspost/compress/gzip"
 	log "github.com/rs/zerolog/log"
 	"github.com/tidwall/btree"
 	"golang.org/x/sync/errgroup"
@@ -565,11 +564,11 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 ) (*LayerArtifact, error) {
 	compressedCounter := &countingReader{r: compressedRC}
 
-	gzr, err := gzip.NewReader(compressedCounter)
+	layerReader, err := common.DecompressLayer(compressedCounter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		return nil, fmt.Errorf("failed to open layer stream: %w", err)
 	}
-	defer gzr.Close()
+	defer layerReader.Close()
 
 	// Streaming hash computation via TeeReader. With SeedDecompressed the same
 	// decompressed stream is spooled to disk once and stored in the content
@@ -585,7 +584,7 @@ func (ca *ClipArchiver) indexLayerToArtifact(
 			hashWriter = io.MultiWriter(hasher, cacheSpool)
 		}
 	}
-	hashingReader := io.TeeReader(gzr, hashWriter)
+	hashingReader := io.TeeReader(layerReader, hashWriter)
 	uncompressedCounter := &countingReader{r: hashingReader, onRead: func(total int64) {
 		if onBytes != nil {
 			onBytes(total, compressedCounter.n)

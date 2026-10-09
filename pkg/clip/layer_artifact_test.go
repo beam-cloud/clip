@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/beam-cloud/clip/pkg/common"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,6 +22,11 @@ type tarEntry struct {
 }
 
 func buildLayer(t *testing.T, entries []tarEntry) []byte {
+	t.Helper()
+	return gzipLayer(t, buildTar(t, entries))
+}
+
+func buildTar(t *testing.T, entries []tarEntry) []byte {
 	t.Helper()
 
 	var tarBuf bytes.Buffer
@@ -46,13 +52,7 @@ func buildLayer(t *testing.T, entries []tarEntry) []byte {
 	}
 	require.NoError(t, tw.Close())
 
-	var gzBuf bytes.Buffer
-	gzw := gzip.NewWriter(&gzBuf)
-	_, err := io.Copy(gzw, &tarBuf)
-	require.NoError(t, err)
-	require.NoError(t, gzw.Close())
-
-	return gzBuf.Bytes()
+	return tarBuf.Bytes()
 }
 
 func indexLayerHelper(t *testing.T, archiver *ClipArchiver, compressed []byte, digest string) *LayerArtifact {
@@ -125,6 +125,40 @@ func TestLayerArtifactRoundTripDeterminism(t *testing.T) {
 	require.Contains(t, nodes, "/hard")
 	assert.Equal(t, nodes["/dir/a.txt"].Attr.Ino, nodes["/hard"].Attr.Ino, "hardlink copies target attrs")
 	assert.Equal(t, common.SymLinkNode, nodes["/link"].NodeType)
+}
+
+// A layer's files sit at the same offsets of its tar stream however the blob is
+// compressed, so the index of a zstd or uncompressed layer matches the gzip one's.
+func TestLayerArtifactIgnoresLayerCompression(t *testing.T) {
+	archiver := NewClipArchiver()
+	tarball := buildTar(t, []tarEntry{
+		{name: "dir/", typeflag: tar.TypeDir},
+		{name: "dir/a.txt", typeflag: tar.TypeReg, content: "hello"},
+		{name: "link", typeflag: tar.TypeSymlink, linkname: "dir/a.txt"},
+	})
+	encoder, err := zstd.NewWriter(nil)
+	require.NoError(t, err)
+
+	want := indexLayerHelper(t, archiver, gzipLayer(t, tarball), "sha256:layer")
+	for name, blob := range map[string][]byte{
+		"zstd":         encoder.EncodeAll(tarball, nil),
+		"uncompressed": tarball,
+	} {
+		got := indexLayerHelper(t, archiver, blob, "sha256:layer")
+		assert.Equal(t, want.Entries, got.Entries, name)
+		assert.Equal(t, want.DecompressedHash, got.DecompressedHash, name)
+		assert.Equal(t, want.UncompressedSize, got.UncompressedSize, name)
+	}
+}
+
+func gzipLayer(t *testing.T, tarball []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	_, err := gzw.Write(tarball)
+	require.NoError(t, err)
+	require.NoError(t, gzw.Close())
+	return buf.Bytes()
 }
 
 func TestLayerArtifactHardLinkToSymlink(t *testing.T) {
