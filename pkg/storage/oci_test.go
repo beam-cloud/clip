@@ -20,6 +20,7 @@ import (
 	"github.com/beam-cloud/clip/pkg/common"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1214,6 +1215,49 @@ func TestOCIStorage_ContentCacheUnavailableFallsBackToLayerFetch(t *testing.T) {
 	require.Equal(t, testData, dest)
 	_, statErr := os.Stat(storage.getDecompressedCachePath(decompressedHash))
 	require.NoError(t, statErr)
+}
+
+func TestOCIStorage_ReadsZstdAndUncompressedLayers(t *testing.T) {
+	testData := []byte("Hello, World! This is test data for OCI storage.")
+	hasher := sha256.New()
+	hasher.Write(testData)
+	decompressedHash := hex.EncodeToString(hasher.Sum(nil))
+	encoder, err := zstd.NewWriter(nil)
+	require.NoError(t, err)
+
+	for name, blob := range map[string][]byte{
+		"zstd":         encoder.EncodeAll(testData, nil),
+		"uncompressed": testData,
+	} {
+		t.Run(name, func(t *testing.T) {
+			digest := v1.Hash{Algorithm: "sha256", Hex: "abc123"}
+			cache := newMockCache()
+			cache.getError = ErrContentCacheUnavailable
+			metadata := &common.ClipArchiveMetadata{
+				StorageInfo: &common.OCIStorageInfo{
+					GzipIdxByLayer:          map[string]*common.GzipIndex{digest.String(): {}},
+					DecompressedHashByLayer: map[string]string{digest.String(): decompressedHash},
+				},
+			}
+			storage := &OCIClipStorage{
+				metadata:              metadata,
+				storageInfo:           metadata.StorageInfo.(*common.OCIStorageInfo),
+				layerCache:            map[string]v1.Layer{digest.String(): &mockLayer{digest: digest, compressedData: blob}},
+				diskCacheDir:          t.TempDir(),
+				contentCache:          cache,
+				contentCacheAvailable: true,
+			}
+			node := &common.ClipNode{
+				Remote: &common.RemoteRef{LayerDigest: digest.String(), ULength: int64(len(testData))},
+			}
+
+			dest := make([]byte, len(testData))
+			n, err := storage.ReadFile(node, dest, 0)
+
+			require.NoError(t, err)
+			require.Equal(t, testData, dest[:n])
+		})
+	}
 }
 
 func TestOCIStorage_LayerFetchError(t *testing.T) {
