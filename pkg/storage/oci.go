@@ -22,7 +22,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"github.com/klauspost/compress/gzip"
 	log "github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
@@ -1253,17 +1252,17 @@ func (s *OCIClipStorage) decompressAndCacheLayerContext(ctx context.Context, dig
 	})
 	defer stopCloseOnCancel()
 
-	gzr, err := gzip.NewReader(compressedRC)
+	layerReader, err := common.DecompressLayer(compressedRC)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "oci_registry", ctxErr
 		}
-		return "oci_registry", fmt.Errorf("failed to create gzip reader: %w", err)
+		return "oci_registry", fmt.Errorf("failed to open layer stream: %w", err)
 	}
-	defer gzr.Close()
+	defer layerReader.Close()
 
 	written, err := writeVerifiedLayer(diskPath, decompressedHash, func(w io.Writer) (int64, error) {
-		return io.Copy(w, &contextReader{ctx: ctx, reader: gzr})
+		return io.Copy(w, &contextReader{ctx: ctx, reader: layerReader})
 	})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -1387,18 +1386,18 @@ func restoreLayerFromCompressedContentCache(
 	defer reader.Close()
 	compressedHasher := sha256.New()
 	compressedReader := io.TeeReader(reader, compressedHasher)
-	gzr, err := gzip.NewReader(compressedReader)
+	layerReader, err := common.DecompressLayer(compressedReader)
 	if err != nil {
 		return 0, fmt.Errorf("open cached compressed layer: %w", err)
 	}
-	defer gzr.Close()
+	defer layerReader.Close()
 
 	written, err := writeVerifiedLayer(diskPath, decompressedHash, func(w io.Writer) (int64, error) {
-		written, err := io.Copy(w, &contextReader{ctx: ctx, reader: gzr})
+		written, err := io.Copy(w, &contextReader{ctx: ctx, reader: layerReader})
 		if err != nil {
 			return written, err
 		}
-		if err := gzr.Close(); err != nil {
+		if err := layerReader.Close(); err != nil {
 			return written, err
 		}
 		if _, err := io.Copy(io.Discard, &contextReader{ctx: ctx, reader: compressedReader}); err != nil {
@@ -1891,26 +1890,25 @@ func (s *OCIClipStorage) readWithCheckpoint(ctx context.Context, layerDigest str
 		}
 	}
 
-	// Create gzip reader starting from checkpoint
-	gzr, err := gzip.NewReader(compressedRC)
+	layerReader, err := common.DecompressLayer(compressedRC)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create gzip reader: %w", err)
+		return 0, fmt.Errorf("failed to open layer stream: %w", err)
 	}
-	defer gzr.Close()
+	defer layerReader.Close()
 
 	// Skip bytes in uncompressed stream from checkpoint to desired offset
 	skipBytes := wantUOffset - uOff
 	if skipBytes > 0 {
-		_, err := io.CopyN(io.Discard, gzr, skipBytes)
+		_, err := io.CopyN(io.Discard, layerReader, skipBytes)
 		if err != nil {
 			return 0, fmt.Errorf("failed to skip to desired uncompressed offset: %w", err)
 		}
 	}
 
 	// Read the requested data
-	n, err := io.ReadFull(gzr, dest)
+	n, err := io.ReadFull(layerReader, dest)
 	if err != nil {
-		return n, fmt.Errorf("failed to read from gzip stream: %w", err)
+		return n, fmt.Errorf("failed to read from layer stream: %w", err)
 	}
 
 	return n, nil
