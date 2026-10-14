@@ -261,18 +261,90 @@ func (s *slowEndpointSet) dial(ctx context.Context, network, addr string) (net.C
 	}
 	rand.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
 	orderFamilies(candidates, ips[0])
-	var lastErr error
+	// Preserve Happy Eyeballs after randomizing endpoints. DNS64 may advertise
+	// IPv6 addresses on a host whose subnet has no working NAT64 route.
+	ctx, cancel := context.WithTimeout(ctx, dialer.Timeout)
+	defer cancel()
+	return dialBlobCandidates(ctx, network, port, candidates, 300*time.Millisecond, dialer.DialContext)
+}
+
+// Race address families with a bounded delay, keeping endpoint order within
+// each family. The losing dial is canceled and any late socket is closed.
+func dialBlobCandidates(ctx context.Context, network, port string, candidates []net.IPAddr, fallbackDelay time.Duration, dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+	var families [2][]net.IPAddr
 	for _, ip := range candidates {
-		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-		if err == nil {
-			return conn, nil
+		v4 := ip.IP.To4() != nil
+		if (network == "tcp4" && !v4) || (network == "tcp6" && v4) {
+			continue
 		}
-		lastErr = err
-		if ctx.Err() != nil {
-			break
+		family := 0
+		if len(families[0]) > 0 && v4 != (families[0][0].IP.To4() != nil) {
+			family = 1
+		}
+		families[family] = append(families[family], ip)
+	}
+	if len(families[0]) == 0 {
+		return nil, fmt.Errorf("no blob endpoint addresses for %s", network)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	results := make(chan result)
+	start := func(ips []net.IPAddr) {
+		go func() {
+			var r result
+			for _, ip := range ips {
+				if r.err = ctx.Err(); r.err != nil {
+					break
+				}
+				r.conn, r.err = dial(ctx, network, net.JoinHostPort(ip.String(), port))
+				if r.err == nil {
+					break
+				}
+			}
+			select {
+			case results <- r:
+			case <-ctx.Done():
+				if r.conn != nil {
+					r.conn.Close()
+				}
+			}
+		}()
+	}
+	start(families[0])
+	timer := time.NewTimer(fallbackDelay)
+	defer timer.Stop()
+	started, completed := 1, 0
+	fallbackStarted := len(families[1]) == 0
+	startFallback := func() {
+		if !fallbackStarted {
+			fallbackStarted = true
+			started++
+			start(families[1])
 		}
 	}
-	return nil, lastErr
+	var lastErr error
+	for {
+		select {
+		case r := <-results:
+			if r.err == nil {
+				return r.conn, nil
+			}
+			lastErr = r.err
+			completed++
+			startFallback() // A failed primary need not wait for the timer.
+			if completed == started {
+				return nil, lastErr
+			}
+		case <-timer.C:
+			startFallback()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // orderFamilies moves addresses of the resolver's preferred family (its first

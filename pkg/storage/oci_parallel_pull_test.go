@@ -680,3 +680,88 @@ func TestParallelBlobTransportAbandonsStragglersAndRefetches(t *testing.T) {
 	require.Equal(t, []string{blobHost}, markedHosts, "the starving front-end is marked slow")
 	requireNoParallelTemps(t, tempDir)
 }
+
+func TestBlobDialFallsBackFromUnreachableIPv6(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	require.NoError(t, err)
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+	canceled := make(chan struct{})
+	dialer := &net.Dialer{}
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(address)
+		if net.ParseIP(host).To4() == nil {
+			<-ctx.Done()
+			close(canceled)
+			return nil, ctx.Err()
+		}
+		return dialer.DialContext(ctx, network, address)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := dialBlobCandidates(ctx, "tcp", port, []net.IPAddr{{IP: net.ParseIP("64:ff9b::7f00:1")}, {IP: net.ParseIP("127.0.0.1")}}, 10*time.Millisecond, dial)
+	require.NoError(t, err)
+	defer conn.Close()
+	peer := <-accepted
+	defer peer.Close()
+	_, err = conn.Write([]byte("origin"))
+	require.NoError(t, err)
+	data := make([]byte, 6)
+	_, err = io.ReadFull(peer, data)
+	require.NoError(t, err)
+	require.Equal(t, "origin", string(data))
+	select {
+	case <-canceled:
+	case <-ctx.Done():
+		t.Fatal("losing IPv6 dial was not canceled")
+	}
+}
+
+func TestBlobDialClosesLateLosingSocket(t *testing.T) {
+	late, latePeer := net.Pipe()
+	winner, winnerPeer := net.Pipe()
+	defer latePeer.Close()
+	defer winnerPeer.Close()
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(address)
+		if net.ParseIP(host).To4() == nil {
+			<-ctx.Done()
+			return late, nil
+		}
+		return winner, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := dialBlobCandidates(ctx, "tcp", "443", []net.IPAddr{{IP: net.ParseIP("64:ff9b::c000:201")}, {IP: net.ParseIP("192.0.2.1")}}, 10*time.Millisecond, dial)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.Same(t, winner, conn)
+	_ = latePeer.SetReadDeadline(time.Now().Add(time.Second)) // The peer may already be closed.
+	_, err = latePeer.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestBlobDialRespectsCancellationAndNetworkFamily(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	var attempts atomic.Int32
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(address)
+		require.NotNil(t, net.ParseIP(host).To4())
+		attempts.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	conn, err := dialBlobCandidates(ctx, "tcp4", "443", []net.IPAddr{{IP: net.ParseIP("64:ff9b::c000:201")}, {IP: net.ParseIP("192.0.2.1")}}, time.Second, dial)
+	require.Nil(t, conn)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, int32(1), attempts.Load())
+}
