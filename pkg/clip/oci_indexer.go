@@ -529,6 +529,8 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		decompressedHashes[layerDigestStr] = artifact.DecompressedHash
 	}
 
+	normalizeFileLinkCounts(index, nil)
+
 	cachedLayers := 0
 	for _, hit := range cacheHits {
 		if hit {
@@ -542,6 +544,39 @@ func (ca *ClipArchiver) IndexOCIImage(ctx context.Context, opts IndexOCIImageOpt
 		Msg("Successfully indexed image")
 
 	return index, layerDigests, gzipIdx, decompressedHashes, registryURL, repository, reference, imageMetadata, nil
+}
+
+func countFileLink(counts map[uint64]uint32, node *common.ClipNode) {
+	if node.NodeType == common.FileNode && node.Remote != nil && node.Attr.Ino != 0 {
+		counts[node.Attr.Ino]++
+	}
+}
+
+// loadCountedFileNode counts only the last visible node for a duplicate path.
+func loadCountedFileNode(index *btree.BTree, node *common.ClipNode, counts map[uint64]uint32) {
+	if prior := index.Load(node); prior != nil {
+		old := prior.(*common.ClipNode)
+		if old.NodeType == common.FileNode && old.Remote != nil && old.Attr.Ino != 0 {
+			counts[old.Attr.Ino]--
+		}
+	}
+	countFileLink(counts, node)
+}
+
+// normalizeFileLinkCounts derives regular-file link counts from the final visible
+// image, after every layer replacement and whiteout has been replayed.
+func normalizeFileLinkCounts(index *btree.BTree, counts map[uint64]uint32) {
+	if counts == nil {
+		counts = make(map[uint64]uint32)
+		index.Ascend(nil, func(item interface{}) bool { countFileLink(counts, item.(*common.ClipNode)); return true })
+	}
+	index.Ascend(nil, func(item interface{}) bool {
+		node := item.(*common.ClipNode)
+		if node.NodeType == common.FileNode && node.Remote != nil && node.Attr.Ino != 0 {
+			node.Attr.Nlink = counts[node.Attr.Ino]
+		}
+		return true
+	})
 }
 
 // indexLayerToArtifact processes a single layer using streaming I/O with zero memory overhead.

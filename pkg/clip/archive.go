@@ -428,8 +428,9 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 	}
 	metadata := &common.ClipArchiveMetadata{Index: ca.newIndex(), Header: *header}
 	index := metadata.Index
+	fileLinks := make(map[uint64]uint32)
 	if header.ClipFileFormatVersion == batchedMetadataVersion {
-		if err := ca.decodeIndexV2(file, metadata); err != nil {
+		if err := ca.decodeIndexV2(file, metadata, fileLinks); err != nil {
 			return nil, err
 		}
 	} else {
@@ -438,7 +439,7 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 			return nil, fmt.Errorf("error decoding index: %v", err)
 		}
 		for _, node := range nodes {
-			index.Load(node)
+			loadCountedFileNode(index, node, fileLinks)
 		}
 	}
 
@@ -482,6 +483,9 @@ func (ca *ClipArchiver) ExtractMetadata(archivePath string) (*common.ClipArchive
 	}
 
 	metadata.StorageInfo = storageInfo
+	if storageInfo != nil && storageInfo.Type() == string(common.StorageModeOCI) {
+		normalizeFileLinkCounts(index, fileLinks)
+	}
 	return metadata, nil
 }
 
@@ -848,7 +852,7 @@ func (ca *ClipArchiver) encodeIndexV2(index *btree.BTree, sourceHash []byte, sou
 	return out.Bytes(), nil
 }
 
-func (ca *ClipArchiver) decodeIndexV2(file *os.File, metadata *common.ClipArchiveMetadata) error {
+func (ca *ClipArchiver) decodeIndexV2(file *os.File, metadata *common.ClipArchiveMetadata, fileLinks map[uint64]uint32) error {
 	header, index := &metadata.Header, metadata.Index
 	reader := io.NewSectionReader(file, header.IndexPos, header.IndexLength)
 	var marker [len(batchedMetadataMagic)]byte
@@ -920,7 +924,7 @@ func (ca *ClipArchiver) decodeIndexV2(file *os.File, metadata *common.ClipArchiv
 	}
 	for _, batch := range batches {
 		for i := range batch {
-			index.Load(&batch[i])
+			loadCountedFileNode(index, &batch[i], fileLinks)
 		}
 	}
 	return nil

@@ -89,28 +89,33 @@ func (m *ClipArchiveMetadata) ListDirectory(path string) []fuse.DirEntry {
 	pivot := &ClipNode{Path: path + "\x00"}
 	pathLen := len(path)
 
-	m.Index.Ascend(pivot, func(a interface{}) bool {
-		node := a.(*ClipNode)
-		nodePath := node.Path
+	for {
+		var next string
+		m.Index.Ascend(pivot, func(a interface{}) bool {
+			node := a.(*ClipNode)
+			nodePath := node.Path
+			if len(nodePath) < pathLen || nodePath[:pathLen] != path {
+				return false
+			}
 
-		// Matching paths are contiguous in the index. Stop as soon as the
-		// traversal leaves this directory instead of scanning the rest of the
-		// archive.
-		if len(nodePath) < pathLen || nodePath[:pathLen] != path {
-			return false
-		}
-
-		relativePath := nodePath[pathLen:]
-		if relativePath == "" || strings.IndexByte(relativePath, '/') >= 0 {
+			relativePath := nodePath[pathLen:]
+			if slash := strings.IndexByte(relativePath, '/'); slash >= 0 {
+				// All descendants of this child sort before the same prefix
+				// with its final '/' incremented to '0'. Skip that range;
+				// scanning it would repeat the work for every ancestor.
+				next = path + relativePath[:slash] + "0"
+				return false
+			}
+			if relativePath != "" {
+				entries = append(entries, fuse.DirEntry{Ino: node.Attr.Ino, Mode: node.Attr.Mode, Name: relativePath})
+			}
 			return true
-		}
-		entries = append(entries, fuse.DirEntry{
-			Mode: node.Attr.Mode,
-			Name: relativePath,
 		})
-
-		return true
-	})
+		if next == "" {
+			break
+		}
+		pivot.Path = next
+	}
 
 	return entries
 }

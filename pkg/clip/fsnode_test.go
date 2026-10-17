@@ -401,11 +401,21 @@ func TestLegacyContentCacheReadAheadCoalescesAdjacentReads(t *testing.T) {
 	require.Equal(t, fuse.OK, status)
 	require.Equal(t, []byte("klmn"), readData)
 
+	// Sequential reads may prefetch the final 32-36 window asynchronously.
+	// Wait for it, then require each aligned window exactly once regardless
+	// of goroutine scheduling or cache-call order.
+	clipFS.contentCacheReadAhead.WaitPrefetches()
 	cache.mu.Lock()
-	require.Equal(t, 2, cache.getCalls)
-	require.Equal(t, []int64{0, 16}, cache.getOffsets)
-	require.Equal(t, []int64{16, 16}, cache.getLengths)
-	cache.mu.Unlock()
+	defer cache.mu.Unlock()
+	require.Equal(t, 3, cache.getCalls)
+	require.Len(t, cache.getOffsets, 3)
+	require.Len(t, cache.getLengths, 3)
+	windows := make(map[int64]int64)
+	for i, offset := range cache.getOffsets {
+		require.NotContains(t, windows, offset, "duplicate read-ahead window")
+		windows[offset] = cache.getLengths[i]
+	}
+	require.Equal(t, map[int64]int64{0: 16, 16: 16, 32: int64(len(data)) - 32}, windows)
 
 	remoteStorage.mu.Lock()
 	require.Zero(t, remoteStorage.readCalls)

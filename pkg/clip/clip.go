@@ -92,9 +92,36 @@ const immutableMetadataCacheTimeout = 24 * time.Hour
 func immutableFilesystemOptions() *fs.Options {
 	timeout := immutableMetadataCacheTimeout
 	return &fs.Options{
+		NullPermissions: true,
 		AttrTimeout:     &timeout,
 		EntryTimeout:    &timeout,
 		NegativeTimeout: &timeout,
+	}
+}
+
+type immutableNodeFS struct {
+	fuse.RawFileSystem
+	root      *FSNode
+	noOpenDir bool
+}
+
+func (f *immutableNodeFS) Init(server *fuse.Server) {
+	f.RawFileSystem.Init(server)
+	f.root.noOpen = server.KernelSettings().Flags&fuse.CAP_NO_OPEN_SUPPORT != 0
+	f.noOpenDir = server.KernelSettings().Flags&immutableOpenDirCapability != 0
+}
+
+func immutableMountOptions(maxWrite int) *fuse.MountOptions {
+	return &fuse.MountOptions{
+		Options:              []string{"ro"},
+		MaxBackground:        512,
+		ExtraCapabilities:    immutableOpenDirCapability,
+		DisableXAttrs:        true,
+		EnableSymlinkCaching: true,
+		SyncRead:             false,
+		RememberInodes:       true,
+		MaxWrite:             maxWrite,
+		MaxReadAhead:         1024 * 1024,
 	}
 }
 
@@ -222,15 +249,8 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		log.Info().Int("max_write", limit).Msg("capping FUSE read/write size to fit fs.pipe-max-size")
 		maxWrite = limit
 	}
-	server, err := fuse.NewServer(fs.NewNodeFS(root, immutableFilesystemOptions()), options.MountPoint, &fuse.MountOptions{
-		MaxBackground:        512,
-		DisableXAttrs:        true,
-		EnableSymlinkCaching: true,
-		SyncRead:             false,
-		RememberInodes:       true,
-		MaxWrite:             maxWrite,
-		MaxReadAhead:         1024 * 1024,
-	})
+	rawFS := &immutableNodeFS{RawFileSystem: fs.NewNodeFS(root, immutableFilesystemOptions()), root: clipfs.root}
+	server, err := fuse.NewServer(rawFS, options.MountPoint, immutableMountOptions(maxWrite))
 	if err != nil {
 		_ = archiveStorage.Cleanup()
 		return nil, nil, nil, fmt.Errorf("could not create server: %v", err)
