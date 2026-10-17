@@ -319,7 +319,9 @@ func TestTranscodeMetadata(t *testing.T) {
 	require.Equal(t, calculateChecksum(original), metadata.OriginalArchiveHash)
 	require.Equal(t, int64(len(original)), metadata.OriginalArchiveSize)
 	require.Equal(t, index.Len(), metadata.Index.Len())
-	require.Equal(t, node, metadata.Index.Get(node))
+	expected := *node
+	expected.Attr.Nlink = 1 // The OCI view contains one visible name for this inode.
+	require.Equal(t, &expected, metadata.Index.Get(node))
 	require.Nil(t, metadata.Index.Get(&common.ClipNode{Path: "/nil"}).(*common.ClipNode).Remote)
 	require.Equal(t, info, metadata.StorageInfo)
 	require.Equal(t, original[int64(len(original))-metadata.Header.StorageInfoLength:], encoded[metadata.Header.StorageInfoPos:])
@@ -358,7 +360,7 @@ func TestBatchedIndexRejectsOversizedCompressedFrame(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, file.Truncate(int64(index.Len())+int64(length)))
 	metadata := &common.ClipArchiveMetadata{Header: common.ClipArchiveHeader{IndexLength: int64(index.Len()) + int64(length)}, Index: NewClipArchiver().newIndex()}
-	require.ErrorContains(t, NewClipArchiver().decodeIndexV2(file, metadata), "invalid v2 index frame length")
+	require.ErrorContains(t, NewClipArchiver().decodeIndexV2(file, metadata, make(map[uint64]uint32)), "invalid v2 index frame length")
 }
 
 func TestBatchedCodecGolden(t *testing.T) {
@@ -386,7 +388,7 @@ func TestBatchedIndexSplitsLongPaths(t *testing.T) {
 	_, err = file.Write(encoded)
 	require.NoError(t, err)
 	metadata := &common.ClipArchiveMetadata{Header: common.ClipArchiveHeader{IndexLength: int64(len(encoded))}, Index: archiver.newIndex()}
-	require.NoError(t, archiver.decodeIndexV2(file, metadata))
+	require.NoError(t, archiver.decodeIndexV2(file, metadata, make(map[uint64]uint32)))
 	require.Equal(t, index.Len(), metadata.Index.Len())
 	require.Equal(t, index.Min(), metadata.Index.Min())
 	require.Equal(t, index.Max(), metadata.Index.Max())

@@ -22,6 +22,7 @@ type FSNode struct {
 	attr           fuse.Attr
 	dirEntriesOnce sync.Once
 	dirEntries     []fuse.DirEntry
+	noOpen         bool // root only; set during FUSE initialization before serving requests
 }
 
 const clipFileViewFDCacheSize = 2048
@@ -162,17 +163,39 @@ func (n *FSNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle
 
 func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	log.Debug().Str("path", n.clipNode.Path).Uint32("flags", flags).Msg("Open called")
+	if flags&syscall.O_ACCMODE != syscall.O_RDONLY || flags&(syscall.O_CREAT|syscall.O_TRUNC) != 0 {
+		return nil, 0, syscall.EROFS
+	}
 	if n.clipNode == nil || n.clipNode.NodeType != common.FileNode {
 		return nil, 0, fs.OK
 	}
+	if n.statelessOpen() {
+		// Linux retains the page cache and omits subsequent OPEN/RELEASE
+		// messages after ENOSYS when NO_OPEN_SUPPORT was negotiated.
+		return nil, 0, syscall.ENOSYS
+	}
 	return newClipFileHandle(n), fuse.FOPEN_KEEP_CACHE | fuse.FOPEN_NOFLUSH, fs.OK
+}
+
+func (n *FSNode) statelessOpen() bool {
+	return n.filesystem != nil && n.filesystem.root != nil && n.filesystem.root.noOpen
+}
+
+func (n *FSNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
+	if n.statelessOpen() {
+		// There are no writable handles. Linux remembers ENOSYS and skips
+		// later FLUSH messages, just as NOFLUSH does for the handle path.
+		return syscall.ENOSYS
+	}
+	return fs.OK
 }
 
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if fh, ok := f.(*clipFileHandle); ok && fh != nil {
 		return fh.Read(ctx, dest, off)
 	}
-	return n.readData(ctx, dest, off)
+	// Stateless reads must retain the same fd-backed client-local fast path.
+	return newClipFileHandle(n).Read(ctx, dest, off)
 }
 
 func (n *FSNode) readData(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
