@@ -161,6 +161,12 @@ func (n *FSNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle
 }
 
 func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	// Image handles hold no per-open state. On capable kernels ENOSYS
+	// disables OPEN/RELEASE RPCs for this immutable filesystem; reads still
+	// carry the node ID and offset. Older kernels keep the existing handle-based path.
+	if n.filesystem != nil && n.filesystem.statelessOpens {
+		return nil, 0, syscall.ENOSYS
+	}
 	log.Debug().Str("path", n.clipNode.Path).Uint32("flags", flags).Msg("Open called")
 	if n.clipNode == nil || n.clipNode.NodeType != common.FileNode {
 		return nil, 0, fs.OK
@@ -168,9 +174,21 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuse
 	return newClipFileHandle(n), fuse.FOPEN_KEEP_CACHE | fuse.FOPEN_NOFLUSH, fs.OK
 }
 
+// Without OPEN the kernel cannot receive FOPEN_NOFLUSH. Disable the equally
+// stateless FLUSH callback once as well; the image mount is read-only.
+func (n *FSNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
+	if n.filesystem != nil && n.filesystem.statelessOpens {
+		return syscall.ENOSYS
+	}
+	return fs.OK
+}
+
 func (n *FSNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if fh, ok := f.(*clipFileHandle); ok && fh != nil {
 		return fh.Read(ctx, dest, off)
+	}
+	if n.filesystem != nil && n.filesystem.statelessOpens {
+		return newClipFileHandle(n).Read(ctx, dest, off)
 	}
 	return n.readData(ctx, dest, off)
 }

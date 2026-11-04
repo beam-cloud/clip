@@ -60,6 +60,9 @@ type ExtractOptions struct {
 }
 
 type MountOptions struct {
+	// Stateless skips file and directory open/close RPCs on capable kernels.
+	// It mounts the immutable archive read-only with kernel permission checks.
+	Stateless             bool
 	Context               context.Context
 	ArchivePath           string
 	Metadata              *common.ClipArchiveMetadata
@@ -96,6 +99,15 @@ func immutableFilesystemOptions() *fs.Options {
 		EntryTimeout:    &timeout,
 		NegativeTimeout: &timeout,
 	}
+}
+
+// No-open reads are only enabled for the immutable image mount. Let the
+// kernel enforce permissions and reject writes before skipping OPEN RPCs.
+func immutableImageMountFlags(stateless bool) []string {
+	if stateless {
+		return []string{"ro", "default_permissions"}
+	}
+	return nil
 }
 
 // Create Archive
@@ -222,7 +234,15 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 		log.Info().Int("max_write", limit).Msg("capping FUSE read/write size to fit fs.pipe-max-size")
 		maxWrite = limit
 	}
-	server, err := fuse.NewServer(fs.NewNodeFS(root, immutableFilesystemOptions()), options.MountPoint, &fuse.MountOptions{
+	rawFS := fs.NewNodeFS(root, immutableFilesystemOptions())
+	var extraCapabilities uint64
+	if options.Stateless {
+		rawFS = &immutableDirectoryFS{RawFileSystem: rawFS, filesystem: clipfs}
+		extraCapabilities = noOpendirSupport
+	}
+	server, err := fuse.NewServer(rawFS, options.MountPoint, &fuse.MountOptions{
+		ExtraCapabilities:    extraCapabilities,
+		Options:              immutableImageMountFlags(options.Stateless),
 		MaxBackground:        512,
 		DisableXAttrs:        true,
 		EnableSymlinkCaching: true,
@@ -238,16 +258,16 @@ func MountArchive(options MountOptions) (func() error, <-chan error, *fuse.Serve
 
 	serverError := make(chan error, 1)
 	startServer := func() error {
+		go server.Serve()
+		// Finish mount initialization before callers may unmount the server.
+		if err := server.WaitMount(); err != nil {
+			_ = clipfs.closeViewFiles()
+			_ = archiveStorage.Cleanup()
+			serverError <- err
+			close(serverError)
+			return err
+		}
 		go func() {
-			go server.Serve()
-
-			if err := server.WaitMount(); err != nil {
-				_ = clipfs.closeViewFiles()
-				_ = archiveStorage.Cleanup()
-				serverError <- err
-				return
-			}
-
 			server.Wait()
 			_ = clipfs.closeViewFiles()
 			_ = archiveStorage.Cleanup()

@@ -21,6 +21,8 @@ type ClipFileSystemOpts struct {
 }
 
 type ClipFileSystem struct {
+	statelessOpens bool // Set once during FUSE Init, before requests are served.
+
 	storage               storage.ClipStorageInterface
 	root                  *FSNode
 	lookupCache           map[string]*lookupCacheEntry
