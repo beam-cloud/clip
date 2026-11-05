@@ -401,11 +401,16 @@ func TestLegacyContentCacheReadAheadCoalescesAdjacentReads(t *testing.T) {
 	require.Equal(t, fuse.OK, status)
 	require.Equal(t, []byte("klmn"), readData)
 
+	clipFS.contentCacheReadAhead.WaitPrefetches()
 	cache.mu.Lock()
-	require.Equal(t, 2, cache.getCalls)
-	require.Equal(t, []int64{0, 16}, cache.getOffsets)
-	require.Equal(t, []int64{16, 16}, cache.getLengths)
-	cache.mu.Unlock()
+	defer cache.mu.Unlock()
+	// Include the final EOF prefetch; its completion order is asynchronous.
+	windows := make(map[int64]int64, len(cache.getOffsets))
+	for i, offset := range cache.getOffsets {
+		windows[offset] = cache.getLengths[i]
+	}
+	require.Equal(t, 3, cache.getCalls)
+	require.Equal(t, map[int64]int64{0: 16, 16: 16, 32: 4}, windows)
 
 	remoteStorage.mu.Lock()
 	require.Zero(t, remoteStorage.readCalls)
