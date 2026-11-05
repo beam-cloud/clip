@@ -391,3 +391,48 @@ func TestBatchedIndexSplitsLongPaths(t *testing.T) {
 	require.Equal(t, index.Min(), metadata.Index.Min())
 	require.Equal(t, index.Max(), metadata.Index.Max())
 }
+
+func TestArchiveAndOCIPreserveSpecialPermissionBits(t *testing.T) {
+	source := t.TempDir()
+	for _, test := range []struct {
+		name string
+		mode os.FileMode
+		unix uint32
+		kind byte
+	}{
+		{"sudo", 0o755 | os.ModeSetuid, 0o4755, tar.TypeReg},
+		{"group", 0o750 | os.ModeSetgid, 0o2750, tar.TypeReg},
+		{"tmp", 0o777 | os.ModeSticky | os.ModeDir, 0o1777, tar.TypeDir},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(source, test.name)
+			if test.mode.IsDir() {
+				require.NoError(t, os.Mkdir(path, 0o755))
+			} else {
+				require.NoError(t, os.WriteFile(path, []byte("package content"), 0o644))
+			}
+			require.NoError(t, os.Chmod(path, test.mode))
+			ca := NewClipArchiver()
+			index := ca.newIndex()
+			require.NoError(t, ca.populateIndex(index, source))
+			node := index.Get(&common.ClipNode{Path: "/" + test.name})
+			if node == nil {
+				node = index.Get(&common.ClipNode{Path: test.name})
+			}
+			require.NotNil(t, node)
+			require.Equal(t, test.unix, node.(*common.ClipNode).Attr.Mode&unixPermissionMask)
+			require.Equal(t, test.unix, ca.tarModeToFuse(int64(test.unix), test.kind)&unixPermissionMask)
+			artifact := &LayerArtifact{Version: LayerArtifactVersion, LayerDigest: "sha256:mode-test", CheckpointMiB: 2, DecompressedHash: "content", Entries: []LayerEntry{{Kind: LayerEntryNode, Node: node.(*common.ClipNode)}}}
+			encoded, err := EncodeLayerArtifact(artifact)
+			require.NoError(t, err)
+			decoded, err := DecodeLayerArtifact(encoded, artifact.LayerDigest, artifact.CheckpointMiB)
+			require.NoError(t, err)
+			require.Equal(t, test.unix, decoded.Entries[0].Node.Attr.Mode&unixPermissionMask)
+			artifact.Version = 1
+			encoded, err = EncodeLayerArtifact(artifact)
+			require.NoError(t, err)
+			_, err = DecodeLayerArtifact(encoded, artifact.LayerDigest, artifact.CheckpointMiB)
+			require.Error(t, err, "indexes that discarded mode bits must not be reused")
+		})
+	}
+}
