@@ -13,7 +13,8 @@ import (
 // LayerArtifactVersion is baked into layer-index cache keys so that any change
 // to the artifact format or indexing semantics invalidates previously cached
 // artifacts.
-const LayerArtifactVersion = 1
+// Version 2 retains packaged setuid, setgid and sticky permission bits.
+const LayerArtifactVersion = 2
 
 // LayerEntryKind describes the type of operation a layer entry applies to the
 // merged image index.

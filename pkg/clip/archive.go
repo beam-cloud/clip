@@ -56,6 +56,8 @@ type ClipArchiverOptions struct {
 type ClipArchiver struct {
 }
 
+const unixPermissionMask = 0o7777
+
 const (
 	batchedMetadataVersion      uint8 = 2
 	batchedMetadataMagic              = "CLIPBIN2"
@@ -166,7 +168,7 @@ func (ca *ClipArchiver) populateIndex(index *btree.BTree, sourcePath string) err
 			}
 
 			// Determine the file mode and type
-			mode := uint32(stat.Mode & 0777) // preserve permission bits only
+			mode := uint32(stat.Mode) & unixPermissionMask // Preserve setuid, setgid and sticky bits.
 			switch stat.Mode & unix.S_IFMT {
 			case unix.S_IFDIR:
 				mode |= syscall.S_IFDIR

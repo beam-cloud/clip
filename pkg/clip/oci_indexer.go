@@ -938,7 +938,7 @@ func (ca *ClipArchiver) isRuntimeDirectory(path string) bool {
 
 // tarModeToFuse converts tar mode to FUSE mode
 func (ca *ClipArchiver) tarModeToFuse(tarMode int64, typeflag byte) uint32 {
-	mode := uint32(tarMode & 0777) // permission bits
+	mode := uint32(tarMode) & unixPermissionMask
 
 	switch typeflag {
 	case tar.TypeDir:
